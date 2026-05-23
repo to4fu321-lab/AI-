@@ -88,6 +88,12 @@ export function saveQuizResult(correct: boolean): void {
   localStorage.setItem('quizResults', JSON.stringify(results.slice(-30)));
 }
 
+export function getTodayQuizDone(): boolean {
+  if (typeof window === 'undefined') return false;
+  const results: QuizResult[] = JSON.parse(localStorage.getItem('quizResults') || '[]');
+  return results.some((r) => r.date === getTodayString());
+}
+
 export function getQuizResults(): QuizResult[] {
   if (typeof window === 'undefined') return [];
   return JSON.parse(localStorage.getItem('quizResults') || '[]');
