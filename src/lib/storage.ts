@@ -9,8 +9,51 @@ export interface Message {
   id: string;
   from: 'family' | 'senior';
   content: string;
+  imageData?: string; // base64
   timestamp: number;
   read: boolean;
+}
+
+export interface PhotoPost {
+  id: string;
+  imageData: string; // base64
+  caption: string;
+  timestamp: number;
+}
+
+export function getPhotoPosts(): PhotoPost[] {
+  if (typeof window === 'undefined') return [];
+  const data = localStorage.getItem('photoPosts');
+  return data ? JSON.parse(data) : [];
+}
+
+export function addPhotoPost(imageData: string, caption: string): void {
+  const posts = getPhotoPosts();
+  posts.unshift({ id: Date.now().toString(), imageData, caption, timestamp: Date.now() });
+  // 最大10件保持
+  localStorage.setItem('photoPosts', JSON.stringify(posts.slice(0, 10)));
+}
+
+export function compressImage(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX = 800;
+        let { width, height } = img;
+        if (width > height && width > MAX) { height = (height * MAX) / width; width = MAX; }
+        else if (height > MAX) { width = (width * MAX) / height; height = MAX; }
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.72));
+      };
+      img.src = e.target!.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export function getTodayString(): string {

@@ -139,6 +139,23 @@ export default function SeniorPage() {
         )}
       </div>
 
+      {/* お手紙ポストボタン */}
+      <div className="px-5 mb-4">
+        <Link href="/senior/post">
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            className="w-full bg-pink-500 text-white rounded-3xl py-5 px-6 flex items-center gap-4 shadow-lg"
+          >
+            <span className="text-4xl">📮</span>
+            <div className="text-left flex-1">
+              <p className="text-xl font-black">お手紙ポスト</p>
+              <p className="text-pink-100 text-sm font-medium">写真を撮って家族に送る</p>
+            </div>
+            <span className="text-2xl">→</span>
+          </motion.button>
+        </Link>
+      </div>
+
       {/* 日めくりカレンダーボタン */}
       <div className="px-5 mb-5">
         <Link href="/senior/calendar">
