@@ -165,6 +165,12 @@ export default function SeniorPage() {
             )}
           </div>
         </Link>
+        <Link href="/" className="flex-1">
+          <div className="py-4 flex flex-col items-center gap-1 text-gray-400">
+            <span className="text-2xl">🔄</span>
+            <span className="text-xs font-bold">切り替え</span>
+          </div>
+        </Link>
       </div>
     </div>
   );
