@@ -23,7 +23,7 @@ function getGreeting() {
   return 'こんばんは 🌙';
 }
 
-type GuideType = 'checkin' | 'messages' | 'quiz' | 'photo' | 'done';
+type GuideType = 'checkin' | 'messages' | 'quiz' | 'photo';
 
 function getGuide(checkin: boolean, unread: number, quizDone: boolean): GuideType {
   if (!checkin) return 'checkin';
@@ -33,7 +33,7 @@ function getGuide(checkin: boolean, unread: number, quizDone: boolean): GuideTyp
 }
 
 export default function SeniorPage() {
-  const [checkin, setCheckin]         = useState<ReturnType<typeof getTodayCheckin>>(null);
+  const [checkin, setCheckin]         = useState<{ date: string; mood: Mood; time: string } | null>(null);
   const [streak, setStreak]           = useState(0);
   const [unread, setUnread]           = useState(0);
   const [quizDone, setQuizDone]       = useState(false);
@@ -41,32 +41,52 @@ export default function SeniorPage() {
   const [name, setName]               = useState('');
   const [inputName, setInputName]     = useState('');
   const [showName, setShowName]       = useState(false);
+  const [loading, setLoading]         = useState(true);
 
   useEffect(() => {
-    const c = getTodayCheckin();
-    setCheckin(c);
-    setStreak(getStreak());
-    setUnread(getUnreadCount());
-    setQuizDone(getTodayQuizDone());
-    const n = getSeniorName();
-    if (n) setName(n); else setShowName(true);
+    (async () => {
+      const [c, s, u, q, n] = await Promise.all([
+        getTodayCheckin(),
+        getStreak(),
+        getUnreadCount(),
+        getTodayQuizDone(),
+        getSeniorName(),
+      ]);
+      setCheckin(c);
+      setStreak(s);
+      setUnread(u);
+      setQuizDone(q);
+      if (n) setName(n); else setShowName(true);
+      setLoading(false);
+    })();
   }, []);
 
-  const handleCheckin = (mood: Mood) => {
-    addCheckin(mood);
-    const c = getTodayCheckin();
+  const handleCheckin = async (mood: Mood) => {
+    await addCheckin(mood);
+    const [c, s] = await Promise.all([getTodayCheckin(), getStreak()]);
     setCheckin(c);
-    setStreak(getStreak());
+    setStreak(s);
     setJustWatered(true);
     setTimeout(() => setJustWatered(false), 2000);
   };
 
-  const handleNameSubmit = () => {
+  const handleNameSubmit = async () => {
     if (!inputName.trim()) return;
-    setSeniorName(inputName.trim());
+    await setSeniorName(inputName.trim());
     setName(inputName.trim());
     setShowName(false);
   };
+
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-amber-50">
+        <div className="text-center">
+          <div className="text-5xl mb-3">🌱</div>
+          <p className="text-green-800 font-bold">読み込み中…</p>
+        </div>
+      </div>
+    );
+  }
 
   /* ── 名前入力 ── */
   if (showName) {
@@ -112,11 +132,10 @@ export default function SeniorPage() {
         <Garden streak={streak} justWatered={justWatered} />
       </div>
 
-      {/* ★ ガイドカード（今日のおすすめ） */}
+      {/* ガイドカード */}
       <div className="px-5 mb-3 flex-shrink-0">
         <AnimatePresence mode="wait">
 
-          {/* チェックインがまだ */}
           {guide === 'checkin' && (
             <motion.div key="checkin"
               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
@@ -139,7 +158,6 @@ export default function SeniorPage() {
             </motion.div>
           )}
 
-          {/* 家族からメッセージあり */}
           {guide === 'messages' && (
             <Link href="/senior/messages">
               <motion.div key="messages"
@@ -160,7 +178,6 @@ export default function SeniorPage() {
             </Link>
           )}
 
-          {/* クイズがまだ */}
           {guide === 'quiz' && (
             <Link href="/senior/calendar">
               <motion.div key="quiz"
@@ -183,7 +200,6 @@ export default function SeniorPage() {
             </Link>
           )}
 
-          {/* 全部済み → 写真を勧める */}
           {guide === 'photo' && (
             <Link href="/senior/post">
               <motion.div key="photo"
@@ -208,7 +224,7 @@ export default function SeniorPage() {
         </AnimatePresence>
       </div>
 
-      {/* サブメニュー（横並び小ボタン） */}
+      {/* サブメニュー */}
       <div className="px-5 flex-shrink-0">
         <p className="text-slate-500 text-xs font-bold mb-2 px-1">ほかにできること</p>
         <div className="flex gap-3">

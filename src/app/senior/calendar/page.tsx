@@ -25,10 +25,10 @@ export default function CalendarPage() {
     setTimeout(() => setPhase('quiz'), 400);
   };
 
-  const handleAnswer = (i: number) => {
+  const handleAnswer = async (i: number) => {
     if (selected !== null || !quiz) return;
     setSelected(i);
-    saveQuizResult(i === quiz.answer);
+    await saveQuizResult(i === quiz.answer);
     setTimeout(() => setPhase('result'), 800);
   };
 

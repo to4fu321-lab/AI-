@@ -24,20 +24,31 @@ function formatTime(time: string) {
 }
 
 export default function FamilyPage() {
-  const [todayCheckin, setTodayCheckin] = useState<ReturnType<typeof getTodayCheckin>>(null);
+  const [todayCheckin, setTodayCheckin] = useState<{ date: string; mood: string; time: string } | null>(null);
   const [streak, setStreak]             = useState(0);
   const [seniorName, setSeniorName]     = useState('');
   const [recentCheckins, setRecent]     = useState<Checkin[]>([]);
   const [photos, setPhotos]             = useState<PhotoPost[]>([]);
-  const [rhythm, setRhythm]             = useState<ReturnType<typeof getRhythmAnalysis>>(null);
+  type RhythmData = { avgCheckinTime: string; rhythmVariation: number; shindoiCount: number; quizRate: number | null; alert: boolean } | null;
+  const [rhythm, setRhythm]             = useState<RhythmData>(null);
 
   useEffect(() => {
-    setTodayCheckin(getTodayCheckin());
-    setStreak(getStreak());
-    setSeniorName(getSeniorName() || '家族');
-    setRecent(getCheckins().slice(-7));
-    setPhotos(getPhotoPosts());
-    setRhythm(getRhythmAnalysis());
+    (async () => {
+      const [c, s, n, ch, ph, r] = await Promise.all([
+        getTodayCheckin(),
+        getStreak(),
+        getSeniorName(),
+        getCheckins(),
+        getPhotoPosts(),
+        getRhythmAnalysis(),
+      ]);
+      setTodayCheckin(c);
+      setStreak(s);
+      setSeniorName(n || '家族');
+      setRecent(ch.slice(-7));
+      setPhotos(ph);
+      setRhythm(r);
+    })();
   }, []);
 
   const moodInfo = todayCheckin ? MOOD_LABEL[todayCheckin.mood] : null;
@@ -225,7 +236,7 @@ export default function FamilyPage() {
               <div key={photo.id}
                 className="flex-shrink-0 w-40 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={photo.imageData} alt="お手紙" className="w-full h-28 object-cover" />
+                <img src={photo.image_data} alt="お手紙" className="w-full h-28 object-cover" />
                 <div className="p-2.5">
                   <p className="text-slate-900 font-bold text-xs leading-snug line-clamp-2">{photo.caption}</p>
                   <p className="text-slate-400 text-xs mt-1">

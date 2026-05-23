@@ -41,8 +41,7 @@ export default function PostPage() {
     const finalCaption = customText.trim() || caption;
     if (!finalCaption) return;
     setSending(true);
-    await new Promise((r) => setTimeout(r, 800));
-    addPhotoPost(compressed, finalCaption);
+    await addPhotoPost(compressed, finalCaption);
     setSending(false);
     setPhase('done');
   };
