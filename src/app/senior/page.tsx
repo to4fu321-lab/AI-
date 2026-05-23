@@ -139,6 +139,29 @@ export default function SeniorPage() {
         )}
       </div>
 
+      {/* 日めくりカレンダーボタン */}
+      <div className="px-5 mb-5">
+        <Link href="/senior/calendar">
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            className="w-full bg-red-600 text-white rounded-3xl py-5 px-6 flex items-center gap-4 shadow-lg"
+          >
+            <span className="text-4xl">📅</span>
+            <div className="text-left flex-1">
+              <p className="text-xl font-black">今日の日めくり</p>
+              <p className="text-red-200 text-sm font-medium">昭和クイズに挑戦！</p>
+            </div>
+            <motion.span
+              animate={{ x: [0, 4, 0] }}
+              transition={{ repeat: Infinity, duration: 1.2 }}
+              className="text-2xl"
+            >
+              →
+            </motion.span>
+          </motion.button>
+        </Link>
+      </div>
+
       {/* ② 今日のミッション（カード全体がタップエリア） */}
       <div className="px-5 mb-6">
         <h2 className="text-lg font-bold text-amber-900 mb-3">📋 今日のミッション</h2>
