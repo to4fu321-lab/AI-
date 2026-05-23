@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getTodayQuiz, getTodayDateLabel, type Quiz } from '@/lib/quizData';
+import { saveQuizResult } from '@/lib/storage';
 
 type Phase = 'calendar' | 'quiz' | 'result';
 
@@ -25,8 +26,9 @@ export default function CalendarPage() {
   };
 
   const handleAnswer = (i: number) => {
-    if (selected !== null) return;
+    if (selected !== null || !quiz) return;
     setSelected(i);
+    saveQuizResult(i === quiz.answer);
     setTimeout(() => setPhase('result'), 800);
   };
 
