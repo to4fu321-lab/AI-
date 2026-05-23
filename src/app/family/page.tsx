@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { motion, AnimatePresence } from 'framer-motion';
 import Garden from '@/components/Garden';
 import {
   getTodayCheckin, getStreak, getSeniorName,
@@ -9,11 +10,18 @@ import {
   type Checkin, type PhotoPost,
 } from '@/lib/storage';
 
-const MOOD_LABEL: Record<string, { emoji: string; label: string; color: string }> = {
-  genki:   { emoji: '😄', label: '元気！',   color: 'text-green-800' },
-  maama:   { emoji: '🙂', label: 'まあまあ', color: 'text-yellow-800' },
-  shindoi: { emoji: '😔', label: 'しんどい', color: 'text-blue-800' },
+const MOOD_LABEL: Record<string, { emoji: string; label: string; bg: string }> = {
+  genki:   { emoji: '😄', label: '元気！',   bg: 'bg-green-500'  },
+  maama:   { emoji: '🙂', label: 'まあまあ', bg: 'bg-yellow-500' },
+  shindoi: { emoji: '😔', label: 'しんどい', bg: 'bg-blue-500'   },
 };
+
+function formatTime(time: string) {
+  const [h, m] = time.split(':').map(Number);
+  const period = h < 12 ? '午前' : '午後';
+  const displayH = h > 12 ? h - 12 : h;
+  return `${period}${displayH}:${String(m).padStart(2, '0')}`;
+}
 
 export default function FamilyPage() {
   const [todayCheckin, setTodayCheckin] = useState<ReturnType<typeof getTodayCheckin>>(null);
@@ -27,107 +35,204 @@ export default function FamilyPage() {
     setTodayCheckin(getTodayCheckin());
     setStreak(getStreak());
     setSeniorName(getSeniorName() || '家族');
-    setRecent(getCheckins().slice(-7).reverse());
+    setRecent(getCheckins().slice(-7));
     setPhotos(getPhotoPosts());
     setRhythm(getRhythmAnalysis());
   }, []);
 
+  const moodInfo = todayCheckin ? MOOD_LABEL[todayCheckin.mood] : null;
+
   return (
-    <div className="flex flex-col min-h-screen pb-24 bg-amber-50">
+    <div className="flex flex-col min-h-screen pb-28 bg-slate-50">
 
-      {/* ヘッダー */}
-      <div className="px-5 pt-8 pb-4 flex-shrink-0">
-        <p className="text-amber-800 text-base font-medium">見守りダッシュボード</p>
-        <h1 className="text-3xl font-bold text-amber-900">{seniorName}さんの畑 🌿</h1>
+      {/* ── ヘッダー ── */}
+      <div className="bg-white border-b border-slate-100 px-5 pt-8 pb-4">
+        <p className="text-slate-500 text-sm font-medium">見守りダッシュボード</p>
+        <h1 className="text-2xl font-black text-slate-900">{seniorName}さんの様子</h1>
       </div>
 
-      {/* 今日の状態 */}
-      <div className="px-5 mb-4">
-        {todayCheckin ? (
-          <div className="bg-green-50 border-2 border-green-400 rounded-3xl p-4">
-            <div className="flex items-center gap-3 mb-1">
-              <span className="text-3xl">✅</span>
-              <p className="text-lg font-bold text-green-900">今日もチェックイン済み</p>
-            </div>
-            <p className={`text-base font-bold ml-12 ${MOOD_LABEL[todayCheckin.mood]?.color}`}>
-              {MOOD_LABEL[todayCheckin.mood]?.emoji} {MOOD_LABEL[todayCheckin.mood]?.label}
-              　{todayCheckin.time && <span className="text-slate-500 font-normal text-sm">（{todayCheckin.time}）</span>}
-            </p>
-          </div>
-        ) : (
-          <div className="bg-amber-50 border-2 border-amber-400 rounded-3xl p-4">
-            <div className="flex items-center gap-3">
-              <span className="text-3xl">⏳</span>
-              <div>
-                <p className="text-lg font-bold text-amber-900">まだチェックインしていません</p>
-                <p className="text-sm text-amber-700">電話で声をかけてみましょう</p>
+      {/* ── 今日のステータス（最重要） ── */}
+      <div className="px-4 pt-4 pb-2">
+        <AnimatePresence mode="wait">
+          {todayCheckin && moodInfo ? (
+            <motion.div
+              key="checked"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden"
+            >
+              {/* 上部ステータスバー */}
+              <div className={`${moodInfo.bg} px-5 py-4 flex items-center gap-3`}>
+                <span className="text-4xl">{moodInfo.emoji}</span>
+                <div>
+                  <p className="text-white font-black text-xl leading-tight">{moodInfo.label}</p>
+                  <p className="text-white/80 text-sm">今日のチェックイン済み</p>
+                </div>
+                {streak > 0 && (
+                  <div className="ml-auto bg-white/20 rounded-full px-3 py-1">
+                    <span className="text-white font-black text-sm">🔥 {streak}日連続</span>
+                  </div>
+                )}
               </div>
-            </div>
-          </div>
-        )}
+              {/* チェックイン時刻 */}
+              {todayCheckin.time && (
+                <div className="px-5 py-3 flex items-center gap-2 border-t border-slate-100">
+                  <span className="text-slate-400 text-lg">🕐</span>
+                  <span className="text-slate-600 text-sm">
+                    <span className="font-bold text-slate-900">{formatTime(todayCheckin.time)}</span>
+                    　にアプリを開きました
+                  </span>
+                </div>
+              )}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="unchecked"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-amber-500 rounded-3xl overflow-hidden shadow-md"
+            >
+              <div className="px-5 py-5 flex items-center gap-4">
+                <motion.span
+                  animate={{ scale: [1, 1.15, 1] }}
+                  transition={{ repeat: Infinity, duration: 2 }}
+                  className="text-4xl flex-shrink-0"
+                >⏳</motion.span>
+                <div className="flex-1">
+                  <p className="text-white font-black text-xl leading-tight">まだ起きてないかも？</p>
+                  <p className="text-white/80 text-sm mt-0.5">今日のチェックインがありません</p>
+                </div>
+              </div>
+              <Link href="/family/messages">
+                <div className="bg-amber-600 px-5 py-3 flex items-center justify-between">
+                  <p className="text-white font-bold text-base">💌 声をかけてみましょう</p>
+                  <span className="text-white text-xl">→</span>
+                </div>
+              </Link>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
-      {/* 🆕 健康シグナル */}
+      {/* ── 健康シグナル ── */}
       {rhythm && (
-        <div className="px-5 mb-4">
-          <h2 className="text-base font-bold text-slate-700 mb-2">🩺 健康シグナル（直近7日）</h2>
-          <div className={`rounded-3xl p-4 border-2 ${rhythm.alert ? 'bg-red-50 border-red-400' : 'bg-white border-green-200'}`}>
-            {rhythm.alert && (
-              <div className="bg-red-500 text-white rounded-xl px-3 py-2 mb-3 flex items-center gap-2">
-                <span className="text-xl">⚠️</span>
-                <p className="font-bold text-sm">気になるサインがあります。声をかけてみましょう。</p>
+        <div className="px-4 pt-3">
+          {rhythm.alert && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="bg-red-500 rounded-2xl px-4 py-3 mb-3 flex items-center gap-3 shadow"
+            >
+              <span className="text-2xl">⚠️</span>
+              <div>
+                <p className="text-white font-black text-base">気になるサインがあります</p>
+                <p className="text-red-100 text-sm">声をかけてみましょう</p>
               </div>
-            )}
-            <div className="grid grid-cols-3 gap-3">
-              {/* 起床リズム */}
-              <div className="flex flex-col items-center bg-amber-50 rounded-2xl p-3">
-                <span className="text-2xl mb-1">🕐</span>
-                <p className="text-xs text-slate-600 font-medium text-center">平均チェックイン</p>
-                <p className="text-base font-black text-slate-900">{rhythm.avgCheckinTime}</p>
-                <p className={`text-xs font-bold mt-1 ${rhythm.rhythmVariation > 180 ? 'text-red-600' : 'text-green-700'}`}>
+            </motion.div>
+          )}
+
+          <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-4">
+            <p className="text-xs font-bold text-slate-500 mb-3 uppercase tracking-wide">直近7日の健康シグナル</p>
+            <div className="grid grid-cols-3 gap-2">
+              {/* 生活リズム */}
+              <div className="flex flex-col items-center bg-slate-50 rounded-2xl p-3">
+                <span className="text-xl mb-1">🕐</span>
+                <p className="text-xs text-slate-500 text-center leading-tight mb-1">チェックイン</p>
+                <p className="text-sm font-black text-slate-900">{rhythm.avgCheckinTime}</p>
+                <span className={`text-xs font-bold mt-1 ${rhythm.rhythmVariation > 180 ? 'text-red-500' : 'text-green-600'}`}>
                   {rhythm.rhythmVariation > 180 ? 'ばらつき大' : '安定'}
-                </p>
+                </span>
               </div>
               {/* 気分 */}
-              <div className="flex flex-col items-center bg-amber-50 rounded-2xl p-3">
-                <span className="text-2xl mb-1">💭</span>
-                <p className="text-xs text-slate-600 font-medium text-center">しんどい日</p>
-                <p className={`text-base font-black ${rhythm.shindoiCount >= 4 ? 'text-red-600' : 'text-slate-900'}`}>
-                  {rhythm.shindoiCount}日 / 7日
+              <div className="flex flex-col items-center bg-slate-50 rounded-2xl p-3">
+                <span className="text-xl mb-1">💭</span>
+                <p className="text-xs text-slate-500 text-center leading-tight mb-1">しんどい日</p>
+                <p className={`text-sm font-black ${rhythm.shindoiCount >= 4 ? 'text-red-500' : 'text-slate-900'}`}>
+                  {rhythm.shindoiCount} / 7日
                 </p>
-                <p className={`text-xs font-bold mt-1 ${rhythm.shindoiCount >= 4 ? 'text-red-600' : 'text-green-700'}`}>
+                <span className={`text-xs font-bold mt-1 ${rhythm.shindoiCount >= 4 ? 'text-red-500' : 'text-green-600'}`}>
                   {rhythm.shindoiCount >= 4 ? '要注意' : '良好'}
-                </p>
+                </span>
               </div>
-              {/* クイズ */}
-              <div className="flex flex-col items-center bg-amber-50 rounded-2xl p-3">
-                <span className="text-2xl mb-1">🧠</span>
-                <p className="text-xs text-slate-600 font-medium text-center">クイズ正解率</p>
-                <p className={`text-base font-black ${rhythm.quizRate !== null && rhythm.quizRate < 40 ? 'text-orange-600' : 'text-slate-900'}`}>
+              {/* 脳トレ */}
+              <div className="flex flex-col items-center bg-slate-50 rounded-2xl p-3">
+                <span className="text-xl mb-1">🧠</span>
+                <p className="text-xs text-slate-500 text-center leading-tight mb-1">クイズ正解率</p>
+                <p className={`text-sm font-black ${rhythm.quizRate !== null && rhythm.quizRate < 40 ? 'text-orange-500' : 'text-slate-900'}`}>
                   {rhythm.quizRate !== null ? `${rhythm.quizRate}%` : '---'}
                 </p>
-                <p className={`text-xs font-bold mt-1 ${rhythm.quizRate !== null && rhythm.quizRate < 40 ? 'text-orange-600' : 'text-green-700'}`}>
+                <span className={`text-xs font-bold mt-1 ${rhythm.quizRate !== null && rhythm.quizRate < 40 ? 'text-orange-500' : 'text-green-600'}`}>
                   {rhythm.quizRate === null ? '記録なし' : rhythm.quizRate < 40 ? '低下傾向' : '良好'}
-                </p>
+                </span>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 写真のお手紙 */}
+      {/* ── 7日間カレンダー ── */}
+      <div className="px-4 pt-3">
+        <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-4">
+          <p className="text-xs font-bold text-slate-500 mb-3 uppercase tracking-wide">過去7日間のチェックイン</p>
+          <div className="flex gap-1.5">
+            {[...Array(7)].map((_, i) => {
+              const d = new Date();
+              d.setDate(d.getDate() - (6 - i));
+              const dateStr = d.toISOString().split('T')[0];
+              const found = recentCheckins.find((c) => c.date === dateStr);
+              const isToday = i === 6;
+              return (
+                <div key={i} className="flex-1 flex flex-col items-center gap-1">
+                  <div className={`w-full aspect-square rounded-xl flex items-center justify-center text-sm
+                    ${found ? (MOOD_LABEL[found.mood]?.bg || 'bg-green-500') + ' shadow-sm' : 'bg-slate-100'}
+                    ${isToday ? 'ring-2 ring-offset-1 ring-slate-400' : ''}
+                  `}>
+                    {found
+                      ? <span className="text-base">{MOOD_LABEL[found.mood]?.emoji}</span>
+                      : <span className="text-slate-300 text-xs font-bold">−</span>
+                    }
+                  </div>
+                  <span className={`text-xs font-medium ${isToday ? 'text-slate-900 font-bold' : 'text-slate-400'}`}>
+                    {d.getDate()}日
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {streak > 0 && (
+            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2">
+              <span>🔥</span>
+              <p className="text-sm font-bold text-orange-600">{streak}日連続チェックイン中！</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 畑 ── */}
+      <div className="px-4 pt-3">
+        <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-3">
+          <p className="text-xs font-bold text-slate-500 mb-2 px-1 uppercase tracking-wide">{seniorName}さんの畑</p>
+          <Garden streak={streak} />
+        </div>
+      </div>
+
+      {/* ── 写真のお手紙 ── */}
       {photos.length > 0 && (
-        <div className="px-5 mb-4">
-          <h2 className="text-base font-bold text-slate-700 mb-2">📮 届いたお手紙</h2>
-          <div className="flex gap-3 overflow-x-auto pb-1">
+        <div className="pt-3">
+          <p className="text-xs font-bold text-slate-500 mb-2 px-5 uppercase tracking-wide">📮 届いたお手紙</p>
+          <div className="flex gap-3 px-4 overflow-x-auto pb-1">
             {photos.slice(0, 5).map((photo) => (
-              <div key={photo.id} className="flex-shrink-0 w-44 bg-white rounded-2xl overflow-hidden shadow-sm border-2 border-amber-200">
+              <div key={photo.id}
+                className="flex-shrink-0 w-40 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={photo.imageData} alt="お手紙" className="w-full h-32 object-cover" />
-                <div className="p-2">
-                  <p className="text-slate-900 font-bold text-sm leading-snug">{photo.caption}</p>
-                  <p className="text-slate-500 text-xs mt-1">
-                    {new Date(photo.timestamp).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                <img src={photo.imageData} alt="お手紙" className="w-full h-28 object-cover" />
+                <div className="p-2.5">
+                  <p className="text-slate-900 font-bold text-xs leading-snug line-clamp-2">{photo.caption}</p>
+                  <p className="text-slate-400 text-xs mt-1">
+                    {new Date(photo.timestamp).toLocaleString('ja-JP', {
+                      month: 'numeric', day: 'numeric',
+                      hour: '2-digit', minute: '2-digit',
+                    })}
                   </p>
                 </div>
               </div>
@@ -136,52 +241,21 @@ export default function FamilyPage() {
         </div>
       )}
 
-      {/* 畑 */}
-      <div className="px-5 mb-4">
-        <Garden streak={streak} />
-      </div>
-
-      {/* 7日間カレンダー */}
-      <div className="px-5 mb-4">
-        <div className="bg-white rounded-3xl p-4 shadow-sm border border-amber-100">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xl">🔥</span>
-            <p className="text-lg font-bold text-orange-700">{streak}日連続チェックイン</p>
-          </div>
-          <div className="flex gap-2">
-            {[...Array(7)].map((_, i) => {
-              const d = new Date();
-              d.setDate(d.getDate() - (6 - i));
-              const dateStr = d.toISOString().split('T')[0];
-              const found = recentCheckins.find((c) => c.date === dateStr);
-              return (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                  <div className={`w-9 h-9 rounded-full flex items-center justify-center text-base ${found ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
-                    {found ? MOOD_LABEL[found.mood]?.emoji : '−'}
-                  </div>
-                  <span className="text-xs text-slate-600 font-medium">{d.getDate()}日</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* 下部ナビ */}
-      <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-amber-100 flex">
-        <div className="flex-1 py-4 flex flex-col items-center gap-1 text-amber-800">
+      {/* ── 下部ナビ ── */}
+      <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-100 flex shadow-lg">
+        <div className="flex-1 py-4 flex flex-col items-center gap-0.5 text-amber-700">
           <span className="text-2xl">🏡</span>
           <span className="text-xs font-bold">ダッシュボード</span>
         </div>
         <Link href="/family/messages" className="flex-1">
-          <div className="py-4 flex flex-col items-center gap-1 text-amber-700">
+          <div className="py-4 flex flex-col items-center gap-0.5 text-slate-500">
             <span className="text-2xl">💌</span>
-            <span className="text-xs font-bold">メッセージを送る</span>
+            <span className="text-xs font-bold">メッセージ</span>
           </div>
         </Link>
         <Link href="/" className="flex-1">
-          <div className="py-4 flex flex-col items-center gap-1 text-slate-500">
-            <span className="text-2xl">⚙️</span>
+          <div className="py-4 flex flex-col items-center gap-0.5 text-slate-400">
+            <span className="text-2xl">🔄</span>
             <span className="text-xs font-bold">切り替え</span>
           </div>
         </Link>
