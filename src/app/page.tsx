@@ -6,26 +6,40 @@ import { VideoCard } from "@/components/VideoCard";
 import { AdSlot } from "@/components/AdSlot";
 import { TrendingWidget } from "@/components/TrendingWidget";
 import { Footer } from "@/components/Footer";
-import { buzzVideos, categories, type BuzzVideo } from "@/data/videos";
+import {
+  buzzVideos,
+  categories,
+  regions,
+  trendingPeriods,
+  type BuzzVideo,
+  type TrendingPeriod,
+} from "@/data/videos";
 
 const ALL_CATEGORY = "すべて";
+const ALL_REGION = "すべて";
 
 export default function Home() {
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
+  const [selectedRegion, setSelectedRegion] = useState(ALL_REGION);
+  const [selectedPeriod, setSelectedPeriod] = useState<TrendingPeriod>("today");
   const [searchQuery, setSearchQuery] = useState("");
 
   const filteredVideos = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return buzzVideos.filter((video) => {
-      const matchesCategory =
-        selectedCategory === ALL_CATEGORY || video.category === selectedCategory;
-      const matchesQuery =
-        query === "" ||
-        video.title.toLowerCase().includes(query) ||
-        video.aiSummary.toLowerCase().includes(query);
-      return matchesCategory && matchesQuery;
-    });
-  }, [selectedCategory, searchQuery]);
+    return buzzVideos
+      .filter((video) => {
+        const matchesCategory =
+          selectedCategory === ALL_CATEGORY || video.category === selectedCategory;
+        const matchesRegion =
+          selectedRegion === ALL_REGION || video.region === selectedRegion;
+        const matchesQuery =
+          query === "" ||
+          video.title.toLowerCase().includes(query) ||
+          video.aiSummary.toLowerCase().includes(query);
+        return matchesCategory && matchesRegion && matchesQuery;
+      })
+      .sort((a, b) => b.engagement[selectedPeriod] - a.engagement[selectedPeriod]);
+  }, [selectedCategory, selectedRegion, selectedPeriod, searchQuery]);
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950">
@@ -33,6 +47,12 @@ export default function Home() {
         categories={[ALL_CATEGORY, ...categories]}
         selectedCategory={selectedCategory}
         onSelectCategory={setSelectedCategory}
+        regions={[ALL_REGION, ...regions]}
+        selectedRegion={selectedRegion}
+        onSelectRegion={setSelectedRegion}
+        periods={trendingPeriods}
+        selectedPeriod={selectedPeriod}
+        onSelectPeriod={setSelectedPeriod}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
@@ -65,7 +85,7 @@ export default function Home() {
 
           <aside className="space-y-6 lg:sticky lg:top-24 lg:h-fit">
             <AdSlot className="h-64" />
-            <TrendingWidget videos={buzzVideos} />
+            <TrendingWidget videos={buzzVideos} period={selectedPeriod} />
             <AdSlot className="h-96" />
           </aside>
         </div>

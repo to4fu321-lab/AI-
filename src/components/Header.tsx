@@ -1,11 +1,18 @@
 "use client";
 
 import Link from "next/link";
+import type { TrendingPeriod } from "@/data/videos";
 
 interface HeaderProps {
   categories: string[];
   selectedCategory: string;
   onSelectCategory: (category: string) => void;
+  regions: string[];
+  selectedRegion: string;
+  onSelectRegion: (region: string) => void;
+  periods: { value: TrendingPeriod; label: string }[];
+  selectedPeriod: TrendingPeriod;
+  onSelectPeriod: (period: TrendingPeriod) => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
 }
@@ -14,6 +21,12 @@ export function Header({
   categories,
   selectedCategory,
   onSelectCategory,
+  regions,
+  selectedRegion,
+  onSelectRegion,
+  periods,
+  selectedPeriod,
+  onSelectPeriod,
   searchQuery,
   onSearchChange,
 }: HeaderProps) {
@@ -66,6 +79,54 @@ export function Header({
             );
           })}
         </nav>
+
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-neutral-100 pt-2 dark:border-neutral-800">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-neutral-400">地域</span>
+            <div className="flex gap-1.5">
+              {regions.map((region) => {
+                const isActive = region === selectedRegion;
+                return (
+                  <button
+                    key={region}
+                    type="button"
+                    onClick={() => onSelectRegion(region)}
+                    className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition ${
+                      isActive
+                        ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900"
+                        : "bg-neutral-100 text-neutral-500 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700"
+                    }`}
+                  >
+                    {region}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-neutral-400">急上昇</span>
+            <div className="flex gap-1.5">
+              {periods.map(({ value, label }) => {
+                const isActive = value === selectedPeriod;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => onSelectPeriod(value)}
+                    className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition ${
+                      isActive
+                        ? "bg-orange-500 text-white"
+                        : "bg-neutral-100 text-neutral-500 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       </div>
     </header>
   );
