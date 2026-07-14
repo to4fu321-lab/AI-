@@ -17,6 +17,8 @@ interface IngestBody {
   region: string;
   channelName: string;
   postedAt: string;
+  /** ISO文字列。省略時は現在時刻として登録される */
+  publishedAt?: string;
   likes?: number;
   favorites?: number;
   engagement?: { now?: number; today?: number; week?: number };
@@ -91,6 +93,7 @@ export async function POST(request: NextRequest) {
       region: body.region,
       channel_name: body.channelName,
       posted_at: body.postedAt,
+      published_at: body.publishedAt ?? new Date().toISOString(),
       likes: body.likes ?? 0,
       favorites: body.favorites ?? 0,
       engagement_now: body.engagement?.now ?? 0,

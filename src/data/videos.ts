@@ -32,6 +32,8 @@ export interface BuzzVideo {
   region: string;
   channelName: string;
   postedAt: string;
+  /** 実際の投稿日時（ISO文字列）。本日投稿・ブレイク判定に使用 */
+  publishedAt: string;
   /** 累計いいね数 */
   likes: number;
   favorites: number;
@@ -54,6 +56,17 @@ export const trendingPeriods: { value: TrendingPeriod; label: string }[] = [
   { value: "now", label: "今" },
   { value: "today", label: "今日" },
   { value: "week", label: "1週間" },
+];
+
+/**
+ * 「本日ブレイク」= 今日投稿してバズった動画も、ずっと無風だったのに
+ * 今日急に伸びた動画も、どちらも見つけられる並び替えモード。
+ */
+export type SortMode = TrendingPeriod | "breakout";
+
+export const sortModes: { value: SortMode; label: string }[] = [
+  ...trendingPeriods,
+  { value: "breakout", label: "🚀本日ブレイク" },
 ];
 
 /**

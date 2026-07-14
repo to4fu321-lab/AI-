@@ -1,18 +1,19 @@
-import type { BuzzVideo, TrendingPeriod } from "@/data/videos";
-import { trendingPeriods } from "@/data/videos";
+import type { BuzzVideo, SortMode } from "@/data/videos";
+import { sortModes } from "@/data/videos";
 import { formatCount } from "@/lib/format";
+import { getBreakoutRatio, getSortValue } from "@/lib/ranking";
 
 export function TrendingWidget({
   videos,
   period,
 }: {
   videos: BuzzVideo[];
-  period: TrendingPeriod;
+  period: SortMode;
 }) {
   const ranked = [...videos]
-    .sort((a, b) => b.engagement[period] - a.engagement[period])
+    .sort((a, b) => getSortValue(b, period) - getSortValue(a, period))
     .slice(0, 3);
-  const periodLabel = trendingPeriods.find((p) => p.value === period)?.label ?? "";
+  const periodLabel = sortModes.find((p) => p.value === period)?.label ?? "";
 
   return (
     <div className="rounded-2xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
@@ -30,7 +31,9 @@ export function TrendingWidget({
                 {video.title}
               </p>
               <p className="mt-0.5 text-xs text-neutral-400">
-                ❤️ +{formatCount(video.engagement[period])}（{periodLabel}）
+                {period === "breakout"
+                  ? `🚀 いいねの${Math.round(getBreakoutRatio(video) * 100)}%が本日分`
+                  : `❤️ +${formatCount(video.engagement[period])}（${periodLabel}）`}
               </p>
             </div>
           </li>

@@ -10,10 +10,11 @@ import {
   categories,
   regions,
   platformOptions,
-  trendingPeriods,
+  sortModes,
   type BuzzVideo,
-  type TrendingPeriod,
+  type SortMode,
 } from "@/data/videos";
+import { getSortValue } from "@/lib/ranking";
 
 const ALL_CATEGORY = "すべて";
 const ALL_REGION = "すべて";
@@ -23,7 +24,7 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
   const [selectedRegion, setSelectedRegion] = useState(ALL_REGION);
   const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORM);
-  const [selectedPeriod, setSelectedPeriod] = useState<TrendingPeriod>("today");
+  const [selectedPeriod, setSelectedPeriod] = useState<SortMode>("today");
   const [searchQuery, setSearchQuery] = useState("");
 
   const filteredVideos = useMemo(() => {
@@ -42,7 +43,7 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
           video.aiSummary.toLowerCase().includes(query);
         return matchesCategory && matchesRegion && matchesPlatform && matchesQuery;
       })
-      .sort((a, b) => b.engagement[selectedPeriod] - a.engagement[selectedPeriod]);
+      .sort((a, b) => getSortValue(b, selectedPeriod) - getSortValue(a, selectedPeriod));
   }, [
     videos,
     selectedCategory,
@@ -64,7 +65,7 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
         platforms={[{ value: ALL_PLATFORM, label: "すべて" }, ...platformOptions]}
         selectedPlatform={selectedPlatform}
         onSelectPlatform={setSelectedPlatform}
-        periods={trendingPeriods}
+        periods={sortModes}
         selectedPeriod={selectedPeriod}
         onSelectPeriod={setSelectedPeriod}
         searchQuery={searchQuery}

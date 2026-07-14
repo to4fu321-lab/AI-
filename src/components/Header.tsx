@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import type { TrendingPeriod } from "@/data/videos";
+import type { SortMode } from "@/data/videos";
 
 interface HeaderProps {
   categories: string[];
@@ -13,9 +13,9 @@ interface HeaderProps {
   platforms: { value: string; label: string }[];
   selectedPlatform: string;
   onSelectPlatform: (platform: string) => void;
-  periods: { value: TrendingPeriod; label: string }[];
-  selectedPeriod: TrendingPeriod;
-  onSelectPeriod: (period: TrendingPeriod) => void;
+  periods: { value: SortMode; label: string }[];
+  selectedPeriod: SortMode;
+  onSelectPeriod: (period: SortMode) => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
 }

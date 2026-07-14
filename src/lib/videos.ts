@@ -13,6 +13,7 @@ interface VideoRow {
   region: string;
   channel_name: string;
   posted_at: string;
+  published_at: string;
   likes: number;
   favorites: number;
   engagement_now: number;
@@ -32,6 +33,7 @@ function mapRow(row: VideoRow): BuzzVideo {
     region: row.region,
     channelName: row.channel_name,
     postedAt: row.posted_at,
+    publishedAt: row.published_at,
     likes: row.likes,
     favorites: row.favorites,
     engagement: {
@@ -54,7 +56,7 @@ export async function getVideos(): Promise<BuzzVideo[]> {
   const { data, error } = await supabase
     .from("buzztube_videos")
     .select(
-      "id, platform, source_url, embed_id, title, ai_summary, category, region, channel_name, posted_at, likes, favorites, engagement_now, engagement_today, engagement_week"
+      "id, platform, source_url, embed_id, title, ai_summary, category, region, channel_name, posted_at, published_at, likes, favorites, engagement_now, engagement_today, engagement_week"
     )
     .eq("is_published", true)
     .order("created_at", { ascending: false });

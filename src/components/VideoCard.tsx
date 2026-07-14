@@ -1,10 +1,14 @@
 import type { BuzzVideo } from "@/data/videos";
 import { trendingPeriods } from "@/data/videos";
 import { formatCount } from "@/lib/format";
+import { isBreakout, isPostedToday } from "@/lib/ranking";
 import { YouTubeEmbed } from "./YouTubeEmbed";
 import { XEmbed } from "./XEmbed";
 
 export function VideoCard({ video }: { video: BuzzVideo }) {
+  const postedToday = isPostedToday(video);
+  const breakout = isBreakout(video);
+
   return (
     <article className="flex flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg dark:border-neutral-800 dark:bg-neutral-900">
       {video.platform === "youtube" ? (
@@ -22,6 +26,16 @@ export function VideoCard({ video }: { video: BuzzVideo }) {
             <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-semibold text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
               📍{video.region}
             </span>
+            {postedToday && (
+              <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                🆕本日投稿
+              </span>
+            )}
+            {breakout && (
+              <span className="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-1 text-xs font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-300">
+                🚀本日ブレイク
+              </span>
+            )}
           </div>
           <span className="text-xs text-neutral-400">{video.postedAt}</span>
         </div>
