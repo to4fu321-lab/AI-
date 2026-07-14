@@ -1,8 +1,8 @@
 /**
- * ダミーの動画データ。
- * 将来的には OpenClaw / Make(Integromat) などの外部ワークフローから
- * この同じ形（BuzzVideo[]）で API 経由で流し込み、動的に一覧を生成する想定。
- * 今はこの配列を書き換える／fetch() の結果に差し替えるだけで済むようにしてある。
+ * 型定義と固定の選択肢（カテゴリー・地域・急上昇期間）。
+ * 実際の動画データは Supabase の `buzztube_videos` テーブルから取得する
+ * （src/lib/videos.ts の getVideos）。OpenClaw / Make などの外部ワークフローは
+ * POST /api/videos にこの BuzzVideo 相当の項目を送ることで動的にページへ反映できる。
  */
 
 export type Platform = "youtube" | "x";
@@ -51,53 +51,8 @@ export const trendingPeriods: { value: TrendingPeriod; label: string }[] = [
   { value: "week", label: "1週間" },
 ];
 
-export const buzzVideos: BuzzVideo[] = [
-  {
-    id: "buzz-001",
-    platform: "youtube",
-    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    embedId: "dQw4w9WgXcQ",
-    title: "誰かに送りつけると必ずコレが流れる、伝説の“釣りリンク”動画",
-    aiSummary:
-      "「絶対見て」というリンクを開くと必ずこの曲が流れる、通称“リックロール”の元祖動画。悪ふざけのつもりで開いたのに、曲とダンスのクオリティの高さに最後まで見入ってしまう人が続出し、ミーム文化を知らない世代からも再評価されています。",
-    category: "おもしろ",
-    region: "海外",
-    channelName: "Rick Astley",
-    postedAt: "3時間前",
-    likes: 128000,
-    favorites: 5400,
-    engagement: { now: 820, today: 6200, week: 24500 },
-  },
-  {
-    id: "buzz-002",
-    platform: "youtube",
-    sourceUrl: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-    embedId: "jNQXAC9IVRw",
-    title: "YouTube史上“最初の投稿”がなぜか今また伸びている",
-    aiSummary:
-      "映っているのは象を19秒間ただ眺めるだけの映像。凝った編集も演出も一切ない、YouTube最初の投稿がかえって新鮮だと再注目されています。情報過多の反動からか「なにも起きない動画」を求める人が増えているようです。",
-    category: "癒やし",
-    region: "海外",
-    channelName: "jawed",
-    postedAt: "5時間前",
-    likes: 45200,
-    favorites: 2100,
-    engagement: { now: 260, today: 3100, week: 15800 },
-  },
-  {
-    id: "buzz-003",
-    platform: "x",
-    sourceUrl: "https://twitter.com/Interior/status/463440424141459456",
-    embedId: "463440424141459456",
-    title: "1枚の自然写真が“5秒でできる息抜き”として拡散中",
-    aiSummary:
-      "国立公園の公式アカウントが投稿した、雄大な自然の写真1枚。忙しい合間にタイムラインでふと目に入り「数秒眺めるだけで気分転換になる」とリプライ欄で話題に。ちょっとした休憩テクニックとして保存・共有する人が増えています。",
-    category: "ライフハック",
-    region: "海外",
-    channelName: "US Department of the Interior",
-    postedAt: "1日前",
-    likes: 8600,
-    favorites: 610,
-    engagement: { now: 90, today: 1400, week: 5200 },
-  },
-];
+/**
+ * Supabase 未設定時や取得失敗時のフォールバック。
+ * ダミーの演出データは置かず、空にして「取得できていない」ことが分かるようにしている。
+ */
+export const FALLBACK_VIDEOS: BuzzVideo[] = [];
