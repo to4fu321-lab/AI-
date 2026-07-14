@@ -1,17 +1,19 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-background: #fef9f0;
-  --color-foreground: #1c1917;
+  --color-background: #fafafa;
+  --color-foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme inline {
+    --color-background: #0a0a0a;
+    --color-foreground: #f5f5f5;
+  }
 }
 
 body {
   background: var(--color-background);
   color: var(--color-foreground);
-}
-
-/* シニア向け：タップ領域を大きく */
-button {
-  min-height: 52px;
 }
 

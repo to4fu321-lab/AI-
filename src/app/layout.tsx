@@ -4,13 +4,14 @@ import "./globals.css";
 
 const notoSansJP = Noto_Sans_JP({
   subsets: ["latin"],
-  weight: ["400", "500", "700"],
+  weight: ["400", "500", "700", "900"],
   display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "つながる畑",
-  description: "高齢者と家族をつなぐ見守りアプリ",
+  title: "BuzzTube | バズ動画まとめキュレーションサイト",
+  description:
+    "X（旧Twitter）やYouTubeで今バズっているトレンド動画をAIが自動収集・要約して紹介するキュレーションサイト。",
 };
 
 export default function RootLayout({
@@ -20,9 +21,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ja" className={notoSansJP.className}>
-      <body className="bg-amber-50 min-h-screen">
-        <div className="max-w-md mx-auto min-h-screen">{children}</div>
-      </body>
+      <body className="min-h-screen antialiased">{children}</body>
     </html>
   );
 }
