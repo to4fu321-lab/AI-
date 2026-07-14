@@ -5,6 +5,7 @@ import { Header } from "@/components/Header";
 import { VideoCard } from "@/components/VideoCard";
 import { AdSlot } from "@/components/AdSlot";
 import { TrendingWidget } from "@/components/TrendingWidget";
+import { TrendingKeywords } from "@/components/TrendingKeywords";
 import { Footer } from "@/components/Footer";
 import {
   categories,
@@ -15,6 +16,7 @@ import {
   type SortMode,
 } from "@/data/videos";
 import { getSortValue } from "@/lib/ranking";
+import { extractTrendingKeywords } from "@/lib/keywords";
 
 const ALL_CATEGORY = "すべて";
 const ALL_REGION = "すべて";
@@ -52,6 +54,8 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
     selectedPeriod,
     searchQuery,
   ]);
+
+  const trendingKeywords = useMemo(() => extractTrendingKeywords(videos), [videos]);
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950">
@@ -100,6 +104,7 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
 
           <aside className="space-y-6 lg:sticky lg:top-24 lg:h-fit">
             <AdSlot className="h-64" />
+            <TrendingKeywords keywords={trendingKeywords} onSelect={setSearchQuery} />
             {videos.length > 0 && (
               <TrendingWidget videos={videos} period={selectedPeriod} />
             )}
