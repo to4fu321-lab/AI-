@@ -9,6 +9,7 @@ import { Footer } from "@/components/Footer";
 import {
   categories,
   regions,
+  platformOptions,
   trendingPeriods,
   type BuzzVideo,
   type TrendingPeriod,
@@ -16,10 +17,12 @@ import {
 
 const ALL_CATEGORY = "すべて";
 const ALL_REGION = "すべて";
+const ALL_PLATFORM = "すべて";
 
 export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORY);
   const [selectedRegion, setSelectedRegion] = useState(ALL_REGION);
+  const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORM);
   const [selectedPeriod, setSelectedPeriod] = useState<TrendingPeriod>("today");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -31,14 +34,23 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
           selectedCategory === ALL_CATEGORY || video.category === selectedCategory;
         const matchesRegion =
           selectedRegion === ALL_REGION || video.region === selectedRegion;
+        const matchesPlatform =
+          selectedPlatform === ALL_PLATFORM || video.platform === selectedPlatform;
         const matchesQuery =
           query === "" ||
           video.title.toLowerCase().includes(query) ||
           video.aiSummary.toLowerCase().includes(query);
-        return matchesCategory && matchesRegion && matchesQuery;
+        return matchesCategory && matchesRegion && matchesPlatform && matchesQuery;
       })
       .sort((a, b) => b.engagement[selectedPeriod] - a.engagement[selectedPeriod]);
-  }, [videos, selectedCategory, selectedRegion, selectedPeriod, searchQuery]);
+  }, [
+    videos,
+    selectedCategory,
+    selectedRegion,
+    selectedPlatform,
+    selectedPeriod,
+    searchQuery,
+  ]);
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950">
@@ -49,6 +61,9 @@ export function HomeClient({ videos }: { videos: BuzzVideo[] }) {
         regions={[ALL_REGION, ...regions]}
         selectedRegion={selectedRegion}
         onSelectRegion={setSelectedRegion}
+        platforms={[{ value: ALL_PLATFORM, label: "すべて" }, ...platformOptions]}
+        selectedPlatform={selectedPlatform}
+        onSelectPlatform={setSelectedPlatform}
         periods={trendingPeriods}
         selectedPeriod={selectedPeriod}
         onSelectPeriod={setSelectedPeriod}

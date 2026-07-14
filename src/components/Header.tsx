@@ -10,6 +10,9 @@ interface HeaderProps {
   regions: string[];
   selectedRegion: string;
   onSelectRegion: (region: string) => void;
+  platforms: { value: string; label: string }[];
+  selectedPlatform: string;
+  onSelectPlatform: (platform: string) => void;
   periods: { value: TrendingPeriod; label: string }[];
   selectedPeriod: TrendingPeriod;
   onSelectPeriod: (period: TrendingPeriod) => void;
@@ -24,6 +27,9 @@ export function Header({
   regions,
   selectedRegion,
   onSelectRegion,
+  platforms,
+  selectedPlatform,
+  onSelectPlatform,
   periods,
   selectedPeriod,
   onSelectPeriod,
@@ -98,6 +104,29 @@ export function Header({
                     }`}
                   >
                     {region}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-neutral-400">媒体</span>
+            <div className="flex gap-1.5">
+              {platforms.map(({ value, label }) => {
+                const isActive = value === selectedPlatform;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => onSelectPlatform(value)}
+                    className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold transition ${
+                      isActive
+                        ? "bg-sky-500 text-white"
+                        : "bg-neutral-100 text-neutral-500 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700"
+                    }`}
+                  >
+                    {label}
                   </button>
                 );
               })}

@@ -43,6 +43,11 @@ export const categories = ["おもしろ", "癒やし", "ライフハック"];
 
 export const regions = ["国内", "海外"];
 
+export const platformOptions: { value: Platform; label: string }[] = [
+  { value: "youtube", label: "YouTube" },
+  { value: "x", label: "X" },
+];
+
 export type TrendingPeriod = "now" | "today" | "week";
 
 export const trendingPeriods: { value: TrendingPeriod; label: string }[] = [
