@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600" role="img">
+<defs>
+<linearGradient id="wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9eef4"/><stop offset="1" stop-color="#cdd8e4"/></linearGradient>
+<linearGradient id="floor" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#94a7bb"/><stop offset="1" stop-color="#6c7f94"/></linearGradient>
+<radialGradient id="vig" cx="0.5" cy="0.45" r="0.75"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></radialGradient>
+</defs>
+<rect width="800" height="600" fill="url(#wall)"/>
+<rect y="360" width="800" height="240" fill="url(#floor)"/>
+<path d="M0 360 L800 360" stroke="#5d7089" stroke-width="3"/>
+<path d="M40 470 C 220 400, 380 540, 560 450 S 760 500, 790 460" stroke="#20242b" stroke-width="12" fill="none" stroke-linecap="round"/>
+   <rect x="600" y="300" width="120" height="80" rx="6" fill="#3c4a5a"/><rect x="614" y="316" width="92" height="30" fill="#8fa3b8"/>
+   <g transform="translate(150,250)"><path d="M0 120 L40 0 L80 120 Z" fill="#ffd400" stroke="#7a6400" stroke-width="4"/><text x="34" y="108" font-family="sans-serif" font-size="52" font-weight="700" fill="#1b1b1b">!</text></g>
+<rect width="800" height="600" fill="url(#vig)"/>
+</svg>
