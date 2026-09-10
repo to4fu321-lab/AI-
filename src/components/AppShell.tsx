@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { BottomNav } from "./BottomNav";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { ServiceWorkerRegister } from "./ServiceWorkerRegister";
 import { setRole, useDemoState } from "@/lib/store";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -20,6 +21,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh flex-col bg-canvas">
+      <ServiceWorkerRegister />
       <header className="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
         <div
           className={`mx-auto flex h-14 items-center justify-between gap-3 px-4 ${

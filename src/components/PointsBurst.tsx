@@ -20,17 +20,17 @@ export function PointsBurst({ lines }: { lines: PointLine[] }) {
   return (
     <div className="card overflow-hidden">
       <div className="bg-brand px-4 py-6 text-center text-white">
-        <p className="text-xs font-bold opacity-90">獲得ポイント</p>
-        <p className="text-5xl font-black tabular-nums">
+        <p className="text-note font-bold opacity-90">獲得ポイント</p>
+        <p className="text-num !text-5xl">
           +{total}
-          <span className="ml-1 text-base font-bold">pt</span>
+          <span className="ml-1 text-head">pt</span>
         </p>
       </div>
       <ul className="divide-y divide-line">
         {lines.map((line, index) => (
           <li
             key={line.label}
-            className={`flex items-center justify-between px-4 py-3 text-sm transition-opacity duration-300 ${
+            className={`flex items-center justify-between px-4 py-3 text-body transition-opacity duration-300 ${
               index < shown ? "opacity-100" : "opacity-0"
             }`}
           >

@@ -42,13 +42,13 @@ export function PhotoField({
   return (
     <div className="card p-3">
       <div className="mb-2 flex items-baseline justify-between gap-2">
-        <p className="text-sm font-bold text-ink">{label}</p>
-        <p className="text-[11px] text-ink-muted">{hint}</p>
+        <p className="text-body font-bold text-ink">{label}</p>
+        <p className="text-note text-ink-muted">{hint}</p>
       </div>
 
       {value ? (
         <div className="space-y-2">
-          <div className="overflow-hidden rounded-xl border border-line">
+          <div className="overflow-hidden rounded-lg border border-line">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={value} alt={`${label}のプレビュー`} className="w-full" />
           </div>
@@ -56,14 +56,14 @@ export function PhotoField({
             <button
               type="button"
               onClick={() => setAnnotating(value)}
-              className="min-h-11 flex-1 rounded-xl border border-line bg-surface text-xs font-bold text-ink"
+              className="min-h-11 flex-1 rounded-full border border-line bg-surface text-note font-bold text-ink"
             >
               ✏️ 書き込みを続ける
             </button>
             <button
               type="button"
               onClick={() => onChange(null)}
-              className="min-h-11 rounded-xl border border-line px-3 text-xs font-bold text-ink-muted"
+              className="min-h-11 rounded-full border border-line px-4 text-note font-bold text-ink-muted"
             >
               削除
             </button>
@@ -75,7 +75,7 @@ export function PhotoField({
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={busy}
-            className="flex min-h-24 w-full flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-brand-line bg-brand-soft text-sm font-bold text-brand-dark disabled:opacity-60"
+            className="flex min-h-24 w-full flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-brand bg-brand-soft text-body font-bold text-brand-dark disabled:opacity-60"
           >
             <span aria-hidden className="text-2xl">
               📷
@@ -91,7 +91,7 @@ export function PhotoField({
             onChange={(event) => pickFile(event.target.files?.[0])}
           />
           <div>
-            <p className="mb-1.5 text-[11px] text-ink-muted">
+            <p className="mb-1.5 text-note text-ink-muted">
               カメラが使えない場合はサンプル写真でお試しください
             </p>
             <div className="no-scrollbar flex gap-2 overflow-x-auto">

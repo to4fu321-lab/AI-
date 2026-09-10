@@ -1,13 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { Avatar, StatusBadge, TypeChip, UrgencyBadge, authorName } from "@/components/Badges";
+import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
 import { timeAgo } from "@/lib/format";
-import { reportPoints } from "@/lib/points";
 import { toggleReaction, useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 import type { ReactionKind } from "@/lib/types";
@@ -23,7 +22,7 @@ export function ReportDetailScreen({ id }: { id: string }) {
     return (
       <div className="space-y-4">
         <EmptyState emoji="🔍" title="報告が見つかりませんでした" />
-        <Link href="/" className="block text-center text-sm font-bold text-brand">
+        <Link href="/" className="block text-center text-body font-bold text-brand">
           フィードにもどる
         </Link>
       </div>
@@ -31,7 +30,6 @@ export function ReportDetailScreen({ id }: { id: string }) {
   }
 
   const author = demo.users.find((user) => user.id === report.authorId) ?? null;
-  const isMine = report.authorId === demo.staffUserId;
 
   const reactionButton = (kind: ReactionKind, emoji: string, label: string) => {
     const list = report.reactions[kind];
@@ -41,10 +39,8 @@ export function ReportDetailScreen({ id }: { id: string }) {
         type="button"
         onClick={() => toggleReaction(report.id, kind)}
         aria-pressed={active}
-        className={`flex min-h-12 flex-1 items-center justify-center gap-1.5 rounded-xl border text-sm font-bold transition active:scale-95 ${
-          active
-            ? "border-brand bg-brand-soft text-brand-dark"
-            : "border-line bg-surface text-ink-muted"
+        className={`flex min-h-12 flex-1 items-center justify-center gap-1.5 rounded-full border text-body font-bold transition active:scale-95 ${
+          active ? "border-brand text-brand" : "border-line bg-surface text-ink-muted"
         }`}
       >
         <span aria-hidden>{emoji}</span>
@@ -55,8 +51,8 @@ export function ReportDetailScreen({ id }: { id: string }) {
   };
 
   return (
-    <div className="space-y-4">
-      <Link href="/" className="inline-flex min-h-11 items-center text-sm font-bold text-ink-muted">
+    <div className="space-y-5">
+      <Link href="/" className="inline-flex min-h-11 items-center text-body font-bold text-ink-muted">
         ← フィード
       </Link>
 
@@ -66,49 +62,41 @@ export function ReportDetailScreen({ id }: { id: string }) {
         <ReportImage
           src={report.beforeImage}
           alt="報告された現場の写真"
-          className="w-full rounded-2xl border border-line"
+          className="w-full rounded-[14px] border border-line"
         />
       ) : null}
 
-      <section className="card p-4">
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <StatusBadge status={report.status} />
-          <UrgencyBadge urgency={report.urgency} />
-          <TypeChip type={report.type} />
+      <section>
+        <div className="mb-1.5 flex items-center gap-3">
+          <StatusDot status={report.status} />
+          <UrgencyText urgency={report.urgency} />
         </div>
 
-        <h1 className="text-lg font-bold leading-snug text-ink">{report.title}</h1>
+        <h1 className="text-title text-ink">{report.title}</h1>
 
-        {report.body ? (
-          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-ink-muted">
-            {report.body}
+        <p className="mt-1.5 text-note text-ink-muted">
+          {[typeText(report.type), report.site, report.area, report.areaNote]
+            .filter(Boolean)
+            .join("・")}
+        </p>
+
+        {report.sharedToSites || report.sharedToHq ? (
+          <p className="mt-2 text-note font-bold text-ink">
+            {report.sharedToSites ? "🏢 全拠点に共有されました" : null}
+            {report.sharedToSites && report.sharedToHq ? "　" : null}
+            {report.sharedToHq ? "🏛 本社へ報告されました" : null}
           </p>
         ) : null}
 
-        <dl className="mt-3 space-y-1 border-t border-line pt-3 text-xs text-ink-muted">
-          <div className="flex gap-2">
-            <dt className="shrink-0 font-bold">場所</dt>
-            <dd>
-              {report.area}
-              {report.areaNote ? `（${report.areaNote}）` : ""}
-            </dd>
-          </div>
-        </dl>
+        {report.body ? (
+          <p className="mt-3 whitespace-pre-wrap text-body text-ink-muted">{report.body}</p>
+        ) : null}
 
-        <div className="mt-3 flex items-center gap-2 border-t border-line pt-3">
+        <div className="mt-4 flex items-center gap-2">
           <Avatar user={author} anonymous={report.anonymous} size={28} />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-xs font-bold text-ink">
-              {authorName(author, report.anonymous)}
-              {isMine ? <span className="ml-1 text-brand">（自分）</span> : null}
-            </p>
-            <p className="text-[11px] text-ink-faint">{timeAgo(report.createdAt, now)}</p>
-          </div>
-          {isMine ? (
-            <p className="shrink-0 rounded-full bg-brand-soft px-2.5 py-1 text-[11px] font-bold text-brand-dark">
-              獲得 {reportPoints(report)}pt
-            </p>
-          ) : null}
+          <p className="text-note text-ink-muted">
+            {authorName(author, report.anonymous)}・{timeAgo(report.createdAt, now)}
+          </p>
         </div>
       </section>
 
@@ -118,10 +106,9 @@ export function ReportDetailScreen({ id }: { id: string }) {
       </div>
 
       <section className="card p-4">
-        <h2 className="mb-3 text-sm font-bold text-ink">この報告のその後</h2>
+        <h2 className="mb-3 text-head text-ink">この報告のその後</h2>
         <Timeline report={report} users={demo.users} />
       </section>
-
     </div>
   );
 }

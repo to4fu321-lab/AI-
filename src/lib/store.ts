@@ -9,7 +9,8 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { createSeedState } from "@/data/seed";
 import { clearImages, clearState, getImage, loadState, saveState } from "./storage";
 import type {
-  ActionType,
+  DecisionActionType,
+  ShareActionType,
   AdminAction,
   DemoState,
   ReactionKind,
@@ -93,6 +94,7 @@ export function createReport(input: NewReportInput): Report {
     id: newId("r"),
     authorId: current.staffUserId,
     anonymous: input.anonymous,
+    site: currentUserSite(current),
     type: input.type,
     urgency: input.urgency,
     title: input.title.trim(),
@@ -102,6 +104,8 @@ export function createReport(input: NewReportInput): Report {
     beforeImage: input.beforeImage,
     afterImage: input.afterImage,
     status: "new",
+    sharedToSites: false,
+    sharedToHq: false,
     createdAt: Date.now(),
     actions: [],
     reactions: { like: [], same: [] },
@@ -110,18 +114,25 @@ export function createReport(input: NewReportInput): Report {
   return report;
 }
 
-const STATUS_BY_ACTION: Partial<Record<ActionType, ReportStatus>> = {
+const STATUS_BY_ACTION: Record<DecisionActionType, ReportStatus | null> = {
+  thanks: null,
   reviewing: "reviewing",
   adopted: "adopted",
   partial: "partial",
   declined: "declined",
 };
 
+function currentUserSite(current: DemoState): string {
+  return (
+    current.users.find((user) => user.id === current.staffUserId)?.site ?? "川崎物流センター"
+  );
+}
+
 export function addAdminAction(
   reportId: string,
-  type: ActionType,
+  type: DecisionActionType,
   comment: string,
-  options: { plannedDate?: string; tags?: string[] } = {},
+  options: { plannedDate?: string } = {},
 ): AdminAction {
   const current = requireState();
   const action: AdminAction = {
@@ -132,7 +143,6 @@ export function addAdminAction(
     actorId: current.adminUserId,
     createdAt: Date.now(),
     plannedDate: options.plannedDate?.trim() || undefined,
-    tags: options.tags?.length ? options.tags : undefined,
   };
   const nextStatus = STATUS_BY_ACTION[type];
   commit({
@@ -148,6 +158,36 @@ export function addAdminAction(
     ),
   });
   return action;
+}
+
+/**
+ * 共有のオン/オフ。対応ステータスとは別軸で、採用と両立する。
+ * 解除したときはタイムラインの記録も消えるので、ポイントも自動的に元に戻る。
+ */
+export function toggleShare(reportId: string, type: ShareActionType) {
+  const current = requireState();
+  const key = type === "share_sites" ? "sharedToSites" : "sharedToHq";
+  commit({
+    ...current,
+    reports: current.reports.map((report) => {
+      if (report.id !== reportId) return report;
+      const enabled = !report[key];
+      const actions = enabled
+        ? [
+            ...report.actions,
+            {
+              id: newId("a"),
+              type,
+              comment: "",
+              bonusPoints: actionOf(type).points,
+              actorId: current.adminUserId,
+              createdAt: Date.now(),
+            },
+          ]
+        : report.actions.filter((action) => action.type !== type);
+      return { ...report, [key]: enabled, actions };
+    }),
+  });
 }
 
 export function toggleReaction(reportId: string, kind: ReactionKind) {

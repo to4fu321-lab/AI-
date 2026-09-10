@@ -8,7 +8,7 @@ export function RoleSwitcher() {
   const demo = useDemoState();
   const router = useRouter();
 
-  if (!demo) return <div className="h-9 w-[152px] rounded-full bg-canvas" />;
+  if (!demo) return <div className="h-9 w-[120px] rounded-full bg-canvas" />;
 
   const change = (role: "staff" | "admin") => {
     setRole(role);
@@ -19,11 +19,11 @@ export function RoleSwitcher() {
     <div
       role="group"
       aria-label="表示するロールの切り替え（デモ用）"
-      className="flex items-center rounded-full border border-line bg-canvas p-0.5 text-xs font-bold"
+      className="flex items-center rounded-full border border-line bg-canvas p-0.5 text-note font-bold"
     >
       {(
         [
-          { value: "staff", label: "現場スタッフ" },
+          { value: "staff", label: "現場" },
           { value: "admin", label: "管理者" },
         ] as const
       ).map((option) => {
@@ -35,7 +35,7 @@ export function RoleSwitcher() {
             onClick={() => change(option.value)}
             aria-pressed={active}
             className={`rounded-full px-3 py-1.5 transition ${
-              active ? "bg-brand text-white shadow-sm" : "text-ink-muted"
+              active ? "bg-brand text-white" : "text-ink-muted"
             }`}
           >
             {option.label}

@@ -13,6 +13,8 @@ export const POINT_RULES = {
   adopted: 50,
   partial: 30,
   thanks: 5,
+  shareSites: 20,
+  shareHq: 10,
   weeklyStreak: 20,
 } as const;
 
@@ -131,6 +133,7 @@ export function badgesOf(userId: string, reports: Report[]): Badge[] {
   const adopted = mine.filter((r) => r.status === "adopted" || r.status === "partial");
   const withAfter = mine.filter((r) => r.afterImage);
   const hiyari = mine.filter((r) => r.type === "hiyari");
+  const spread = mine.filter((r) => r.sharedToSites);
   const likes = mine.reduce((sum, r) => sum + r.reactions.like.length, 0);
 
   return [
@@ -168,6 +171,13 @@ export function badgesOf(userId: string, reports: Report[]): Badge[] {
       emoji: "🦺",
       description: "ヒヤリハットを報告した",
       earned: hiyari.length >= 1,
+    },
+    {
+      id: "spread",
+      name: "横展開マイスター",
+      emoji: "🏢",
+      description: "提案が全拠点に共有された",
+      earned: spread.length >= 1,
     },
     {
       id: "loved",

@@ -1,4 +1,25 @@
-import type { ActionType, ReportStatus, ReportType, Urgency } from "./types";
+import type {
+  ActionType,
+  DecisionActionType,
+  ReportStatus,
+  ReportType,
+  ShareActionType,
+  Urgency,
+} from "./types";
+
+/** 拠点。デモでは3拠点 */
+export const SITES = ["川崎物流センター", "船橋物流センター", "大阪物流センター"] as const;
+
+/** 拠点内のエリア */
+export const AREAS = [
+  "ピッキングエリア",
+  "入荷バース",
+  "保管棚エリア",
+  "梱包ライン",
+  "出荷バース",
+  "資材置き場",
+  "休憩室・共用部",
+];
 
 export const REPORT_TYPES: {
   value: ReportType;
@@ -37,67 +58,59 @@ export const REPORT_TYPES: {
   },
 ];
 
-export const URGENCIES: { value: Urgency; label: string; className: string }[] = [
-  { value: "normal", label: "通常", className: "bg-canvas text-ink-muted border-line" },
-  { value: "soon", label: "早めに", className: "bg-amber-50 text-warn border-amber-200" },
-  { value: "danger", label: "危険", className: "bg-red-50 text-danger border-red-200" },
-];
-
-export const STATUSES: {
-  value: ReportStatus;
+/** 緊急度。バッジではなくカード左端の帯の色として使う */
+export const URGENCIES: {
+  value: Urgency;
   label: string;
-  className: string;
-  dot: string;
+  /** 一覧の並び順（小さいほど先） */
+  weight: number;
+  bar: string;
+  text: string;
 }[] = [
-  {
-    value: "new",
-    label: "未対応",
-    className: "bg-brand-soft text-brand-dark border-brand-line",
-    dot: "bg-brand",
-  },
-  {
-    value: "reviewing",
-    label: "検討中",
-    className: "bg-amber-50 text-warn border-amber-200",
-    dot: "bg-amber-500",
-  },
-  {
-    value: "adopted",
-    label: "採用",
-    className: "bg-emerald-50 text-status-adopted border-emerald-200",
-    dot: "bg-emerald-600",
-  },
-  {
-    value: "partial",
-    label: "一部採用",
-    className: "bg-cyan-50 text-status-partial border-cyan-200",
-    dot: "bg-cyan-600",
-  },
-  {
-    value: "declined",
-    label: "見送り",
-    className: "bg-slate-100 text-status-declined border-slate-200",
-    dot: "bg-slate-400",
-  },
+  { value: "danger", label: "危険", weight: 0, bar: "bg-danger", text: "text-danger" },
+  { value: "soon", label: "早めに", weight: 1, bar: "bg-warn", text: "text-warn" },
+  { value: "normal", label: "通常", weight: 2, bar: "bg-transparent", text: "text-ink-faint" },
 ];
 
-export const ACTIONS: {
+/** ステータス。塗らずに小さな丸の色＋グレーの文字で見せる */
+export const STATUSES: { value: ReportStatus; label: string; dot: string }[] = [
+  { value: "new", label: "未対応", dot: "bg-dot-new" },
+  { value: "reviewing", label: "対応中", dot: "bg-dot-reviewing" },
+  { value: "adopted", label: "採用", dot: "bg-dot-adopted" },
+  { value: "partial", label: "一部採用", dot: "bg-dot-partial" },
+  { value: "declined", label: "見送り", dot: "bg-dot-declined" },
+];
+
+/** 管理ダッシュボードのフィルタ（3つに集約） */
+export const ADMIN_FILTERS: {
+  value: "new" | "working" | "done";
+  label: string;
+  statuses: ReportStatus[];
+}[] = [
+  { value: "new", label: "未対応", statuses: ["new"] },
+  { value: "working", label: "対応中", statuses: ["reviewing"] },
+  { value: "done", label: "完了", statuses: ["adopted", "partial", "declined"] },
+];
+
+export interface ActionMeta {
   value: ActionType;
   label: string;
+  pastLabel: string;
   emoji: string;
   points: number;
-  /** タイムラインに表示する完了後の言い方 */
-  pastLabel: string;
   description: string;
   requiresComment?: boolean;
-}[] = [
+}
+
+/** 対応アクション（どれか1つを選ぶ） */
+export const ACTIONS: (ActionMeta & { value: DecisionActionType })[] = [
   {
     value: "adopted",
     label: "採用する",
     pastLabel: "採用しました",
     emoji: "✅",
     points: 50,
-    description: "実施が決まりました。投稿者に +50pt",
+    description: "実施が決まりました",
   },
   {
     value: "partial",
@@ -105,16 +118,16 @@ export const ACTIONS: {
     pastLabel: "一部修正して採用",
     emoji: "🛠",
     points: 30,
-    description: "修正内容を添えて採用。投稿者に +30pt",
+    description: "修正内容を添えて採用します",
     requiresComment: true,
   },
   {
     value: "reviewing",
-    label: "検討中にする",
+    label: "対応中にする",
     pastLabel: "確認しました",
     emoji: "👀",
     points: 0,
-    description: "受け取ったことを伝える",
+    description: "受け取ったことを伝えます",
   },
   {
     value: "thanks",
@@ -122,7 +135,7 @@ export const ACTIONS: {
     pastLabel: "お礼",
     emoji: "🙏",
     points: 5,
-    description: "感謝を伝える。投稿者に +5pt",
+    description: "感謝を伝えます",
   },
   {
     value: "declined",
@@ -130,22 +143,34 @@ export const ACTIONS: {
     pastLabel: "今回は見送り",
     emoji: "📁",
     points: 0,
-    description: "理由を必ず伝える",
+    description: "理由を必ず伝えます",
     requiresComment: true,
   },
 ];
 
-export const AREAS = [
-  "A棟 ピッキングエリア",
-  "A棟 入荷バース",
-  "B棟 保管棚",
-  "B棟 梱包ライン",
-  "出荷バース",
-  "資材置き場",
-  "休憩室・共用部",
+/** 共有アクション（対応と両立する別軸。もう一度押すと解除） */
+export const SHARE_OPTIONS: (ActionMeta & { value: ShareActionType; shortLabel: string })[] = [
+  {
+    value: "share_sites",
+    label: "全拠点へ共有する",
+    shortLabel: "全拠点へ共有",
+    pastLabel: "全拠点へ共有しました",
+    emoji: "🏢",
+    points: 20,
+    description: "他拠点のフィードにも事例として流れます",
+  },
+  {
+    value: "share_hq",
+    label: "本社へ報告する",
+    shortLabel: "本社へ報告",
+    pastLabel: "本社へ報告しました",
+    emoji: "🏛",
+    points: 10,
+    description: "全社の改善事例として本社に上げます",
+  },
 ];
 
-export const ACTION_TAGS = ["横展開したい", "全社共有", "安全パトロール項目"];
+const ALL_ACTIONS: ActionMeta[] = [...ACTIONS, ...SHARE_OPTIONS];
 
 export function reportTypeOf(value: ReportType) {
   return REPORT_TYPES.find((t) => t.value === value) ?? REPORT_TYPES[0];
@@ -156,9 +181,13 @@ export function statusOf(value: ReportStatus) {
 }
 
 export function urgencyOf(value: Urgency) {
-  return URGENCIES.find((u) => u.value === value) ?? URGENCIES[0];
+  return URGENCIES.find((u) => u.value === value) ?? URGENCIES[2];
 }
 
-export function actionOf(value: ActionType) {
-  return ACTIONS.find((a) => a.value === value) ?? ACTIONS[0];
+export function actionOf(value: ActionType): ActionMeta {
+  return ALL_ACTIONS.find((a) => a.value === value) ?? ACTIONS[0];
+}
+
+export function shareOf(value: ShareActionType) {
+  return SHARE_OPTIONS.find((s) => s.value === value) ?? SHARE_OPTIONS[0];
 }

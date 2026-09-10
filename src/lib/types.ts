@@ -4,11 +4,16 @@ export type ReportType = "improvement" | "damage" | "hiyari" | "trouble";
 /** 緊急度 */
 export type Urgency = "normal" | "soon" | "danger";
 
-/** 報告のステータス。管理者アクションで遷移する */
+/** 報告のステータス。管理者の対応アクションで遷移する */
 export type ReportStatus = "new" | "reviewing" | "adopted" | "partial" | "declined";
 
-/** 管理者が取れるアクション */
-export type ActionType = "reviewing" | "adopted" | "partial" | "declined" | "thanks";
+/** 対応アクション（ステータスが変わる） */
+export type DecisionActionType = "reviewing" | "adopted" | "partial" | "declined" | "thanks";
+
+/** 共有アクション（ステータスとは別軸。採用と両立する） */
+export type ShareActionType = "share_sites" | "share_hq";
+
+export type ActionType = DecisionActionType | ShareActionType;
 
 /** 共感の種類 */
 export type ReactionKind = "like" | "same";
@@ -31,8 +36,6 @@ export interface AdminAction {
   createdAt: number;
   /** 採用時の実施予定 */
   plannedDate?: string;
-  /** 「横展開したい」「全社共有」などのタグ */
-  tags?: string[];
 }
 
 export interface Report {
@@ -40,17 +43,23 @@ export interface Report {
   authorId: string;
   /** 匿名で投稿する */
   anonymous: boolean;
+  /** 報告が上がった拠点 */
+  site: string;
   type: ReportType;
   urgency: Urgency;
   title: string;
   body: string;
-  /** 倉庫エリア */
+  /** 拠点内のエリア */
   area: string;
   /** 場所の補足メモ */
   areaNote: string;
   beforeImage?: ImageRef;
   afterImage?: ImageRef;
   status: ReportStatus;
+  /** 全拠点へ共有された（他拠点のフィードにも流れる） */
+  sharedToSites: boolean;
+  /** 本社へ報告された */
+  sharedToHq: boolean;
   createdAt: number;
   actions: AdminAction[];
   reactions: Record<ReactionKind, string[]>;
@@ -60,6 +69,8 @@ export interface User {
   id: string;
   name: string;
   role: "staff" | "admin";
+  /** 所属拠点 */
+  site: string;
   team: string;
   /** アバターの背景色 */
   color: string;
@@ -71,6 +82,6 @@ export interface DemoState {
   /** デモ用に切り替える現在のユーザー（現場スタッフ） */
   staffUserId: string;
   adminUserId: string;
-  /** 現在のロール。ヘッダーで切り替える */
+  /** 現在のロール。URL に合わせて切り替わる */
   role: "staff" | "admin";
 }

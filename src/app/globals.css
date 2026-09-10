@@ -1,32 +1,32 @@
 @import "tailwindcss";
 
 @theme {
-  /* ブランド（トラスコ中山のコーポレートカラーを参考にしたオレンジ） */
+  /* ブランド（トラスコ中山のコーポレートカラーを参考にしたオレンジ）。
+     強い色はこれ1色だけ。主ボタンと現在地にしか使わない */
   --color-brand: #ea5504;
   --color-brand-dark: #c34503;
-  --color-brand-soft: #fff1e9;
-  --color-brand-line: #ffd6c0;
+  --color-brand-soft: #fff3ec;
 
   /* テキスト・面 */
-  --color-ink: #0f2540;
-  --color-ink-muted: #5b6b7f;
-  --color-ink-faint: #93a1b3;
+  --color-ink: #14243a;
+  --color-ink-muted: #5f7086;
+  --color-ink-faint: #94a2b3;
   --color-surface: #ffffff;
   --color-canvas: #f4f6f9;
-  --color-line: #e3e8ef;
+  --color-line: #e8ecf1;
 
-  /* ステータス */
-  --color-status-new: #ea5504;
-  --color-status-reviewing: #b45309;
-  --color-status-adopted: #067a52;
-  --color-status-partial: #0f7c8f;
-  --color-status-declined: #64748b;
+  /* ステータス（塗らずに小さな丸の色としてだけ使う） */
+  --color-dot-new: #ea5504;
+  --color-dot-reviewing: #d08700;
+  --color-dot-adopted: #0f9d63;
+  --color-dot-partial: #0d93ab;
+  --color-dot-declined: #9aa8b8;
 
-  /* 緊急度 */
+  /* 緊急度（カード左端の帯） */
   --color-danger: #d92020;
-  --color-warn: #b45309;
+  --color-warn: #d08700;
 
-  --radius-card: 16px;
+  --radius-card: 14px;
 
   --font-sans: var(--font-noto-sans-jp), ui-sans-serif, system-ui, sans-serif;
 }
@@ -46,12 +46,45 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* フォーカスリングはブランド色で統一 */
 :focus-visible {
   outline: 2px solid var(--color-brand);
   outline-offset: 2px;
 }
 
+/* ------------------------------------------------------------------
+   文字サイズは4段階だけ。数字を見せる場所のみ text-num を例外で使う
+   ------------------------------------------------------------------ */
+@utility text-title {
+  font-size: 1.25rem; /* 20px */
+  line-height: 1.4;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+@utility text-head {
+  font-size: 1rem; /* 16px */
+  line-height: 1.5;
+  font-weight: 700;
+}
+
+@utility text-body {
+  font-size: 0.875rem; /* 14px */
+  line-height: 1.7;
+}
+
+@utility text-note {
+  font-size: 0.75rem; /* 12px */
+  line-height: 1.5;
+}
+
+@utility text-num {
+  font-size: 1.75rem; /* 28px */
+  line-height: 1.1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 面は「枠線のみ・影なし・角丸1種類」で統一。入れ子の枠は作らない */
 @utility card {
   background: var(--color-surface);
   border: 1px solid var(--color-line);
@@ -65,25 +98,14 @@ body {
   }
 }
 
-@keyframes kb-rise {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 @keyframes kb-pop {
   0% {
     opacity: 0;
-    transform: scale(0.7);
+    transform: scale(0.8);
   }
   60% {
     opacity: 1;
-    transform: scale(1.08);
+    transform: scale(1.06);
   }
   100% {
     opacity: 1;
@@ -91,12 +113,8 @@ body {
   }
 }
 
-@utility animate-rise {
-  animation: kb-rise 0.35s ease-out both;
-}
-
 @utility animate-pop {
-  animation: kb-pop 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+  animation: kb-pop 0.4s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 }
 
 @media (prefers-reduced-motion: reduce) {

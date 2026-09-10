@@ -1,38 +1,37 @@
 import { reportTypeOf, statusOf, urgencyOf } from "@/lib/labels";
 import type { ReportStatus, ReportType, Urgency, User } from "@/lib/types";
 
-export function StatusBadge({ status }: { status: ReportStatus }) {
+/** ステータスは塗らず、小さな丸＋グレーの文字で示す */
+export function StatusDot({ status }: { status: ReportStatus }) {
   const meta = statusOf(status);
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold ${meta.className}`}
-    >
-      <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
+    <span className="inline-flex shrink-0 items-center gap-1.5 text-note text-ink-muted">
+      <span aria-hidden className={`h-2 w-2 rounded-full ${meta.dot}`} />
       {meta.label}
     </span>
   );
 }
 
-export function UrgencyBadge({ urgency }: { urgency: Urgency }) {
+/** 緊急度はカード左端の細い帯として表す（通常は表示しない） */
+export function UrgencyBar({ urgency }: { urgency: Urgency }) {
   if (urgency === "normal") return null;
-  const meta = urgencyOf(urgency);
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-bold ${meta.className}`}
-    >
-      {urgency === "danger" ? "⚠️" : "⏱"} {meta.label}
-    </span>
+      aria-hidden
+      className={`absolute inset-y-0 left-0 w-1 ${urgencyOf(urgency).bar}`}
+    />
   );
 }
 
-export function TypeChip({ type }: { type: ReportType }) {
+export function UrgencyText({ urgency }: { urgency: Urgency }) {
+  if (urgency === "normal") return null;
+  const meta = urgencyOf(urgency);
+  return <span className={`font-bold ${meta.text}`}>{meta.label}</span>;
+}
+
+export function typeText(type: ReportType) {
   const meta = reportTypeOf(type);
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-canvas px-2.5 py-1 text-[11px] font-bold text-ink-muted">
-      <span aria-hidden>{meta.emoji}</span>
-      {meta.short}
-    </span>
-  );
+  return `${meta.emoji} ${meta.short}`;
 }
 
 export function Avatar({
@@ -51,7 +50,7 @@ export function Avatar({
       style={{
         width: size,
         height: size,
-        background: anonymous || !user ? "#93a1b3" : user.color,
+        background: anonymous || !user ? "#94a2b3" : user.color,
         fontSize: size * 0.44,
       }}
       className="grid shrink-0 place-items-center rounded-full font-bold text-white"
@@ -62,6 +61,6 @@ export function Avatar({
 }
 
 export function authorName(user: User | null, anonymous: boolean) {
-  if (anonymous) return "匿名で投稿";
+  if (anonymous) return "匿名";
   return user?.name ?? "不明なユーザー";
 }

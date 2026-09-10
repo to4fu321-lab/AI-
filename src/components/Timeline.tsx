@@ -1,106 +1,67 @@
-import { Avatar } from "./Badges";
 import { actionOf } from "@/lib/labels";
 import { formatDateTime } from "@/lib/format";
 import type { Report, User } from "@/lib/types";
 
-/** 投稿から管理者アクションまでの流れ。「必ず返事がある」ことを可視化する */
-export function Timeline({
-  report,
-  users,
-}: {
-  report: Report;
-  users: User[];
-}) {
-  const findUser = (id: string) => users.find((user) => user.id === id) ?? null;
+/**
+ * 投稿から管理者アクションまでの流れ。
+ * カードの入れ子はやめ、線と丸だけの素直なリストにしている。
+ */
+export function Timeline({ report, users }: { report: Report; users: User[] }) {
+  const items = [
+    {
+      id: "posted",
+      title: "報告しました",
+      body: "",
+      meta: formatDateTime(report.createdAt),
+    },
+    ...report.actions.map((action) => {
+      const meta = actionOf(action.type);
+      const actor = users.find((user) => user.id === action.actorId);
+      const parts = [actor?.name ?? "管理者", formatDateTime(action.createdAt)];
+      if (action.plannedDate) parts.push(`実施予定：${action.plannedDate}`);
+      if (action.bonusPoints > 0) parts.push(`+${action.bonusPoints}pt`);
+      return {
+        id: action.id,
+        title: `${meta.emoji} ${meta.pastLabel}`,
+        body: action.comment,
+        meta: parts.join("・"),
+      };
+    }),
+  ];
+
+  if (report.actions.length === 0) {
+    items.push({
+      id: "waiting",
+      title: "担当者の確認待ちです",
+      body: "内容にかかわらず、必ず返事があります",
+      meta: "",
+    });
+  }
 
   return (
-    <ol className="space-y-3">
-      <li className="flex gap-3">
-        <TimelineDot emoji="📮" />
-        <div className="flex-1 pb-1">
-          <p className="text-sm font-bold text-ink">報告しました</p>
-          <p className="text-[11px] text-ink-faint">{formatDateTime(report.createdAt)}</p>
-        </div>
-      </li>
-
-      {report.actions.map((action) => {
-        const meta = actionOf(action.type);
-        const actor = findUser(action.actorId);
+    <ol>
+      {items.map((item, index) => {
+        const last = index === items.length - 1;
         return (
-          <li key={action.id} className="flex gap-3">
-            <TimelineDot emoji={meta.emoji} />
-            <div className="flex-1">
-              <div className="card p-3">
-                <div className="mb-1.5 flex items-center gap-2">
-                  <Avatar user={actor} size={22} />
-                  <span className="text-xs font-bold text-ink">{actor?.name ?? "管理者"}</span>
-                  <span className="rounded-full bg-canvas px-2 py-0.5 text-[10px] font-bold text-ink-muted">
-                    {meta.pastLabel}
-                  </span>
-                </div>
-                {action.comment ? (
-                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink">
-                    {action.comment}
-                  </p>
-                ) : null}
-                {action.plannedDate ? (
-                  <p className="mt-2 rounded-lg bg-canvas px-2 py-1 text-[11px] font-bold text-ink-muted">
-                    🗓 実施予定：{action.plannedDate}
-                  </p>
-                ) : null}
-                {action.tags?.length ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {action.tags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="rounded-full border border-brand-line bg-brand-soft px-2 py-0.5 text-[10px] font-bold text-brand-dark"
-                      >
-                        #{tag}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
-                {action.bonusPoints > 0 ? (
-                  <p className="mt-2 text-[11px] font-bold text-brand">
-                    投稿者に +{action.bonusPoints}pt
-                  </p>
-                ) : null}
-              </div>
-              <p className="mt-1 text-[11px] text-ink-faint">
-                {formatDateTime(action.createdAt)}
-              </p>
-            </div>
+          <li key={item.id} className={`relative pl-5 ${last ? "" : "pb-5"}`}>
+            <span
+              aria-hidden
+              className="absolute left-0 top-[7px] h-2.5 w-2.5 rounded-full bg-ink-faint"
+            />
+            {last ? null : (
+              <span
+                aria-hidden
+                className="absolute bottom-0 left-[4px] top-4 w-px bg-line"
+              />
+            )}
+            <p className="text-body font-bold text-ink">{item.title}</p>
+            {item.body ? (
+              <p className="mt-0.5 whitespace-pre-wrap text-body text-ink-muted">{item.body}</p>
+            ) : null}
+            {item.meta ? <p className="mt-0.5 text-note text-ink-faint">{item.meta}</p> : null}
           </li>
         );
       })}
-
-      {report.actions.length === 0 ? (
-        <li className="flex gap-3">
-          <TimelineDot emoji="⏳" muted />
-          <div className="flex-1">
-            <p className="text-sm font-bold text-ink-muted">担当者の確認待ちです</p>
-            <p className="text-[11px] text-ink-faint">
-              内容にかかわらず、必ず何らかの返事があります
-            </p>
-          </div>
-        </li>
-      ) : null}
     </ol>
-  );
-}
-
-function TimelineDot({ emoji, muted = false }: { emoji: string; muted?: boolean }) {
-  return (
-    <div className="flex flex-col items-center">
-      <span
-        aria-hidden
-        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-sm ${
-          muted ? "bg-canvas" : "bg-brand-soft"
-        }`}
-      >
-        {emoji}
-      </span>
-      <span aria-hidden className="mt-1 w-px flex-1 bg-line" />
-    </div>
   );
 }

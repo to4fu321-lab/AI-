@@ -6,13 +6,7 @@ import { DemoNote } from "@/components/DemoNote";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { LevelProgress } from "@/components/LevelProgress";
 import { ReportCard } from "@/components/ReportCard";
-import {
-  badgesOf,
-  monthlyRanking,
-  streakBonus,
-  userPoints,
-  userReports,
-} from "@/lib/points";
+import { badgesOf, monthlyRanking, userPoints, userReports } from "@/lib/points";
 import { resetDemo, setStaffUser, useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 
@@ -27,86 +21,74 @@ export function MyPageScreen() {
   if (!me) return <EmptyState title="ユーザーが見つかりません" />;
 
   const mine = userReports(me.id, demo.reports);
-  const points = userPoints(me.id, demo.reports);
+  const adopted = mine.filter((r) => r.status === "adopted" || r.status === "partial").length;
   const badges = badgesOf(me.id, demo.reports);
   const staffIds = demo.users.filter((user) => user.role === "staff").map((user) => user.id);
   const ranking = monthlyRanking(staffIds, demo.reports, now);
-  const bonus = streakBonus(mine);
+  const myRank = ranking.find((row) => row.userId === me.id);
+  const visibleRanking = ranking
+    .slice(0, 3)
+    .concat(myRank && myRank.rank > 3 ? [myRank] : []);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <section className="card p-4">
-        <div className="flex items-center gap-3">
-          <Avatar user={me} size={52} />
+        <div className="mb-4 flex items-center gap-3">
+          <Avatar user={me} size={44} />
           <div className="min-w-0">
-            <p className="text-lg font-bold text-ink">{me.name}</p>
-            <p className="text-xs text-ink-muted">{me.team}</p>
+            <p className="text-head text-ink">{me.name}</p>
+            <p className="text-note text-ink-muted">
+              {me.site}・{me.team}
+            </p>
           </div>
         </div>
-        <div className="mt-4">
-          <LevelProgress points={points} />
-        </div>
-        {bonus > 0 ? (
-          <p className="mt-3 rounded-xl bg-brand-soft px-3 py-2 text-[11px] font-bold text-brand-dark">
-            🔥 週3件の連続報告ボーナス +{bonus}pt を獲得しています
-          </p>
-        ) : null}
+
+        <LevelProgress points={userPoints(me.id, demo.reports)} />
+
+        <p className="mt-3 text-note text-ink-muted">
+          報告 {mine.length}件・採用 {adopted}件・今月{myRank?.rank ?? "-"}位
+        </p>
       </section>
 
       <section className="card p-4">
-        <h2 className="mb-3 text-sm font-bold text-ink">バッジ</h2>
+        <h2 className="mb-3 text-head text-ink">バッジ</h2>
         <ul className="grid grid-cols-3 gap-2">
           {badges.map((badge) => (
             <li
               key={badge.id}
-              className={`flex flex-col items-center gap-1 rounded-xl border p-3 text-center ${
-                badge.earned
-                  ? "border-brand-line bg-brand-soft"
-                  : "border-line bg-canvas opacity-50"
+              title={badge.description}
+              className={`flex flex-col items-center gap-1 rounded-lg py-3 text-center ${
+                badge.earned ? "bg-brand-soft" : "bg-canvas opacity-45"
               }`}
             >
-              <span aria-hidden className={`text-2xl ${badge.earned ? "" : "grayscale"}`}>
+              <span aria-hidden className={`text-xl ${badge.earned ? "" : "grayscale"}`}>
                 {badge.emoji}
               </span>
-              <span className="text-[11px] font-bold leading-tight text-ink">{badge.name}</span>
-              <span className="text-[10px] leading-tight text-ink-muted">
-                {badge.description}
-              </span>
+              <span className="text-note font-bold text-ink">{badge.name}</span>
             </li>
           ))}
         </ul>
       </section>
 
       <section className="card p-4">
-        <h2 className="mb-1 text-sm font-bold text-ink">今月のランキング</h2>
-        <p className="mb-3 text-[11px] text-ink-muted">
-          「たくさん出した人」ではなく「気づいた人」を称えるための、ゆるい順位です
-        </p>
-        <ol className="space-y-1.5">
-          {ranking.map((row) => {
+        <h2 className="mb-3 text-head text-ink">今月のランキング</h2>
+        <ol className="space-y-1">
+          {visibleRanking.map((row) => {
             const user = demo.users.find((item) => item.id === row.userId) ?? null;
             const isMe = row.userId === me.id;
             return (
               <li
                 key={row.userId}
-                className={`flex items-center gap-3 rounded-xl px-3 py-2 ${
-                  isMe ? "bg-brand-soft" : "bg-canvas"
+                className={`flex items-center gap-3 rounded-lg px-2 py-2 ${
+                  isMe ? "bg-brand-soft" : ""
                 }`}
               >
-                <span
-                  className={`w-6 shrink-0 text-center text-sm font-black ${
-                    row.rank <= 3 ? "text-brand" : "text-ink-faint"
-                  }`}
-                >
+                <span className="w-5 shrink-0 text-center text-body font-bold text-ink-faint">
                   {row.rank}
                 </span>
-                <Avatar user={user} size={28} />
-                <span className="min-w-0 flex-1 truncate text-sm font-bold text-ink">
-                  {user?.name}
-                  {isMe ? <span className="ml-1 text-[11px] text-brand">（自分）</span> : null}
-                </span>
-                <span className="shrink-0 text-xs text-ink-muted">{row.count}件</span>
-                <span className="w-14 shrink-0 text-right text-sm font-bold tabular-nums text-ink">
+                <Avatar user={user} size={24} />
+                <span className="min-w-0 flex-1 truncate text-body text-ink">{user?.name}</span>
+                <span className="shrink-0 text-note font-bold tabular-nums text-ink">
                   {row.points}pt
                 </span>
               </li>
@@ -115,8 +97,8 @@ export function MyPageScreen() {
         </ol>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-bold text-ink">自分の報告（{mine.length}件）</h2>
+      <section className="space-y-2.5">
+        <h2 className="text-head text-ink">自分の報告（{mine.length}件）</h2>
         {mine.length === 0 ? (
           <EmptyState title="まだ報告がありません" description="小さな気づきから始めましょう" />
         ) : (
@@ -134,22 +116,20 @@ export function MyPageScreen() {
         )}
       </section>
 
-      <section className="card p-4">
-        <h2 className="mb-2 text-sm font-bold text-ink">デモ設定</h2>
-        <label className="block">
-          <span className="mb-1 block text-xs text-ink-muted">
-            現場スタッフとしてログインする人を切り替える
-          </span>
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 pt-2 text-note text-ink-faint">
+        <label className="flex items-center gap-1.5">
+          ログイン中：
           <select
             value={me.id}
             onChange={(event) => setStaffUser(event.target.value)}
-            className="min-h-12 w-full rounded-xl border border-line bg-canvas px-3 text-sm text-ink"
+            aria-label="デモ用にログインするスタッフを切り替える"
+            className="min-h-9 rounded-lg border border-line bg-surface px-2 text-note text-ink"
           >
             {demo.users
               .filter((user) => user.role === "staff")
               .map((user) => (
                 <option key={user.id} value={user.id}>
-                  {user.name}（{user.team}）
+                  {user.name}（{user.site}）
                 </option>
               ))}
           </select>
@@ -161,11 +141,11 @@ export function MyPageScreen() {
             await resetDemo();
             setResetting(false);
           }}
-          className="mt-3 min-h-12 w-full rounded-xl border border-line text-sm font-bold text-ink-muted"
+          className="min-h-9 underline"
         >
           {resetting ? "リセット中…" : "デモを初期状態にもどす"}
         </button>
-      </section>
+      </div>
 
       <DemoNote />
     </div>
