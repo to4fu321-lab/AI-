@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600" role="img">
+<defs>
+<linearGradient id="wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9eef4"/><stop offset="1" stop-color="#cdd8e4"/></linearGradient>
+<linearGradient id="floor" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fa3b8"/><stop offset="1" stop-color="#6c7f94"/></linearGradient>
+<radialGradient id="vig" cx="0.5" cy="0.45" r="0.75"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.22"/></radialGradient>
+</defs>
+<rect width="800" height="600" fill="url(#wall)"/>
+<rect y="360" width="800" height="240" fill="url(#floor)"/>
+<path d="M0 360 L800 360" stroke="#5d7089" stroke-width="3"/>
+<rect x="230" y="430" width="340" height="26" fill="#c2a06a" stroke="#8a7043" stroke-width="3"/><rect x="250" y="350" width="130" height="80" fill="#d1a061" stroke="#a9743f" stroke-width="3" transform="rotate(-6 315 390)"/><rect x="400" y="355" width="130" height="80" fill="#d1a061" stroke="#a9743f" stroke-width="3" transform="rotate(5 465 395)"/><rect x="300" y="265" width="130" height="80" fill="#d1a061" stroke="#a9743f" stroke-width="3" transform="rotate(9 365 305)"/><rect x="430" y="260" width="110" height="80" fill="#d1a061" stroke="#a9743f" stroke-width="3" transform="rotate(-11 485 300)"/><rect x="340" y="180" width="120" height="80" fill="#d1a061" stroke="#a9743f" stroke-width="3" transform="rotate(-4 400 220)"/>
+<rect width="800" height="600" fill="url(#vig)"/>
+</svg>
