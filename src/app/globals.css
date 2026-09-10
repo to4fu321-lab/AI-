@@ -26,6 +26,9 @@
   --color-danger: #d92020;
   --color-warn: #d08700;
 
+  /* 採用ハンコ（朱色。モチベが上がる「押した」感を出す唯一の例外演出） */
+  --color-stamp: #c81e1e;
+
   --radius-card: 14px;
 
   --font-sans: var(--font-noto-sans-jp), ui-sans-serif, system-ui, sans-serif;
@@ -115,6 +118,61 @@ body {
 
 @utility animate-pop {
   animation: kb-pop 0.4s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+/* ------------------------------------------------------------------
+   採用ハンコ：「採用！」を押した瞬間が伝わるように、ここだけ例外で
+   朱色・二重枠・傾きをつける。他のステータスは丸＋グレー文字のまま
+   ------------------------------------------------------------------ */
+@keyframes kb-stamp {
+  0% {
+    opacity: 0;
+    transform: scale(2) rotate(-14deg);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(0.92) rotate(-9deg);
+  }
+  75% {
+    transform: scale(1.05) rotate(-11deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(-10deg);
+  }
+}
+
+@utility stamp {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 2px solid var(--color-stamp);
+  box-shadow: inset 0 0 0 3px var(--color-surface), inset 0 0 0 4px var(--color-stamp);
+  color: var(--color-stamp);
+  font-weight: 800;
+  text-align: center;
+  line-height: 1.05;
+  transform: rotate(-10deg);
+  animation: kb-stamp 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+@utility stamp-sm {
+  width: 2.75rem;
+  height: 2.75rem;
+  font-size: 0.58rem;
+  letter-spacing: 0;
+  padding: 0 2px;
+}
+
+@utility stamp-lg {
+  width: 4.25rem;
+  height: 4.25rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  border-width: 3px;
+  box-shadow: inset 0 0 0 4px var(--color-surface), inset 0 0 0 6px var(--color-stamp);
 }
 
 @media (prefers-reduced-motion: reduce) {

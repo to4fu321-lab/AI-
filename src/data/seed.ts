@@ -13,7 +13,7 @@ export const SEED_USERS: User[] = [
   { id: "u3", name: "佐々木 健", role: "staff", site: KAWASAKI, team: "入出荷B班", color: "#0f9d63" },
   { id: "u4", name: "リン・ホア", role: "staff", site: FUNABASHI, team: "梱包C班", color: "#7c3aed" },
   { id: "u5", name: "岡田 真一", role: "staff", site: OSAKA, team: "入出荷B班", color: "#b45309" },
-  { id: "a1", name: "中村 隆志", role: "admin", site: "本社", team: "物流企画部 課長", color: "#14243a" },
+  { id: "a1", name: "中村 隆志", role: "admin", site: KAWASAKI, team: "センター長", color: "#14243a" },
 ];
 
 /** 現在時刻を基準に、相対的な日時を持つシードデータを組み立てる */

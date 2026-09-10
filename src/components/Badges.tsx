@@ -1,9 +1,30 @@
 import { reportTypeOf, statusOf, urgencyOf } from "@/lib/labels";
 import type { ReportStatus, ReportType, Urgency, User } from "@/lib/types";
 
-/** ステータスは塗らず、小さな丸＋グレーの文字で示す */
-export function StatusDot({ status }: { status: ReportStatus }) {
+/**
+ * ステータスは基本、丸＋グレーの文字で示す。
+ * ただし「採用」「一部採用」だけは唯一の例外として、ハンコ風スタンプで
+ * 押した瞬間のモチベが伝わるようにする
+ */
+export function StatusDot({
+  status,
+  size = "sm",
+}: {
+  status: ReportStatus;
+  size?: "sm" | "lg";
+}) {
   const meta = statusOf(status);
+  if (status === "adopted" || status === "partial") {
+    return (
+      <span
+        role="img"
+        aria-label={`${meta.label}スタンプ`}
+        className={`stamp ${size === "lg" ? "stamp-lg" : "stamp-sm"}`}
+      >
+        {meta.label}
+      </span>
+    );
+  }
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5 text-note text-ink-muted">
       <span aria-hidden className={`h-2 w-2 rounded-full ${meta.dot}`} />

@@ -68,7 +68,7 @@ export function ReportDetailScreen({ id }: { id: string }) {
 
       <section>
         <div className="mb-1.5 flex items-center gap-3">
-          <StatusDot status={report.status} />
+          <StatusDot status={report.status} size="lg" />
           <UrgencyText urgency={report.urgency} />
         </div>
 

@@ -20,22 +20,29 @@ export function AdminDashboardScreen() {
   // 開いた瞬間に「今すぐ手を打つべきもの」から始まるよう、初期値は未対応
   const [filter, setFilter] = useState<Filter>("new");
 
-  const stats = useMemo(() => (demo ? dashboardStats(demo.reports, now) : null), [demo, now]);
+  /** この管理画面が担当する拠点。管理者アカウントに紐づく拠点だけを見る */
+  const mySite = demo?.users.find((user) => user.id === demo.adminUserId)?.site ?? null;
 
-  /** 危険かつ未対応。フィルタに関係なく最上部で警告する */
+  const myReports = useMemo(
+    () => (demo && mySite ? demo.reports.filter((report) => report.site === mySite) : []),
+    [demo, mySite],
+  );
+
+  const stats = useMemo(() => (demo ? dashboardStats(myReports, now) : null), [demo, myReports, now]);
+
+  /** 危険かつ未対応。フィルタに関係なく最上部で警告する（自拠点のみ） */
   const urgent = useMemo(
     () =>
-      (demo?.reports ?? [])
+      myReports
         .filter((report) => report.urgency === "danger" && report.status === "new")
         .sort((a, b) => a.createdAt - b.createdAt),
-    [demo],
+    [myReports],
   );
 
   const rows = useMemo(() => {
-    if (!demo) return [];
     const statuses = ADMIN_FILTERS.find((item) => item.value === filter)!.statuses;
     const urgentIds = new Set(urgent.map((report) => report.id));
-    return demo.reports
+    return myReports
       .filter((report) => statuses.includes(report.status))
       .filter((report) => !(filter === "new" && urgentIds.has(report.id)))
       .sort((a, b) =>
@@ -45,16 +52,25 @@ export function AdminDashboardScreen() {
             urgencyOf(a.urgency).weight - urgencyOf(b.urgency).weight ||
             a.createdAt - b.createdAt,
       );
-  }, [demo, filter, urgent]);
+  }, [myReports, filter, urgent]);
+
+  /** 他拠点から全拠点共有された事例。対応欄はごちゃつくので混ぜず、参考として別枠にまとめる */
+  const sharedFromOtherSites = useMemo(
+    () =>
+      (demo?.reports ?? [])
+        .filter((report) => report.site !== mySite && report.sharedToSites)
+        .sort((a, b) => b.createdAt - a.createdAt),
+    [demo, mySite],
+  );
 
   if (!demo || !stats) return <LoadingBlock />;
 
   return (
     <div className="space-y-5">
       <header>
-        <h1 className="text-title text-ink">現場改善ダッシュボード</h1>
+        <h1 className="text-title text-ink">{mySite ?? "拠点"}の改善ダッシュボード</h1>
         <p className="text-note text-ink-muted">
-          全3拠点から届いた声に、必ず反応するための管理画面です
+          自拠点から届いた声に、必ず反応するための管理画面です
         </p>
       </header>
 
@@ -133,6 +149,26 @@ export function AdminDashboardScreen() {
         )}
       </section>
 
+      {sharedFromOtherSites.length > 0 ? (
+        <section className="space-y-2">
+          <h2 className="text-head text-ink">🏢 他拠点からの共有事例</h2>
+          <p className="text-note text-ink-faint">
+            参考情報です。対応は共有元の拠点が行うため、ここからの操作はできません
+          </p>
+          <ul className="space-y-2">
+            {sharedFromOtherSites.map((report) => (
+              <ReportRow
+                key={report.id}
+                report={report}
+                users={demo.users}
+                now={now}
+                readOnly
+              />
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <DemoNote />
     </div>
   );
@@ -143,11 +179,13 @@ function ReportRow({
   users,
   now,
   tone = "normal",
+  readOnly = false,
 }: {
   report: Report;
   users: User[];
   now: number;
   tone?: "normal" | "alert";
+  readOnly?: boolean;
 }) {
   const author = users.find((user) => user.id === report.authorId) ?? null;
   const meta = [
@@ -160,7 +198,7 @@ function ReportRow({
   return (
     <li>
       <Link
-        href={`/admin/${report.id}`}
+        href={readOnly ? `/report/${report.id}` : `/admin/${report.id}`}
         className={`relative flex items-center gap-3 overflow-hidden rounded-[14px] border p-3 transition hover:border-ink-faint ${
           tone === "alert" ? "border-red-200 bg-surface" : "card"
         }`}
