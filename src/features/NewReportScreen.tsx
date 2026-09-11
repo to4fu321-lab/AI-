@@ -6,8 +6,9 @@ import { useEffect, useRef, useState } from "react";
 import { LoadingBlock } from "@/components/EmptyState";
 import { PhotoField } from "@/components/PhotoField";
 import { PointsBurst } from "@/components/PointsBurst";
+import { PolishAssist } from "@/components/PolishAssist";
 import { VoiceInputButton } from "@/components/VoiceInputButton";
-import { AREAS, REPORT_TYPES, URGENCIES } from "@/lib/labels";
+import { AREAS, REPORT_TYPES, URGENCIES, reportTypeOf } from "@/lib/labels";
 import { postPointLines, postPoints } from "@/lib/points";
 import { putImage } from "@/lib/storage";
 import { createReport, updateReport, useDemoState, useImageUrl } from "@/lib/store";
@@ -48,6 +49,8 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
 
   const [title, setTitle] = useState(editReport?.title ?? "");
   const [body, setBody] = useState(editReport?.body ?? "");
+  // AIで整えたときだけ入る、現場が書いた元のメモ
+  const [rawNote, setRawNote] = useState(editReport?.rawNote ?? "");
   const [area, setArea] = useState(editReport?.area ?? AREAS[0]);
   const [areaNote, setAreaNote] = useState(editReport?.areaNote ?? "");
   const [anonymous, setAnonymous] = useState(editReport?.anonymous ?? false);
@@ -79,6 +82,7 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
         urgency,
         title,
         body,
+        rawNote,
         area,
         areaNote,
         anonymous,
@@ -199,6 +203,18 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
       {step === 2 ? (
         <section className="space-y-4">
           <h1 className="text-title text-ink">ひとことで教えてください</h1>
+
+          <PolishAssist
+            title={title}
+            body={body}
+            category={type ? reportTypeOf(type).label : ""}
+            area={area}
+            onApply={(result) => {
+              setRawNote(result.rawNote);
+              setTitle(result.title);
+              setBody(result.body);
+            }}
+          />
 
           <div className="card space-y-4 p-4">
             <Field label="タイトル">

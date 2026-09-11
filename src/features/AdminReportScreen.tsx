@@ -99,6 +99,15 @@ export function AdminReportScreen({ id }: { id: string }) {
               <p className="mt-3 whitespace-pre-wrap text-body text-ink-muted">{report.body}</p>
             ) : null}
 
+            {report.rawNote ? (
+              <details className="mt-3 rounded-lg border border-line bg-canvas p-3">
+                <summary className="cursor-pointer text-note font-bold text-ink-muted">
+                  現場が書いた元のメモを見る
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap text-body text-ink">{report.rawNote}</p>
+              </details>
+            ) : null}
+
             <div className="mt-4 flex items-center gap-2">
               <Avatar user={author} anonymous={report.anonymous} size={28} />
               <p className="text-note text-ink-muted">

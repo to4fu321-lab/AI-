@@ -81,6 +81,8 @@ export interface NewReportInput {
   urgency: Urgency;
   title: string;
   body: string;
+  /** AIで整えた場合の、現場が書いた元のメモ */
+  rawNote?: string;
   area: string;
   areaNote: string;
   beforeImage?: string;
@@ -99,6 +101,7 @@ export function createReport(input: NewReportInput): Report {
     urgency: input.urgency,
     title: input.title.trim(),
     body: input.body.trim(),
+    rawNote: input.rawNote?.trim() || undefined,
     area: input.area,
     areaNote: input.areaNote.trim(),
     beforeImage: input.beforeImage,
@@ -126,6 +129,7 @@ export function updateReport(reportId: string, input: NewReportInput): Report | 
       urgency: input.urgency,
       title: input.title.trim(),
       body: input.body.trim(),
+      rawNote: input.rawNote?.trim() || report.rawNote,
       area: input.area,
       areaNote: input.areaNote.trim(),
       anonymous: input.anonymous,

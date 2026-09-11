@@ -73,6 +73,11 @@ export interface Report {
   urgency: Urgency;
   title: string;
   body: string;
+  /**
+   * AIで文章を整えたときの、現場が書いた元のメモ。
+   * 整えた文だけが残ると「誰の、どんな言葉だったか」が消えるので必ず持っておく
+   */
+  rawNote?: string;
   /** 拠点内のエリア */
   area: string;
   /** 場所の補足メモ */
