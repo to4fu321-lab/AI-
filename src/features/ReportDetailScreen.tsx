@@ -40,6 +40,8 @@ export function ReportDetailScreen({ id }: { id: string }) {
     router.push("/");
   };
 
+  const totalReactions = report.reactions.like.length + report.reactions.same.length;
+
   const reactionButton = (kind: ReactionKind, emoji: string, label: string) => {
     const list = report.reactions[kind];
     const active = list.includes(demo.staffUserId);
@@ -110,7 +112,7 @@ export function ReportDetailScreen({ id }: { id: string }) {
 
         {report.sharedToSites || report.sharedToHq ? (
           <p className="mt-2 text-note font-bold text-ink">
-            {report.sharedToSites ? "🏢 全拠点に共有されました" : null}
+            {report.sharedToSites ? "🏢 この改善は他拠点にも横展開されました" : null}
             {report.sharedToSites && report.sharedToHq ? "　" : null}
             {report.sharedToHq ? "🏛 本社へ報告されました" : null}
           </p>
@@ -128,9 +130,16 @@ export function ReportDetailScreen({ id }: { id: string }) {
         </div>
       </section>
 
-      <div className="flex gap-2">
-        {reactionButton("like", "👍", "いいね")}
-        {reactionButton("same", "💡", "自分も思ってた")}
+      <div className="space-y-1.5">
+        <div className="flex gap-2">
+          {reactionButton("like", "🙌", "共感する")}
+          {reactionButton("same", "💡", "自分も困ってる")}
+        </div>
+        {totalReactions > 0 ? (
+          <p className="text-note text-ink-muted">
+            👥 {totalReactions}人が同じ課題を感じています
+          </p>
+        ) : null}
       </div>
 
       <section className="card p-4">

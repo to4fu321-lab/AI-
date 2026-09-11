@@ -38,6 +38,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="text-[15px] font-bold tracking-tight text-ink">
               カイゼンボード
             </span>
+            <span className="rounded border border-line px-1.5 py-0.5 text-[10px] font-bold leading-none text-ink-faint">
+              DEMO
+            </span>
           </Link>
           <RoleSwitcher />
         </div>

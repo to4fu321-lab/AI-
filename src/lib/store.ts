@@ -154,7 +154,7 @@ const STATUS_BY_ACTION: Record<DecisionActionType, ReportStatus | null> = {
 
 function currentUserSite(current: DemoState): string {
   return (
-    current.users.find((user) => user.id === current.staffUserId)?.site ?? "川崎物流センター"
+    current.users.find((user) => user.id === current.staffUserId)?.site ?? "札幌物流センター"
   );
 }
 

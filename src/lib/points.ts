@@ -132,7 +132,7 @@ export function badgesOf(userId: string, reports: Report[]): Badge[] {
   const mine = userReports(userId, reports);
   const adopted = mine.filter((r) => r.status === "adopted" || r.status === "partial");
   const withAfter = mine.filter((r) => r.afterImage);
-  const hiyari = mine.filter((r) => r.type === "hiyari");
+  const safetyReports = mine.filter((r) => r.type === "safety");
   const spread = mine.filter((r) => r.sharedToSites);
   const likes = mine.reduce((sum, r) => sum + r.reactions.like.length, 0);
 
@@ -169,14 +169,14 @@ export function badgesOf(userId: string, reports: Report[]): Badge[] {
       id: "safety",
       name: "セーフティキーパー",
       emoji: "🦺",
-      description: "ヒヤリハットを報告した",
-      earned: hiyari.length >= 1,
+      description: "安全の報告をした",
+      earned: safetyReports.length >= 1,
     },
     {
       id: "spread",
       name: "横展開マイスター",
       emoji: "🏢",
-      description: "提案が全拠点に共有された",
+      description: "提案が他拠点に横展開された",
       earned: spread.length >= 1,
     },
     {

@@ -31,7 +31,7 @@ export function ReportCard({
     authorName(author, report.anonymous),
     timeAgo(report.createdAt, now),
   ];
-  if (reactions > 0) meta.push(`👍 ${reactions}`);
+  if (reactions > 0) meta.push(`🙌 共感${reactions}`);
 
   return (
     <Link
@@ -57,7 +57,7 @@ export function ReportCard({
         <p className="mt-1 truncate text-note text-ink-muted">{meta.join("・")}</p>
         {fromOtherSite ? (
           <p className="mt-0.5 truncate text-note text-ink-faint">
-            🏢 {report.site}の事例
+            🏢 {report.site}からの横展開事例
           </p>
         ) : null}
       </div>

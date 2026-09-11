@@ -8,7 +8,7 @@ import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
 import { formatDateTime } from "@/lib/format";
-import { ACTIONS, SHARE_OPTIONS, actionOf } from "@/lib/labels";
+import { ACTIONS, DECLINE_REASONS, SHARE_OPTIONS, actionOf } from "@/lib/labels";
 import { addAdminAction, toggleShare, useDemoState } from "@/lib/store";
 import type { DecisionActionType } from "@/lib/types";
 
@@ -95,8 +95,13 @@ export function AdminReportScreen({ id }: { id: string }) {
               <p className="text-note text-ink-muted">
                 {authorName(author, report.anonymous)}
                 {author && !report.anonymous ? `（${author.team}）` : ""}・
-                {formatDateTime(report.createdAt)}・👍 {report.reactions.like.length}
+                {formatDateTime(report.createdAt)}
               </p>
+              {report.reactions.like.length + report.reactions.same.length > 0 ? (
+                <p className="mt-1 text-note font-bold text-ink">
+                  👥 {report.reactions.like.length + report.reactions.same.length}人が同じ課題を感じています
+                </p>
+              ) : null}
             </div>
           </section>
 
@@ -142,6 +147,24 @@ export function AdminReportScreen({ id }: { id: string }) {
                     {active ? (
                       <div className="mt-2 space-y-2">
                         <p className="text-note text-ink-muted">{action.description}</p>
+                        {action.value === "declined" ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {DECLINE_REASONS.map((reason) => (
+                              <button
+                                key={reason}
+                                type="button"
+                                onClick={() =>
+                                  setComment((current) =>
+                                    current ? `${current}\n${reason}：` : `${reason}：`,
+                                  )
+                                }
+                                className="rounded-full border border-line bg-surface px-2.5 py-1 text-note font-bold text-ink-muted transition active:scale-95"
+                              >
+                                {reason}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
                         <textarea
                           value={comment}
                           onChange={(event) => setComment(event.target.value)}

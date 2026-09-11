@@ -84,10 +84,10 @@ export function AdminDashboardScreen() {
           </p>
         </div>
         <p className="text-note text-ink-muted">
-          今月 {stats.monthlyCount}件・採用率 {Math.round(stats.adoptionRate * 100)}%・平均返答{" "}
-          {stats.averageFirstReplyHours === null
-            ? "—"
-            : `${Math.round(stats.averageFirstReplyHours)}時間`}
+          {stats.dangerCount > 0 ? (
+            <span className="font-bold text-danger">危険 {stats.dangerCount}件・</span>
+          ) : null}
+          今月 {stats.monthlyCount}件・採用率 {Math.round(stats.adoptionRate * 100)}%
         </p>
       </section>
 
@@ -151,7 +151,7 @@ export function AdminDashboardScreen() {
               参考情報です。対応は共有元の拠点が行うため、ここからの操作はできません
             </p>
             {sharedFromOtherSites.length === 0 ? (
-              <EmptyState emoji="🏢" title="他拠点からの共有事例はまだありません" />
+              <EmptyState emoji="🏢" title="他拠点からの横展開事例はまだありません" />
             ) : (
               <ul className="space-y-2">
                 {sharedFromOtherSites.map((report) => (
@@ -206,12 +206,14 @@ function ReportRow({
   readOnly?: boolean;
 }) {
   const author = users.find((user) => user.id === report.authorId) ?? null;
+  const empathyCount = report.reactions.like.length + report.reactions.same.length;
   const meta = [
     report.site,
     authorName(author, report.anonymous),
     report.area,
     timeAgo(report.createdAt, now),
   ];
+  if (empathyCount > 0) meta.push(`👥 ${empathyCount}人`);
 
   return (
     <li>
@@ -226,7 +228,7 @@ function ReportRow({
           <p className="truncate text-head text-ink">{report.title}</p>
           <p className="mt-0.5 truncate text-note text-ink-muted">{meta.join("・")}</p>
         </div>
-        {report.sharedToSites ? <span title="全拠点へ共有ずみ">🏢</span> : null}
+        {report.sharedToSites ? <span title="横展開ずみ">🏢</span> : null}
         {report.sharedToHq ? <span title="本社へ報告ずみ">🏛</span> : null}
         <StatusDot status={report.status} />
       </Link>

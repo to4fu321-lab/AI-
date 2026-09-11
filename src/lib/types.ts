@@ -1,5 +1,12 @@
-/** 報告の種類 */
-export type ReportType = "improvement" | "damage" | "hiyari" | "trouble";
+/** 報告のカテゴリ。管理者が案件を整理・判断するための軸 */
+export type ReportType =
+  | "safety"
+  | "efficiency"
+  | "quality"
+  | "equipment"
+  | "organization"
+  | "inventory"
+  | "other";
 
 /** 緊急度 */
 export type Urgency = "normal" | "soon" | "danger";
@@ -56,7 +63,7 @@ export interface Report {
   beforeImage?: ImageRef;
   afterImage?: ImageRef;
   status: ReportStatus;
-  /** 全拠点へ共有された（他拠点のフィードにも流れる） */
+  /** 他拠点へ横展開された（他拠点のフィードにも流れる） */
   sharedToSites: boolean;
   /** 本社へ報告された */
   sharedToHq: boolean;

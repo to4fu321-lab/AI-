@@ -15,8 +15,9 @@
   --color-canvas: #f4f6f9;
   --color-line: #e8ecf1;
 
-  /* ステータス（塗らずに小さな丸の色としてだけ使う） */
-  --color-dot-new: #ea5504;
+  /* ステータス（塗らずに小さな丸の色としてだけ使う）。
+     ブランドオレンジは主要アクション専用なので、状態表示には別の色を割り当てる */
+  --color-dot-new: #b45309;
   --color-dot-reviewing: #d08700;
   --color-dot-adopted: #0f9d63;
   --color-dot-partial: #0d93ab;
