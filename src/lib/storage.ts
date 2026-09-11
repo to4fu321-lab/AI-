@@ -8,7 +8,7 @@
 import type { DemoState } from "./types";
 
 // データ構造を変えたらキーを上げる（古い保存データを読み込まないため）
-const STATE_KEY = "kaizen-board:state:v2";
+const STATE_KEY = "kaizen-board:state:v3";
 const DB_NAME = "kaizen-board";
 const DB_VERSION = 1;
 const IMAGE_STORE = "images";

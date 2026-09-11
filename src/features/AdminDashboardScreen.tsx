@@ -12,7 +12,7 @@ import { useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 import type { Report, User } from "@/lib/types";
 
-type Filter = (typeof ADMIN_FILTERS)[number]["value"];
+type Filter = (typeof ADMIN_FILTERS)[number]["value"] | "shared";
 
 export function AdminDashboardScreen() {
   const demo = useDemoState();
@@ -40,7 +40,8 @@ export function AdminDashboardScreen() {
   );
 
   const rows = useMemo(() => {
-    const statuses = ADMIN_FILTERS.find((item) => item.value === filter)!.statuses;
+    const statuses = ADMIN_FILTERS.find((item) => item.value === filter)?.statuses;
+    if (!statuses) return [];
     const urgentIds = new Set(urgent.map((report) => report.id));
     return myReports
       .filter((report) => statuses.includes(report.status))
@@ -112,7 +113,7 @@ export function AdminDashboardScreen() {
       <section className="space-y-3">
         <div className="flex gap-2">
           {ADMIN_FILTERS.map((item) => {
-            const count = demo.reports.filter((r) => item.statuses.includes(r.status)).length;
+            const count = myReports.filter((r) => item.statuses.includes(r.status)).length;
             const active = filter === item.value;
             return (
               <button
@@ -130,44 +131,61 @@ export function AdminDashboardScreen() {
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={() => setFilter("shared")}
+            aria-pressed={filter === "shared"}
+            className={`min-h-10 flex-1 rounded-full border text-note font-bold transition ${
+              filter === "shared"
+                ? "border-brand bg-brand text-white"
+                : "border-line bg-surface text-ink-muted"
+            }`}
+          >
+            🏢 他拠点（{sharedFromOtherSites.length}）
+          </button>
         </div>
 
-        <p className="text-note text-ink-faint">
-          {filter === "done"
-            ? "新しい順に表示しています"
-            : "危険 → 早めに → お待たせしている順に並んでいます"}
-        </p>
-
-        {rows.length === 0 ? (
-          <EmptyState emoji="✅" title="この条件の報告はありません" />
+        {filter === "shared" ? (
+          <>
+            <p className="text-note text-ink-faint">
+              参考情報です。対応は共有元の拠点が行うため、ここからの操作はできません
+            </p>
+            {sharedFromOtherSites.length === 0 ? (
+              <EmptyState emoji="🏢" title="他拠点からの共有事例はまだありません" />
+            ) : (
+              <ul className="space-y-2">
+                {sharedFromOtherSites.map((report) => (
+                  <ReportRow
+                    key={report.id}
+                    report={report}
+                    users={demo.users}
+                    now={now}
+                    readOnly
+                  />
+                ))}
+              </ul>
+            )}
+          </>
         ) : (
-          <ul className="space-y-2">
-            {rows.map((report) => (
-              <ReportRow key={report.id} report={report} users={demo.users} now={now} />
-            ))}
-          </ul>
+          <>
+            <p className="text-note text-ink-faint">
+              {filter === "done"
+                ? "新しい順に表示しています"
+                : "危険 → 早めに → お待たせしている順に並んでいます"}
+            </p>
+
+            {rows.length === 0 ? (
+              <EmptyState emoji="✅" title="この条件の報告はありません" />
+            ) : (
+              <ul className="space-y-2">
+                {rows.map((report) => (
+                  <ReportRow key={report.id} report={report} users={demo.users} now={now} />
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </section>
-
-      {sharedFromOtherSites.length > 0 ? (
-        <section className="space-y-2">
-          <h2 className="text-head text-ink">🏢 他拠点からの共有事例</h2>
-          <p className="text-note text-ink-faint">
-            参考情報です。対応は共有元の拠点が行うため、ここからの操作はできません
-          </p>
-          <ul className="space-y-2">
-            {sharedFromOtherSites.map((report) => (
-              <ReportRow
-                key={report.id}
-                report={report}
-                users={demo.users}
-                now={now}
-                readOnly
-              />
-            ))}
-          </ul>
-        </section>
-      ) : null}
 
       <DemoNote />
     </div>
