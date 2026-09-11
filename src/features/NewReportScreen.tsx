@@ -2,55 +2,91 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LoadingBlock } from "@/components/EmptyState";
 import { PhotoField } from "@/components/PhotoField";
 import { PointsBurst } from "@/components/PointsBurst";
+import { VoiceInputButton } from "@/components/VoiceInputButton";
 import { AREAS, REPORT_TYPES, URGENCIES } from "@/lib/labels";
 import { postPointLines, postPoints } from "@/lib/points";
 import { putImage } from "@/lib/storage";
-import { createReport, useDemoState } from "@/lib/store";
+import { createReport, updateReport, useDemoState, useImageUrl } from "@/lib/store";
 import type { Report, ReportType, Urgency } from "@/lib/types";
 
-export function NewReportScreen() {
+/** 新規投稿と、自分の投稿の修正の両方をこの画面でまかなう */
+export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
   const demo = useDemoState();
   const router = useRouter();
+  const isEdit = Boolean(editReport);
 
   const [step, setStep] = useState(0);
-  const [type, setType] = useState<ReportType | null>(null);
-  const [urgency, setUrgency] = useState<Urgency>("normal");
-  const [before, setBefore] = useState<string | null>(null);
-  const [after, setAfter] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [area, setArea] = useState(AREAS[0]);
-  const [areaNote, setAreaNote] = useState("");
-  const [anonymous, setAnonymous] = useState(false);
+  const [type, setType] = useState<ReportType | null>(editReport?.type ?? null);
+  const [urgency, setUrgency] = useState<Urgency>(editReport?.urgency ?? "normal");
+
+  // 編集時：idb 参照は非同期解決が必要なので、解決できるまでは resolvedBefore/After 待ち
+  const resolvedBefore = useImageUrl(editReport?.beforeImage);
+  const resolvedAfter = useImageUrl(editReport?.afterImage);
+  const [before, setBefore] = useState<string | null>(
+    editReport?.beforeImage && !editReport.beforeImage.startsWith("idb:")
+      ? editReport.beforeImage
+      : null,
+  );
+  const [after, setAfter] = useState<string | null>(
+    editReport?.afterImage && !editReport.afterImage.startsWith("idb:")
+      ? editReport.afterImage
+      : null,
+  );
+  const beforeTouched = useRef(Boolean(before));
+  const afterTouched = useRef(Boolean(after));
+
+  useEffect(() => {
+    if (!beforeTouched.current && resolvedBefore) setBefore(resolvedBefore);
+  }, [resolvedBefore]);
+  useEffect(() => {
+    if (!afterTouched.current && resolvedAfter) setAfter(resolvedAfter);
+  }, [resolvedAfter]);
+
+  const [title, setTitle] = useState(editReport?.title ?? "");
+  const [body, setBody] = useState(editReport?.body ?? "");
+  const [area, setArea] = useState(editReport?.area ?? AREAS[0]);
+  const [areaNote, setAreaNote] = useState(editReport?.areaNote ?? "");
+  const [anonymous, setAnonymous] = useState(editReport?.anonymous ?? false);
   const [saving, setSaving] = useState(false);
   const [created, setCreated] = useState<Report | null>(null);
 
   if (!demo) return <LoadingBlock />;
-  if (created) return <SubmittedScreen report={created} />;
+  if (created) return <SubmittedScreen report={created} isEdit={isEdit} />;
+
+  /** 変更されていない画像はそのまま元の参照を維持し、変更分だけ新規保存する */
+  const resolveImage = async (
+    value: string | null,
+    originalRef: string | undefined,
+  ): Promise<string | undefined> => {
+    if (!value) return undefined;
+    if (value.startsWith("data:")) return putImage(await dataUrlToBlob(value));
+    if (value.startsWith("blob:")) return originalRef;
+    return value;
+  };
 
   const submit = async () => {
     if (!type || !title.trim()) return;
     setSaving(true);
     try {
-      const beforeRef = before ? await putImage(await dataUrlToBlob(before)) : undefined;
-      const afterRef = after ? await putImage(await dataUrlToBlob(after)) : undefined;
-      setCreated(
-        createReport({
-          type,
-          urgency,
-          title,
-          body,
-          area,
-          areaNote,
-          anonymous,
-          beforeImage: beforeRef,
-          afterImage: afterRef,
-        }),
-      );
+      const beforeRef = await resolveImage(before, editReport?.beforeImage);
+      const afterRef = await resolveImage(after, editReport?.afterImage);
+      const input = {
+        type,
+        urgency,
+        title,
+        body,
+        area,
+        areaNote,
+        anonymous,
+        beforeImage: beforeRef,
+        afterImage: afterRef,
+      };
+      const result = isEdit && editReport ? updateReport(editReport.id, input) : createReport(input);
+      if (result) setCreated(result);
     } finally {
       setSaving(false);
     }
@@ -65,7 +101,9 @@ export function NewReportScreen() {
     <div className="space-y-5">
       <button
         type="button"
-        onClick={() => (step === 0 ? router.push("/") : setStep(step - 1))}
+        onClick={() =>
+          step === 0 ? router.push(isEdit && editReport ? `/report/${editReport.id}` : "/") : setStep(step - 1)
+        }
         className="inline-flex min-h-11 items-center text-body font-bold text-ink-muted"
       >
         ← {step === 0 ? "やめる" : "もどる"}
@@ -136,12 +174,23 @@ export function NewReportScreen() {
           <p className="-mt-2 text-note text-ink-muted">
             撮った写真に、指で丸や矢印を書き込めます。
           </p>
-          <PhotoField label="現状（Before）" hint="任意" value={before} onChange={setBefore} />
+          <PhotoField
+            label="現状（Before）"
+            hint="任意"
+            value={before}
+            onChange={(value) => {
+              beforeTouched.current = true;
+              setBefore(value);
+            }}
+          />
           <PhotoField
             label="こうしたい / 直した後（After）"
             hint="任意・+10pt"
             value={after}
-            onChange={setAfter}
+            onChange={(value) => {
+              afterTouched.current = true;
+              setAfter(value);
+            }}
           />
           <StepButton onClick={() => setStep(2)}>つぎへ</StepButton>
         </section>
@@ -153,23 +202,35 @@ export function NewReportScreen() {
 
           <div className="card space-y-4 p-4">
             <Field label="タイトル">
-              <input
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                maxLength={40}
-                placeholder="例）棚のラベルが小さくて見えない"
-                className="min-h-12 w-full rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  maxLength={40}
+                  placeholder="例）棚のラベルが小さくて見えない"
+                  className="min-h-12 w-full flex-1 rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
+                />
+                <VoiceInputButton
+                  onResult={(text) => setTitle((current) => (current ? `${current}${text}` : text).slice(0, 40))}
+                />
+              </div>
             </Field>
 
             <Field label="くわしく（任意）">
-              <textarea
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
-                rows={4}
-                placeholder="ひとことでも大丈夫です"
-                className="w-full rounded-lg border border-line bg-canvas p-3 text-body text-ink outline-none focus:border-brand"
-              />
+              <div className="flex items-start gap-2">
+                <textarea
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  rows={4}
+                  placeholder="ひとことでも大丈夫です"
+                  className="w-full flex-1 rounded-lg border border-line bg-canvas p-3 text-body text-ink outline-none focus:border-brand"
+                />
+                <VoiceInputButton
+                  onResult={(text) =>
+                    setBody((current) => (current ? `${current}\n${text}` : text))
+                  }
+                />
+              </div>
             </Field>
 
             <Field label="場所">
@@ -207,13 +268,15 @@ export function NewReportScreen() {
             </label>
           </div>
 
-          <p className="text-center text-note text-ink-muted">
-            送信すると <span className="font-bold text-brand">+{points}pt</span>
-            ・採用されるとさらに +50pt
-          </p>
+          {isEdit ? null : (
+            <p className="text-center text-note text-ink-muted">
+              送信すると <span className="font-bold text-brand">+{points}pt</span>
+              ・採用されるとさらに +50pt
+            </p>
+          )}
 
           <StepButton disabled={!title.trim() || saving} onClick={submit}>
-            {saving ? "送信中…" : "この内容で報告する"}
+            {saving ? "送信中…" : isEdit ? "この内容で修正する" : "この内容で報告する"}
           </StepButton>
         </section>
       ) : null}
@@ -251,20 +314,24 @@ function StepButton({
   );
 }
 
-function SubmittedScreen({ report }: { report: Report }) {
+function SubmittedScreen({ report, isEdit }: { report: Report; isEdit: boolean }) {
   return (
     <div className="space-y-5 pt-8">
       <div className="animate-pop text-center">
         <p className="text-4xl" aria-hidden>
-          🎉
+          {isEdit ? "✅" : "🎉"}
         </p>
-        <h1 className="mt-2 text-title text-ink">報告ありがとうございます！</h1>
-        <p className="mt-1 text-note text-ink-muted">
-          担当者に届きました。内容にかかわらず、必ず返事があります。
-        </p>
+        <h1 className="mt-2 text-title text-ink">
+          {isEdit ? "修正しました" : "報告ありがとうございます！"}
+        </h1>
+        {isEdit ? null : (
+          <p className="mt-1 text-note text-ink-muted">
+            担当者に届きました。内容にかかわらず、必ず返事があります。
+          </p>
+        )}
       </div>
 
-      <PointsBurst lines={postPointLines(report)} />
+      {isEdit ? null : <PointsBurst lines={postPointLines(report)} />}
 
       <div className="grid gap-2">
         <Link

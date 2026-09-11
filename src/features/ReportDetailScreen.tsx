@@ -1,19 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
 import { timeAgo } from "@/lib/format";
-import { toggleReaction, useDemoState } from "@/lib/store";
+import { deleteReport, toggleReaction, useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 import type { ReactionKind } from "@/lib/types";
 
 export function ReportDetailScreen({ id }: { id: string }) {
   const demo = useDemoState();
   const now = useNow();
+  const router = useRouter();
 
   if (!demo) return <LoadingBlock />;
 
@@ -30,6 +32,13 @@ export function ReportDetailScreen({ id }: { id: string }) {
   }
 
   const author = demo.users.find((user) => user.id === report.authorId) ?? null;
+  const isMine = report.authorId === demo.staffUserId;
+
+  const handleDelete = () => {
+    if (!window.confirm("この報告を取り消しますか？元に戻せません。")) return;
+    deleteReport(report.id);
+    router.push("/");
+  };
 
   const reactionButton = (kind: ReactionKind, emoji: string, label: string) => {
     const list = report.reactions[kind];
@@ -52,9 +61,28 @@ export function ReportDetailScreen({ id }: { id: string }) {
 
   return (
     <div className="space-y-5">
-      <Link href="/" className="inline-flex min-h-11 items-center text-body font-bold text-ink-muted">
-        ← フィード
-      </Link>
+      <div className="flex items-center justify-between gap-2">
+        <Link href="/" className="inline-flex min-h-11 items-center text-body font-bold text-ink-muted">
+          ← フィード
+        </Link>
+        {isMine ? (
+          <div className="flex gap-2">
+            <Link
+              href={`/edit/${report.id}`}
+              className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-note font-bold text-ink-muted"
+            >
+              修正する
+            </Link>
+            <button
+              type="button"
+              onClick={handleDelete}
+              className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-note font-bold text-danger"
+            >
+              取り消す
+            </button>
+          </div>
+        ) : null}
+      </div>
 
       {report.afterImage ? (
         <BeforeAfterSlider before={report.beforeImage} after={report.afterImage} />

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadImage } from "@/lib/image";
 
-type Tool = "pen" | "arrow" | "circle";
+type Tool = "pen" | "arrow" | "circle" | "text";
 
 interface Point {
   x: number; // 0..1（画像内の相対座標）
@@ -15,6 +15,8 @@ interface Stroke {
   color: string;
   width: number; // 画像幅に対する比率
   points: Point[];
+  /** tool === "text" のときの文字列 */
+  text?: string;
 }
 
 const COLORS = [
@@ -33,7 +35,11 @@ const TOOLS: { value: Tool; label: string; icon: string }[] = [
   { value: "pen", label: "ペン", icon: "✏️" },
   { value: "arrow", label: "矢印", icon: "↗" },
   { value: "circle", label: "丸", icon: "◯" },
+  { value: "text", label: "文字", icon: "Ａ" },
 ];
+
+/** テキストの文字サイズ（画像幅に対する比率） */
+const TEXT_SIZE = 0.045;
 
 /**
  * 写真の上に指で書き込むためのキャンバス。
@@ -49,6 +55,7 @@ export function PhotoAnnotator({
   onCancel: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const drawingRef = useRef(false);
 
@@ -58,6 +65,12 @@ export function PhotoAnnotator({
   const [tool, setTool] = useState<Tool>("pen");
   const [color, setColor] = useState(COLORS[0].value);
   const [width, setWidth] = useState(WIDTHS[1].value);
+  const [textDraft, setTextDraft] = useState<{
+    point: Point;
+    value: string;
+    left: number;
+    top: number;
+  } | null>(null);
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -103,9 +116,33 @@ export function PhotoAnnotator({
   };
 
   const handleDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (tool === "text") {
+      const point = pointFrom(event);
+      const canvasRect = event.currentTarget.getBoundingClientRect();
+      const stageRect = stageRef.current?.getBoundingClientRect() ?? canvasRect;
+      setTextDraft({
+        point,
+        value: "",
+        left: canvasRect.left - stageRect.left + point.x * canvasRect.width,
+        top: canvasRect.top - stageRect.top + point.y * canvasRect.height,
+      });
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     drawingRef.current = true;
     setDraft({ tool, color, width, points: [pointFrom(event)] });
+  };
+
+  const confirmText = () => {
+    setTextDraft((current) => {
+      if (current && current.value.trim()) {
+        setStrokes((list) => [
+          ...list,
+          { tool: "text", color, width, points: [current.point], text: current.value.trim() },
+        ]);
+      }
+      return null;
+    });
   };
 
   const handleMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -154,7 +191,7 @@ export function PhotoAnnotator({
         </button>
       </div>
 
-      <div className="flex flex-1 items-center justify-center overflow-hidden px-2">
+      <div ref={stageRef} className="relative flex flex-1 items-center justify-center overflow-hidden px-2">
         <canvas
           ref={canvasRef}
           onPointerDown={handleDown}
@@ -164,6 +201,33 @@ export function PhotoAnnotator({
           className="max-h-full max-w-full touch-none rounded-lg bg-black/40"
           aria-label="写真に手書きで注釈を追加するキャンバス"
         />
+        {textDraft ? (
+          <input
+            autoFocus
+            value={textDraft.value}
+            onChange={(event) =>
+              setTextDraft((current) =>
+                current ? { ...current, value: event.target.value } : current,
+              )
+            }
+            onBlur={confirmText}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                confirmText();
+              }
+              if (event.key === "Escape") setTextDraft(null);
+            }}
+            placeholder="文字を入力"
+            style={{
+              position: "absolute",
+              left: textDraft.left,
+              top: textDraft.top,
+              transform: "translate(-4px, -50%)",
+            }}
+            className="z-10 min-w-32 rounded-md border-2 border-brand bg-white px-2 py-1 text-sm text-ink outline-none"
+          />
+        ) : null}
       </div>
 
       <div className="space-y-3 bg-ink px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
@@ -260,6 +324,18 @@ function drawStroke(
 
   const points = stroke.points.map(px);
   if (points.length === 0) return;
+
+  if (stroke.tool === "text" && stroke.text) {
+    const fontSize = Math.max(16, width * TEXT_SIZE);
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = Math.max(3, fontSize * 0.12);
+    ctx.strokeStyle = "rgba(0,0,0,0.65)";
+    ctx.strokeText(stroke.text, points[0].x, points[0].y);
+    ctx.fillStyle = stroke.color;
+    ctx.fillText(stroke.text, points[0].x, points[0].y);
+    return;
+  }
 
   if (stroke.tool === "pen") {
     ctx.beginPath();

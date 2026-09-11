@@ -114,6 +114,36 @@ export function createReport(input: NewReportInput): Report {
   return report;
 }
 
+/** 自分の投稿を修正する。ステータスや対応履歴はそのまま維持する */
+export function updateReport(reportId: string, input: NewReportInput): Report | null {
+  const current = requireState();
+  let updated: Report | null = null;
+  const reports = current.reports.map((report) => {
+    if (report.id !== reportId) return report;
+    updated = {
+      ...report,
+      type: input.type,
+      urgency: input.urgency,
+      title: input.title.trim(),
+      body: input.body.trim(),
+      area: input.area,
+      areaNote: input.areaNote.trim(),
+      anonymous: input.anonymous,
+      beforeImage: input.beforeImage,
+      afterImage: input.afterImage,
+    };
+    return updated;
+  });
+  commit({ ...current, reports });
+  return updated;
+}
+
+/** 自分の投稿を取り消す */
+export function deleteReport(reportId: string) {
+  const current = requireState();
+  commit({ ...current, reports: current.reports.filter((report) => report.id !== reportId) });
+}
+
 const STATUS_BY_ACTION: Record<DecisionActionType, ReportStatus | null> = {
   thanks: null,
   reviewing: "reviewing",
