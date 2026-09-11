@@ -7,27 +7,37 @@ interface Polished {
   body: string;
 }
 
+interface PolishAssistState {
+  loading: boolean;
+  error: string;
+  result: Polished | null;
+  canRun: boolean;
+  run: () => void;
+  dismiss: () => void;
+}
+
 /**
- * 箇条書きのメモを報告文に整えるサポート。
+ * 箇条書きのメモを報告文に整えるサポートのロジック。
  *
  * 設計の約束:
  * - 任意。使わずにそのまま出せる
  * - 結果は必ず見比べてから採用する（勝手に置き換えない）
  * - 元のメモは呼び出し側で保存し、管理者がいつでも読める
+ *
+ * UIを「説明バナー（見出し直後）」と「ボタン（くわしく欄の下）」に離して
+ * 置けるよう、状態管理だけをこのフックに持たせている。
  */
-export function PolishAssist({
+export function usePolishAssist({
   title,
   body,
   category,
   area,
-  onApply,
 }: {
   title: string;
   body: string;
   category: string;
   area: string;
-  onApply: (result: Polished & { rawNote: string }) => void;
-}) {
+}): PolishAssistState {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<Polished | null>(null);
@@ -58,29 +68,49 @@ export function PolishAssist({
     }
   };
 
+  return { loading, error, result, canRun, run, dismiss: () => setResult(null) };
+}
+
+/** 見出しの直後に置く、AIサポートがあることを伝えるだけの説明バナー */
+export function PolishHintBanner() {
   return (
     <div className="rounded-lg border border-line bg-canvas p-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-body font-bold text-ink">箇条書きでも大丈夫です</p>
-          <p className="text-note text-ink-muted">
-            思いついたまま書いて、AIに報告文へ整えてもらえます
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={run}
-          disabled={!canRun}
-          className="min-h-11 shrink-0 rounded-full border border-brand bg-surface px-4 text-note font-bold text-brand-dark transition active:scale-95 disabled:border-line disabled:text-ink-faint"
-        >
-          {loading ? "整えています…" : "✨ 整える"}
-        </button>
-      </div>
+      <p className="text-body font-bold text-ink">箇条書きでも大丈夫です</p>
+      <p className="text-note text-ink-muted">
+        思いついたまま書いて、AIに報告文へ整えてもらえます
+      </p>
+    </div>
+  );
+}
 
-      {error ? <p className="mt-2 text-note text-danger">{error}</p> : null}
+/** 「くわしく」欄の下に置く、実際に整えるボタンと結果 */
+export function PolishButton({
+  state,
+  onApply,
+  rawNoteSource,
+}: {
+  state: PolishAssistState;
+  onApply: (result: Polished & { rawNote: string }) => void;
+  /** 適用時に元メモとして保存する文字列（タイトル＋本文） */
+  rawNoteSource: string;
+}) {
+  const { loading, error, result, canRun, run, dismiss } = state;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={run}
+        disabled={!canRun}
+        className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-full border border-brand bg-brand-soft text-note font-bold text-brand-dark transition active:scale-[0.99] disabled:border-line disabled:bg-canvas disabled:text-ink-faint"
+      >
+        {loading ? "整えています…" : "✨ AIに報告文へ整えてもらう"}
+      </button>
+
+      {error ? <p className="mt-1.5 text-note text-danger">{error}</p> : null}
 
       {result ? (
-        <div className="mt-3 space-y-2 rounded-lg border border-line bg-surface p-3">
+        <div className="mt-2 space-y-2 rounded-lg border border-line bg-canvas p-3">
           <p className="text-note font-bold text-ink-muted">整えた文</p>
           <p className="text-body font-bold text-ink">{result.title}</p>
           <p className="whitespace-pre-wrap text-body text-ink-muted">{result.body}</p>
@@ -88,8 +118,8 @@ export function PolishAssist({
             <button
               type="button"
               onClick={() => {
-                onApply({ ...result, rawNote: notes });
-                setResult(null);
+                onApply({ ...result, rawNote: rawNoteSource });
+                dismiss();
               }}
               className="min-h-11 flex-1 rounded-full bg-brand text-note font-bold text-white transition active:scale-[0.99]"
             >
@@ -97,7 +127,7 @@ export function PolishAssist({
             </button>
             <button
               type="button"
-              onClick={() => setResult(null)}
+              onClick={dismiss}
               className="min-h-11 rounded-full border border-line px-4 text-note font-bold text-ink-muted"
             >
               元のまま

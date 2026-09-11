@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { LoadingBlock } from "@/components/EmptyState";
 import { PhotoField } from "@/components/PhotoField";
 import { PointsBurst } from "@/components/PointsBurst";
-import { PolishAssist } from "@/components/PolishAssist";
+import { PolishButton, PolishHintBanner, usePolishAssist } from "@/components/PolishAssist";
 import { VoiceInputButton } from "@/components/VoiceInputButton";
 import { AREAS, REPORT_TYPES, URGENCIES, reportTypeOf } from "@/lib/labels";
 import { postPointLines, postPoints } from "@/lib/points";
@@ -56,6 +56,13 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
   const [anonymous, setAnonymous] = useState(editReport?.anonymous ?? false);
   const [saving, setSaving] = useState(false);
   const [created, setCreated] = useState<Report | null>(null);
+
+  const polish = usePolishAssist({
+    title,
+    body,
+    category: type ? reportTypeOf(type).label : "",
+    area,
+  });
 
   if (!demo) return <LoadingBlock />;
   if (created) return <SubmittedScreen report={created} isEdit={isEdit} />;
@@ -123,30 +130,29 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
       </div>
 
       {step === 0 ? (
-        <section className="space-y-4">
+        <section className="space-y-3">
           <h1 className="text-title text-ink">どんな内容ですか？</h1>
-          <div className="grid grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-2 gap-2">
             {REPORT_TYPES.map((item) => (
               <button
                 key={item.value}
                 type="button"
                 onClick={() => setType(item.value)}
                 aria-pressed={type === item.value}
-                className={`card flex min-h-28 flex-col items-start gap-1 p-3.5 text-left transition ${
+                className={`card flex min-h-16 flex-row items-center gap-2 p-2.5 text-left transition ${
                   type === item.value ? "border-brand bg-brand-soft" : ""
                 }`}
               >
-                <span aria-hidden className="text-xl">
+                <span aria-hidden className="text-lg">
                   {item.emoji}
                 </span>
                 <span className="text-head text-ink">{item.label}</span>
-                <span className="text-note text-ink-muted">{item.hint}</span>
               </button>
             ))}
           </div>
 
           <div>
-            <p className="mb-2 text-body font-bold text-ink">急ぎ具合</p>
+            <p className="mb-1.5 text-body font-bold text-ink">急ぎ具合</p>
             <div className="flex gap-2">
               {[...URGENCIES].reverse().map((item) => (
                 <button
@@ -204,17 +210,7 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
         <section className="space-y-4">
           <h1 className="text-title text-ink">ひとことで教えてください</h1>
 
-          <PolishAssist
-            title={title}
-            body={body}
-            category={type ? reportTypeOf(type).label : ""}
-            area={area}
-            onApply={(result) => {
-              setRawNote(result.rawNote);
-              setTitle(result.title);
-              setBody(result.body);
-            }}
-          />
+          <PolishHintBanner />
 
           <div className="card space-y-4 p-4">
             <Field label="タイトル">
@@ -248,6 +244,16 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
                 />
               </div>
             </Field>
+
+            <PolishButton
+              state={polish}
+              rawNoteSource={[title, body].filter((part) => part.trim()).join("\n")}
+              onApply={(result) => {
+                setRawNote(result.rawNote);
+                setTitle(result.title);
+                setBody(result.body);
+              }}
+            />
 
             <Field label="場所">
               <select
