@@ -13,9 +13,9 @@ import { useNow } from "@/lib/useNow";
 type Tab = "latest" | "adopted" | "mine";
 
 const TABS: { value: Tab; label: string }[] = [
+  { value: "mine", label: "自分の報告" },
   { value: "latest", label: "新着" },
   { value: "adopted", label: "採用ずみ" },
-  { value: "mine", label: "自分の報告" },
 ];
 
 export function FeedScreen() {
