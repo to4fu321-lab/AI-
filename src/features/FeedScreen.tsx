@@ -21,7 +21,7 @@ const TABS: { value: Tab; label: string }[] = [
 export function FeedScreen() {
   const demo = useDemoState();
   const now = useNow();
-  const [tab, setTab] = useState<Tab>("latest");
+  const [tab, setTab] = useState<Tab>("mine");
 
   const me = demo?.users.find((user) => user.id === demo.staffUserId) ?? null;
 
