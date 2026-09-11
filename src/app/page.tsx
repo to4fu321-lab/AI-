@@ -1,5 +1,9 @@
-import { FeedScreen } from "@/features/FeedScreen";
+import { HomeClient } from "@/components/HomeClient";
+import { getVideos } from "@/lib/videos";
 
-export default function HomePage() {
-  return <FeedScreen />;
+export const dynamic = "force-dynamic";
+
+export default async function Home() {
+  const videos = await getVideos();
+  return <HomeClient videos={videos} />;
 }
