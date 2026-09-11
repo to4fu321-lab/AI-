@@ -21,6 +21,7 @@
   --color-dot-reviewing: #d08700;
   --color-dot-adopted: #0f9d63;
   --color-dot-partial: #0d93ab;
+  --color-dot-progress: #2563eb;
   --color-dot-declined: #9aa8b8;
 
   /* 緊急度（カード左端の帯） */

@@ -5,10 +5,17 @@ import { useState } from "react";
 import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
+import { ImprovementStory } from "@/components/ImprovementStory";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
 import { formatDateTime } from "@/lib/format";
-import { ACTIONS, DECLINE_REASONS, SHARE_OPTIONS, actionOf } from "@/lib/labels";
+import {
+  ACTIONS,
+  DECLINE_REASONS,
+  SHARE_OPTIONS,
+  actionOf,
+  nextActionsFor,
+} from "@/lib/labels";
 import { addAdminAction, toggleShare, useDemoState } from "@/lib/store";
 import type { DecisionActionType } from "@/lib/types";
 
@@ -34,6 +41,8 @@ export function AdminReportScreen({ id }: { id: string }) {
   }
 
   const author = demo.users.find((user) => user.id === report.authorId) ?? null;
+  const allowed = nextActionsFor(report.status);
+  const availableActions = ACTIONS.filter((action) => allowed.includes(action.value));
   const meta = selected ? actionOf(selected) : null;
   const needsComment = meta?.requiresComment ?? false;
   const canSubmit = selected !== null && (!needsComment || comment.trim().length > 0);
@@ -105,6 +114,8 @@ export function AdminReportScreen({ id }: { id: string }) {
             </div>
           </section>
 
+          <ImprovementStory report={report} />
+
           <section className="card p-4">
             <h2 className="mb-3 text-head text-ink">対応の記録</h2>
             <Timeline report={report} users={demo.users} />
@@ -123,7 +134,7 @@ export function AdminReportScreen({ id }: { id: string }) {
             ) : null}
 
             <div className="grid gap-1.5">
-              {ACTIONS.map((action) => {
+              {availableActions.map((action) => {
                 const active = selected === action.value;
                 return (
                   <div key={action.value}>
@@ -172,9 +183,11 @@ export function AdminReportScreen({ id }: { id: string }) {
                           placeholder={
                             action.value === "declined"
                               ? "見送る理由を、次につながる言葉で（必須）"
-                              : action.requiresComment
-                                ? "修正した内容を伝えてください（必須）"
-                                : "ひとことコメント（任意）"
+                              : action.value === "done"
+                                ? "改善後どう変わりましたか？（例：探す時間が減った・通路が広くなった）（必須）"
+                                : action.requiresComment
+                                  ? "修正した内容を伝えてください（必須）"
+                                  : "ひとことコメント（任意）"
                           }
                           className="w-full rounded-lg border border-line bg-canvas p-3 text-body text-ink outline-none focus:border-brand"
                         />

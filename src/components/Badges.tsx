@@ -14,7 +14,8 @@ export function StatusDot({
   size?: "sm" | "lg";
 }) {
   const meta = statusOf(status);
-  if (status === "adopted" || status === "partial") {
+  // 採用が決まった瞬間と、改善が形になった瞬間だけハンコで見せる
+  if (status === "adopted" || status === "partial" || status === "done") {
     return (
       <span
         role="img"

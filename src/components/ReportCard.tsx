@@ -26,6 +26,8 @@ export function ReportCard({
   fromOtherSite?: boolean;
 }) {
   const reactions = report.reactions.like.length + report.reactions.same.length;
+  // 完了した報告は「何がどう変わったか」までカードで見せる
+  const outcome = [...report.actions].reverse().find((action) => action.type === "done");
   const meta = [
     typeText(report.type),
     authorName(author, report.anonymous),
@@ -55,6 +57,9 @@ export function ReportCard({
           <StatusDot status={report.status} />
         </div>
         <p className="mt-1 truncate text-note text-ink-muted">{meta.join("・")}</p>
+        {outcome?.comment ? (
+          <p className="mt-1 line-clamp-2 text-note text-dot-adopted">🎊 {outcome.comment}</p>
+        ) : null}
         {fromOtherSite ? (
           <p className="mt-0.5 truncate text-note text-ink-faint">
             🏢 {report.site}からの横展開事例

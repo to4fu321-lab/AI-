@@ -1,5 +1,6 @@
 import type { Report } from "./types";
 import { isSameMonth } from "./format";
+import { ACCEPTED_STATUSES, FINISHED_STATUSES } from "./labels";
 
 /**
  * ポイントのルール。
@@ -130,7 +131,8 @@ export interface Badge {
 /** バッジは投稿履歴から毎回導出する（保存しない） */
 export function badgesOf(userId: string, reports: Report[]): Badge[] {
   const mine = userReports(userId, reports);
-  const adopted = mine.filter((r) => r.status === "adopted" || r.status === "partial");
+  const adopted = mine.filter((r) => ACCEPTED_STATUSES.includes(r.status));
+  const finished = mine.filter((r) => FINISHED_STATUSES.includes(r.status));
   const withAfter = mine.filter((r) => r.afterImage);
   const safetyReports = mine.filter((r) => r.type === "safety");
   const spread = mine.filter((r) => r.sharedToSites);
@@ -157,6 +159,13 @@ export function badgesOf(userId: string, reports: Report[]): Badge[] {
       emoji: "🎉",
       description: "提案が採用された",
       earned: adopted.length >= 1,
+    },
+    {
+      id: "first-done",
+      name: "現場が変わった",
+      emoji: "🎊",
+      description: "提案した改善が実際に完了した",
+      earned: finished.length >= 1,
     },
     {
       id: "before-after",

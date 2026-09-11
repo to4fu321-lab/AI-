@@ -11,11 +11,28 @@ export type ReportType =
 /** 緊急度 */
 export type Urgency = "normal" | "soon" | "danger";
 
-/** 報告のステータス。管理者の対応アクションで遷移する */
-export type ReportStatus = "new" | "reviewing" | "adopted" | "partial" | "declined";
+/**
+ * 報告のステータス。管理者の対応アクションで遷移する。
+ * 未対応 → 確認中 → 採用（一部採用）→ 対応中 → 完了。見送りはどこからでも起こりうる
+ */
+export type ReportStatus =
+  | "new"
+  | "reviewing"
+  | "adopted"
+  | "partial"
+  | "in_progress"
+  | "done"
+  | "declined";
 
 /** 対応アクション（ステータスが変わる） */
-export type DecisionActionType = "reviewing" | "adopted" | "partial" | "declined" | "thanks";
+export type DecisionActionType =
+  | "reviewing"
+  | "adopted"
+  | "partial"
+  | "in_progress"
+  | "done"
+  | "declined"
+  | "thanks";
 
 /** 共有アクション（ステータスとは別軸。採用と両立する） */
 export type ShareActionType = "share_sites" | "share_hq";

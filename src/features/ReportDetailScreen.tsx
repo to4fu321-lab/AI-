@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
+import { ImprovementStory } from "@/components/ImprovementStory";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
 import { timeAgo } from "@/lib/format";
@@ -141,6 +142,8 @@ export function ReportDetailScreen({ id }: { id: string }) {
           </p>
         ) : null}
       </div>
+
+      <ImprovementStory report={report} />
 
       <section className="card p-4">
         <h2 className="mb-3 text-head text-ink">この報告のその後</h2>

@@ -4,8 +4,10 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { DemoNote } from "@/components/DemoNote";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
+import { FirstRunIntro } from "@/components/FirstRunIntro";
 import { LevelProgress } from "@/components/LevelProgress";
 import { ReportCard } from "@/components/ReportCard";
+import { ACCEPTED_STATUSES } from "@/lib/labels";
 import { userPoints } from "@/lib/points";
 import { useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
@@ -31,7 +33,7 @@ export function FeedScreen() {
       // 自分の拠点の報告と、他拠点から全拠点共有された事例が流れてくる
       .filter((report) => report.site === me.site || report.sharedToSites)
       .filter((report) => {
-        if (tab === "adopted") return report.status === "adopted" || report.status === "partial";
+        if (tab === "adopted") return ACCEPTED_STATUSES.includes(report.status);
         if (tab === "mine") return report.authorId === me.id;
         return true;
       })
@@ -42,6 +44,8 @@ export function FeedScreen() {
 
   return (
     <div className="space-y-5">
+      <FirstRunIntro />
+
       <section className="card p-4">
         <p className="text-note text-ink-muted">{me.site}</p>
         <p className="mb-3 text-head text-ink">{me.name} さん</p>

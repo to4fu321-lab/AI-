@@ -149,6 +149,8 @@ const STATUS_BY_ACTION: Record<DecisionActionType, ReportStatus | null> = {
   reviewing: "reviewing",
   adopted: "adopted",
   partial: "partial",
+  in_progress: "in_progress",
+  done: "done",
   declined: "declined",
 };
 

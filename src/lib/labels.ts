@@ -102,18 +102,30 @@ export const STATUSES: { value: ReportStatus; label: string; dot: string }[] = [
   { value: "reviewing", label: "確認中", dot: "bg-dot-reviewing" },
   { value: "adopted", label: "採用", dot: "bg-dot-adopted" },
   { value: "partial", label: "一部採用", dot: "bg-dot-partial" },
+  { value: "in_progress", label: "対応中", dot: "bg-dot-progress" },
+  { value: "done", label: "完了", dot: "bg-dot-adopted" },
   { value: "declined", label: "見送り", dot: "bg-dot-declined" },
 ];
 
-/** 管理ダッシュボードのフィルタ（3つに集約） */
+/** 改善が実際に形になった（＝現場が変わった）ステータス */
+export const FINISHED_STATUSES: ReportStatus[] = ["done"];
+
+/** 採用が決まった（これから実施される、または実施済み）ステータス */
+export const ACCEPTED_STATUSES: ReportStatus[] = ["adopted", "partial", "in_progress", "done"];
+
+/** 管理ダッシュボードのフィルタ。未対応 / 対応中 / 完了 の3つに集約する */
 export const ADMIN_FILTERS: {
   value: "new" | "working" | "done";
   label: string;
   statuses: ReportStatus[];
 }[] = [
   { value: "new", label: "未対応", statuses: ["new"] },
-  { value: "working", label: "確認中", statuses: ["reviewing"] },
-  { value: "done", label: "完了", statuses: ["adopted", "partial", "declined"] },
+  {
+    value: "working",
+    label: "対応中",
+    statuses: ["reviewing", "adopted", "partial", "in_progress"],
+  },
+  { value: "done", label: "完了", statuses: ["done", "declined"] },
 ];
 
 /** 「今回は見送る」を選ぶときの理由。判断の透明性を残す */
@@ -140,6 +152,14 @@ export interface ActionMeta {
 /** 対応アクション（どれか1つを選ぶ） */
 export const ACTIONS: (ActionMeta & { value: DecisionActionType })[] = [
   {
+    value: "reviewing",
+    label: "確認中にする",
+    pastLabel: "確認しました",
+    emoji: "👀",
+    points: 0,
+    description: "受け取ったことを伝えます",
+  },
+  {
     value: "adopted",
     label: "採用する",
     pastLabel: "採用しました",
@@ -157,12 +177,21 @@ export const ACTIONS: (ActionMeta & { value: DecisionActionType })[] = [
     requiresComment: true,
   },
   {
-    value: "reviewing",
-    label: "確認中にする",
-    pastLabel: "確認しました",
-    emoji: "👀",
+    value: "in_progress",
+    label: "対応中にする",
+    pastLabel: "対応を始めました",
+    emoji: "🔨",
     points: 0,
-    description: "受け取ったことを伝えます",
+    description: "実施に取りかかったことを伝えます",
+  },
+  {
+    value: "done",
+    label: "完了にする",
+    pastLabel: "改善が完了しました",
+    emoji: "🎊",
+    points: 20,
+    description: "改善後どう変わったかを書いて完了します",
+    requiresComment: true,
   },
   {
     value: "thanks",
@@ -182,6 +211,26 @@ export const ACTIONS: (ActionMeta & { value: DecisionActionType })[] = [
     requiresComment: true,
   },
 ];
+
+/**
+ * 今のステータスから次に選べるアクション。
+ * 「次に何をすべきか」だけを出して、管理者の判断を速くする
+ */
+export function nextActionsFor(status: ReportStatus): DecisionActionType[] {
+  switch (status) {
+    case "new":
+      return ["reviewing", "adopted", "partial", "thanks", "declined"];
+    case "reviewing":
+      return ["adopted", "partial", "thanks", "declined"];
+    case "adopted":
+    case "partial":
+      return ["in_progress", "done", "thanks"];
+    case "in_progress":
+      return ["done", "thanks"];
+    default:
+      return ["thanks"];
+  }
+}
 
 /** 共有アクション（対応と両立する別軸。もう一度押すと解除） */
 export const SHARE_OPTIONS: (ActionMeta & { value: ShareActionType; shortLabel: string })[] = [

@@ -6,6 +6,7 @@ import { DemoNote } from "@/components/DemoNote";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { LevelProgress } from "@/components/LevelProgress";
 import { ReportCard } from "@/components/ReportCard";
+import { ACCEPTED_STATUSES, FINISHED_STATUSES } from "@/lib/labels";
 import { badgesOf, monthlyRanking, userPoints, userReports } from "@/lib/points";
 import { resetDemo, setStaffUser, useDemoState } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
@@ -21,7 +22,8 @@ export function MyPageScreen() {
   if (!me) return <EmptyState title="ユーザーが見つかりません" />;
 
   const mine = userReports(me.id, demo.reports);
-  const adopted = mine.filter((r) => r.status === "adopted" || r.status === "partial").length;
+  const adopted = mine.filter((r) => ACCEPTED_STATUSES.includes(r.status)).length;
+  const improved = mine.filter((r) => FINISHED_STATUSES.includes(r.status)).length;
   const badges = badgesOf(me.id, demo.reports);
   const staffIds = demo.users.filter((user) => user.role === "staff").map((user) => user.id);
   const ranking = monthlyRanking(staffIds, demo.reports, now);
@@ -45,9 +47,20 @@ export function MyPageScreen() {
 
         <LevelProgress points={userPoints(me.id, demo.reports)} />
 
-        <p className="mt-3 text-note text-ink-muted">
-          報告 {mine.length}件・採用 {adopted}件・今月{myRank?.rank ?? "-"}位
-        </p>
+        <dl className="mt-4 grid grid-cols-3 gap-2 border-t border-line pt-3 text-center">
+          <div>
+            <dt className="text-note text-ink-muted">報告した</dt>
+            <dd className="text-head text-ink">{mine.length}件</dd>
+          </div>
+          <div>
+            <dt className="text-note text-ink-muted">採用された</dt>
+            <dd className="text-head text-ink">{adopted}件</dd>
+          </div>
+          <div>
+            <dt className="text-note text-ink-muted">改善された</dt>
+            <dd className="text-head text-dot-adopted">{improved}件</dd>
+          </div>
+        </dl>
       </section>
 
       <section className="card p-4">
