@@ -12,7 +12,7 @@ const VALID_TYPES = new Set<string>(REPORT_TYPES.map((item) => item.value));
 const VALID_STATUSES = new Set<string>(STATUSES.map((item) => item.value));
 
 // データ構造を変えたらキーを上げる（古い保存データを読み込まないため）
-const STATE_KEY = "kaizen-board:state:v4";
+const STATE_KEY = "kaizen-board:state:v5";
 const DB_NAME = "kaizen-board";
 const DB_VERSION = 1;
 const IMAGE_STORE = "images";
@@ -30,7 +30,8 @@ export function loadState(): DemoState | null {
       (report) => !VALID_TYPES.has(report.type) || !VALID_STATUSES.has(report.status),
     );
     if (stale) return null;
-    return parsed;
+    // お知らせを持たない世代の保存データでも画面が落ちないようにする
+    return { ...parsed, notices: parsed.notices ?? [] };
   } catch {
     return null;
   }

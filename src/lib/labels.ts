@@ -1,10 +1,13 @@
 import type {
   ActionType,
   DecisionActionType,
+  NoticeAudience,
+  NoticeCategory,
   ReportStatus,
   ReportType,
   ShareActionType,
   Urgency,
+  User,
 } from "./types";
 
 /** 拠点。デモでは3拠点。札幌が舞台、船橋・大阪は横展開先として登場する */
@@ -274,4 +277,49 @@ export function actionOf(value: ActionType): ActionMeta {
 
 export function shareOf(value: ShareActionType) {
   return SHARE_OPTIONS.find((s) => s.value === value) ?? SHARE_OPTIONS[0];
+}
+
+/** 管理者からの連絡の種類。現場が「何の話か」を一目で判別できる4つだけ */
+export const NOTICE_CATEGORIES: {
+  value: NoticeCategory;
+  label: string;
+  emoji: string;
+  hint: string;
+}[] = [
+  { value: "rule", label: "ルール変更", emoji: "📋", hint: "やり方や決まりが変わります" },
+  { value: "share", label: "他拠点の改善", emoji: "🏢", hint: "よその良い事例を取り入れます" },
+  { value: "monthly", label: "今月のまとめ", emoji: "📊", hint: "改善の数字を共有します" },
+  { value: "info", label: "お知らせ", emoji: "📣", hint: "そのほかの連絡" },
+];
+
+export function noticeCategoryOf(value: NoticeCategory) {
+  return NOTICE_CATEGORIES.find((item) => item.value === value) ?? NOTICE_CATEGORIES[3];
+}
+
+/** その連絡が自分あてかどうか。拠点が違えば届かない */
+export function noticeReaches(audience: NoticeAudience, user: User): boolean {
+  switch (audience.kind) {
+    case "all":
+      return true;
+    case "teams":
+      return audience.teams.includes(user.team);
+    case "users":
+      return audience.userIds.includes(user.id);
+  }
+}
+
+/** 「ピッキングA班・入出荷B班へ」のような、宛先のひとこと表示 */
+export function audienceText(audience: NoticeAudience, users: User[]): string {
+  switch (audience.kind) {
+    case "all":
+      return "全員へ";
+    case "teams":
+      return audience.teams.length > 0 ? `${audience.teams.join("・")}へ` : "宛先なし";
+    case "users": {
+      const names = audience.userIds
+        .map((id) => users.find((user) => user.id === id)?.name)
+        .filter(Boolean);
+      return names.length > 0 ? `${names.join("・")}さんへ` : "宛先なし";
+    }
+  }
 }

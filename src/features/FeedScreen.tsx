@@ -9,7 +9,7 @@ import { LevelProgress } from "@/components/LevelProgress";
 import { ReportCard } from "@/components/ReportCard";
 import { ACCEPTED_STATUSES } from "@/lib/labels";
 import { userPoints } from "@/lib/points";
-import { useDemoState } from "@/lib/store";
+import { useDemoState, useUnreadNoticeCount } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 
 type Tab = "latest" | "adopted" | "mine";
@@ -23,6 +23,7 @@ const TABS: { value: Tab; label: string }[] = [
 export function FeedScreen() {
   const demo = useDemoState();
   const now = useNow();
+  const unreadNotices = useUnreadNoticeCount();
   const [tab, setTab] = useState<Tab>("mine");
 
   const me = demo?.users.find((user) => user.id === demo.staffUserId) ?? null;
@@ -51,6 +52,19 @@ export function FeedScreen() {
         <p className="mb-3 text-head text-ink">{me.name} さん</p>
         <LevelProgress points={userPoints(me.id, demo.reports)} />
       </section>
+
+      {unreadNotices > 0 ? (
+        <Link
+          href="/notices"
+          className="flex min-h-12 items-center gap-2 rounded-[14px] border border-brand bg-brand-soft px-4 text-body font-bold text-brand-dark"
+        >
+          <span aria-hidden>📣</span>
+          管理者から{unreadNotices}件のお知らせ
+          <span className="ml-auto" aria-hidden>
+            →
+          </span>
+        </Link>
+      ) : null}
 
       <div role="tablist" aria-label="表示する報告" className="flex gap-1">
         {TABS.map((item) => {

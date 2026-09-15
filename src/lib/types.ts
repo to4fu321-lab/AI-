@@ -105,9 +105,39 @@ export interface User {
   color: string;
 }
 
+/** 管理者から現場への連絡の種類 */
+export type NoticeCategory = "rule" | "share" | "monthly" | "info";
+
+/**
+ * 連絡を届ける相手。
+ * 「全員」か「業務区分（班）」か「個人」の3通りだけに絞っている
+ */
+export type NoticeAudience =
+  | { kind: "all" }
+  | { kind: "teams"; teams: string[] }
+  | { kind: "users"; userIds: string[] };
+
+/** 管理者から現場へのお知らせ */
+export interface Notice {
+  id: string;
+  /** 発信元の拠点。この拠点の人にだけ届く */
+  site: string;
+  category: NoticeCategory;
+  title: string;
+  body: string;
+  audience: NoticeAudience;
+  authorId: string;
+  createdAt: number;
+  /** 「確認しました」を押した人 */
+  readBy: string[];
+  /** 他拠点の改善を知らせる場合の、元になった報告 */
+  reportId?: string;
+}
+
 export interface DemoState {
   users: User[];
   reports: Report[];
+  notices: Notice[];
   /** デモ用に切り替える現在のユーザー（現場スタッフ） */
   staffUserId: string;
   adminUserId: string;

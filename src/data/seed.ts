@@ -1,4 +1,4 @@
-import type { DemoState, Report, User } from "@/lib/types";
+import type { DemoState, Notice, Report, User } from "@/lib/types";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -410,9 +410,71 @@ export function createSeedState(now: number): DemoState {
     },
   ];
 
+  const notices: Notice[] = [
+    {
+      id: "n1",
+      site: SAPPORO,
+      category: "rule",
+      title: "延長コードは通路をまたがないでください",
+      body:
+        "梱包ラインでのヒヤリ報告を受けて、本日からルールを変えます。\n" +
+        "・延長コードは通路を横切らない\n" +
+        "・やむを得ず横切る場合は必ずモールを敷く\n" +
+        "コンセントの増設も手配中です。増えるまでの間、協力をお願いします。",
+      audience: { kind: "all" },
+      authorId: "a1",
+      createdAt: now - 3 * HOUR,
+      readBy: ["u2", "u3"],
+      reportId: "r2",
+    },
+    {
+      id: "n2",
+      site: SAPPORO,
+      category: "share",
+      title: "大阪の「積載上限ライン」を入出荷でも始めます",
+      body:
+        "大阪物流センターで採用された、柱に積載上限のラインを書く改善を当センターでも取り入れます。\n" +
+        "来週のメンテ日に資材置き場の柱へ表示します。誰が積んでも同じ高さで止められるようになります。",
+      audience: { kind: "teams", teams: ["入出荷B班"] },
+      authorId: "a1",
+      createdAt: now - 2 * DAY,
+      readBy: ["u3"],
+      reportId: "r5",
+    },
+    {
+      id: "n3",
+      site: SAPPORO,
+      category: "monthly",
+      title: "先月の改善まとめ：報告11件、完了5件",
+      body:
+        "先月は11件の報告が届き、7件の採用が決まりました。そのうち5件は改善として完了しています。\n" +
+        "棚のロケーション表示は全通路の貼り替えが終わり、他拠点にも横展開されました。\n" +
+        "報告してくれたみなさん、ありがとうございます。今月も小さな気づきからお願いします。",
+      audience: { kind: "all" },
+      authorId: "a1",
+      createdAt: now - 5 * DAY,
+      readBy: ["u1", "u2"],
+    },
+    {
+      id: "n4",
+      site: SAPPORO,
+      category: "info",
+      title: "台車の定位置マーキング、今週末に貼ります",
+      body:
+        "森下さんから提案いただいた台車の定位置ですが、テープが届いたので今週末のメンテ日に貼ります。\n" +
+        "5台分に広げて実施します。当日、位置の最終確認だけ一緒にお願いできますか。",
+      audience: { kind: "users", userIds: ["u1"] },
+      authorId: "a1",
+      createdAt: now - 20 * HOUR,
+      readBy: [],
+      reportId: "r3",
+    },
+  ];
+
   return {
     users: SEED_USERS,
     reports,
+    notices,
     staffUserId: "u1",
     adminUserId: "a1",
     role: "staff",

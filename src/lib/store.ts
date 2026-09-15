@@ -13,13 +13,17 @@ import type {
   ShareActionType,
   AdminAction,
   DemoState,
+  Notice,
+  NoticeAudience,
+  NoticeCategory,
   ReactionKind,
   Report,
   ReportStatus,
   ReportType,
   Urgency,
+  User,
 } from "./types";
-import { actionOf } from "./labels";
+import { actionOf, noticeReaches } from "./labels";
 
 let state: DemoState | null = null;
 const listeners = new Set<() => void>();
@@ -240,6 +244,76 @@ export function toggleReaction(reportId: string, kind: ReactionKind) {
       return { ...report, reactions: { ...report.reactions, [kind]: next } };
     }),
   });
+}
+
+export interface NewNoticeInput {
+  category: NoticeCategory;
+  title: string;
+  body: string;
+  audience: NoticeAudience;
+  reportId?: string;
+}
+
+/** 管理者が自拠点の現場へ連絡を送る */
+export function createNotice(input: NewNoticeInput): Notice {
+  const current = requireState();
+  const admin = current.users.find((user) => user.id === current.adminUserId);
+  const notice: Notice = {
+    id: newId("n"),
+    site: admin?.site ?? "札幌物流センター",
+    category: input.category,
+    title: input.title.trim(),
+    body: input.body.trim(),
+    audience: input.audience,
+    authorId: current.adminUserId,
+    createdAt: Date.now(),
+    readBy: [],
+    reportId: input.reportId,
+  };
+  commit({ ...current, notices: [notice, ...current.notices] });
+  return notice;
+}
+
+/** 現場が「確認しました」を押す。管理者側には既読の人数として出る */
+export function markNoticeRead(noticeId: string) {
+  const current = requireState();
+  const userId = current.staffUserId;
+  commit({
+    ...current,
+    notices: current.notices.map((notice) =>
+      notice.id === noticeId && !notice.readBy.includes(userId)
+        ? { ...notice, readBy: [...notice.readBy, userId] }
+        : notice,
+    ),
+  });
+}
+
+export function deleteNotice(noticeId: string) {
+  const current = requireState();
+  commit({ ...current, notices: current.notices.filter((notice) => notice.id !== noticeId) });
+}
+
+/** 自分あてに届いている連絡（新しい順） */
+export function noticesFor(state: DemoState, user: User): Notice[] {
+  return state.notices
+    .filter((notice) => notice.site === user.site && noticeReaches(notice.audience, user))
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** 未読の連絡の件数。ナビのバッジに出す */
+export function useUnreadNoticeCount(): number {
+  const demo = useDemoState();
+  if (!demo) return 0;
+  const me = demo.users.find((user) => user.id === demo.staffUserId);
+  if (!me) return 0;
+  return noticesFor(demo, me).filter((notice) => !notice.readBy.includes(me.id)).length;
+}
+
+/** 宛先に含まれる人数。「何人に届くか」を送信前に見せるために使う */
+export function audienceSize(state: DemoState, site: string, audience: NoticeAudience): number {
+  return state.users.filter(
+    (user) => user.role === "staff" && user.site === site && noticeReaches(audience, user),
+  ).length;
 }
 
 export function setRole(role: "staff" | "admin") {

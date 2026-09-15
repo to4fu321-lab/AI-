@@ -68,11 +68,20 @@ export function AdminDashboardScreen() {
 
   return (
     <div className="space-y-5">
-      <header>
-        <h1 className="text-title text-ink">{mySite ?? "拠点"}の改善ダッシュボード</h1>
-        <p className="text-note text-ink-muted">
-          自拠点から届いた声に、必ず反応するための管理画面です
-        </p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-title text-ink">{mySite ?? "拠点"}の改善ダッシュボード</h1>
+          <p className="text-note text-ink-muted">
+            自拠点から届いた声に、必ず反応するための管理画面です
+          </p>
+        </div>
+        <Link
+          href="/admin/notice"
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-full bg-brand px-4 text-note font-bold text-white transition active:scale-[0.99]"
+        >
+          <span aria-hidden>📣</span>
+          お知らせを送る
+        </Link>
       </header>
 
       <section className="card flex flex-wrap items-center justify-between gap-3 p-4">
