@@ -34,9 +34,10 @@ export const viewport: Viewport = {
 
 /**
  * 保存した明るさ設定を、画面が描かれる前に反映する。
+ * 既定は常にライトなので、ここでは明示的にダークを選んでいた場合だけ属性を立てる。
  * React の描画を待つと、暗いモードの人に一瞬だけ白い画面が光ってしまう
  */
-const APPLY_THEME = `try{var t=localStorage.getItem("kaizen-board:theme");if(t==="dark"||t==="light")document.documentElement.dataset.theme=t}catch(e){}`;
+const APPLY_THEME = `try{if(localStorage.getItem("kaizen-board:theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}`;
 
 export default function RootLayout({
   children,

@@ -3,19 +3,16 @@
 import { useTheme, type Theme } from "@/lib/theme";
 
 /**
- * 明るさの切り替え。
- *
- * ヘッダーは狭いので、選択肢を並べずにボタン1つで
- * 「おまかせ → 明るく → 暗く」と回す。今どれなのかは絵文字と読み上げで伝える
+ * 明るさの切り替え。既定は常にライト（明るく）で、
+ * 押すたびにライト⇄ダークだけを行き来する。
+ * 端末のダークモード設定には追従しないので、選択肢もそれに合わせて2つだけにしている
  */
 const NEXT: Record<Theme, Theme> = {
-  system: "light",
   light: "dark",
-  dark: "system",
+  dark: "light",
 };
 
 const FACE: Record<Theme, { emoji: string; label: string }> = {
-  system: { emoji: "🌓", label: "画面の明るさ：端末におまかせ" },
   light: { emoji: "☀️", label: "画面の明るさ：明るく" },
   dark: { emoji: "🌙", label: "画面の明るさ：暗く" },
 };
