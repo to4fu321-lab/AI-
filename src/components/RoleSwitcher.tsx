@@ -34,7 +34,7 @@ export function RoleSwitcher() {
             type="button"
             onClick={() => change(option.value)}
             aria-pressed={active}
-            className={`rounded-full px-3 py-1.5 transition ${
+            className={`min-h-11 rounded-full px-3 transition ${
               active ? "bg-brand text-white" : "text-ink-muted"
             }`}
           >

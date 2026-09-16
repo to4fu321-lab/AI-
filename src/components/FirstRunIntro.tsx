@@ -69,7 +69,7 @@ export function FirstRunIntro() {
         <button
           type="button"
           onClick={close}
-          className="mt-5 min-h-14 w-full rounded-full bg-brand text-head text-white transition active:scale-[0.99]"
+          className="btn btn-lg btn-primary mt-5"
         >
           はじめる
         </button>

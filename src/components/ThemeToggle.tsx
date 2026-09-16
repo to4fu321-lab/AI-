@@ -29,7 +29,7 @@ export function ThemeToggle() {
       type="button"
       onClick={() => setTheme(NEXT[theme])}
       title={`${face.label}（押すと切り替わります）`}
-      className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-line bg-canvas text-base transition active:scale-95"
+      className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-line bg-canvas text-base transition active:bg-canvas"
     >
       <span aria-hidden>{face.emoji}</span>
       <span className="sr-only">{face.label}。押すと切り替わります</span>

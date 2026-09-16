@@ -136,7 +136,7 @@ export function MyPageScreen() {
             value={me.id}
             onChange={(event) => setStaffUser(event.target.value)}
             aria-label="デモ用にログインするスタッフを切り替える"
-            className="min-h-9 rounded-lg border border-line bg-surface px-2 text-note text-ink"
+            className="min-h-11 rounded-lg border border-line bg-surface px-2.5 text-note text-ink"
           >
             {demo.users
               .filter((user) => user.role === "staff")
@@ -154,7 +154,7 @@ export function MyPageScreen() {
             await resetDemo();
             setResetting(false);
           }}
-          className="min-h-9 underline"
+          className="min-h-11 underline"
         >
           {resetting ? "リセット中…" : "デモを初期状態にもどす"}
         </button>

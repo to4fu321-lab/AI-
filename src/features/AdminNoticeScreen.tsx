@@ -417,7 +417,7 @@ export function AdminNoticeScreen() {
                 type="button"
                 onClick={send}
                 disabled={!canSend}
-                className="min-h-14 w-full rounded-full bg-brand text-head text-white transition active:scale-[0.99] disabled:bg-line disabled:text-ink-faint"
+                className="btn btn-lg btn-primary"
               >
                 {category === null
                   ? "連絡の種類を選んでください"

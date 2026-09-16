@@ -76,11 +76,7 @@ export function FeedScreen() {
               aria-selected={active}
               type="button"
               onClick={() => setTab(item.value)}
-              className={`min-h-10 flex-1 rounded-full border text-note font-bold transition ${
-                active
-                  ? "border-brand bg-brand text-white"
-                  : "border-line bg-surface text-ink-muted"
-              }`}
+              className={`chip flex-1 ${active ? "chip-on" : ""}`}
             >
               {item.label}
             </button>
@@ -112,7 +108,7 @@ export function FeedScreen() {
 
       <Link
         href="/new"
-        className="fixed bottom-20 right-[max(1rem,calc(50%-238px))] z-30 flex min-h-14 items-center gap-2 rounded-full bg-brand px-5 text-head text-white transition active:scale-95"
+        className="btn btn-primary fixed bottom-20 right-[max(1rem,calc(50%-238px))] z-30 min-h-14 px-5 text-head"
       >
         <span aria-hidden>＋</span>
         報告する

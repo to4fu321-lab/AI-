@@ -51,7 +51,7 @@ export function ReportDetailScreen({ id }: { id: string }) {
         type="button"
         onClick={() => toggleReaction(report.id, kind)}
         aria-pressed={active}
-        className={`flex min-h-12 flex-1 items-center justify-center gap-1.5 rounded-full border text-body font-bold transition active:scale-95 ${
+        className={`btn flex-1 border ${
           active ? "border-brand text-brand" : "border-line bg-surface text-ink-muted"
         }`}
       >
@@ -69,17 +69,17 @@ export function ReportDetailScreen({ id }: { id: string }) {
           ← フィード
         </Link>
         {isMine ? (
-          <div className="flex gap-2">
+          <div className="flex gap-2.5">
             <Link
               href={`/edit/${report.id}`}
-              className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-note font-bold text-ink-muted"
+              className="btn btn-outline text-note"
             >
               修正する
             </Link>
             <button
               type="button"
               onClick={handleDelete}
-              className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-note font-bold text-danger"
+              className="btn btn-outline text-note text-danger"
             >
               取り消す
             </button>

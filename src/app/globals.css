@@ -189,6 +189,118 @@ body {
   border-radius: var(--radius-card);
 }
 
+/* ------------------------------------------------------------------
+   ボタン。
+   現場は作業用手袋をしたまま、立ったまま片手で押すことがある。
+   指先が多少ずれても当たるよう、最低48px・主要操作は56pxを確保する。
+   押した手応えは拡大縮小ではなく色で返す。作業中に画面が動くと
+   狙いが外れるうえ、揺れる倉庫内では動き自体が読み取りづらいため
+   ------------------------------------------------------------------ */
+@utility btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 3rem; /* 48px */
+  padding-inline: 1rem;
+  border-radius: 9999px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+/* 画面でいちばん進めたい操作。幅いっぱい・56px */
+@utility btn-lg {
+  min-height: 3.5rem; /* 56px */
+  width: 100%;
+}
+
+@utility btn-primary {
+  background: var(--color-brand);
+  color: #fff;
+  &:active {
+    background: var(--color-brand-dark);
+  }
+  &:disabled {
+    background: var(--color-line);
+    color: var(--color-ink-faint);
+  }
+}
+
+/* 主要ではないが、押せることがはっきり分かる必要があるもの */
+@utility btn-outline {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  color: var(--color-ink);
+  &:active {
+    background: var(--color-canvas);
+    border-color: var(--color-ink-faint);
+  }
+}
+
+/* 文字だけのリンクにしないための、枠付きの誘導行 */
+@utility btn-link-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 3rem; /* 48px */
+  padding-inline: 0.875rem;
+  border: 1px solid var(--color-line);
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--color-brand-dark);
+  transition: background-color 0.12s ease;
+  &:active {
+    background: var(--color-brand-soft);
+  }
+}
+
+/* 絞り込みなどの切り替えチップ。こちらも指で押せる高さを持たせる */
+@utility chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3rem; /* 48px */
+  padding-inline: 0.875rem;
+  border-radius: 9999px;
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
+  color: var(--color-ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+  white-space: nowrap;
+  transition:
+    background-color 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+@utility chip-on {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: #fff;
+}
+
+/* 種類を表す小さな見出し札。色だけに頼らず、必ず絵文字＋文字で意味が分かるようにする */
+@utility tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+
 @utility no-scrollbar {
   scrollbar-width: none;
   &::-webkit-scrollbar {

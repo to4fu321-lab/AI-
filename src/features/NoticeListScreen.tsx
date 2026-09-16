@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo } from "react";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
+import { NoticeBody } from "@/components/NoticeBody";
 import { formatDateTime } from "@/lib/format";
 import { noticeCategoryOf } from "@/lib/labels";
 import { markNoticeRead, noticesFor, useDemoState } from "@/lib/store";
@@ -57,6 +58,10 @@ export function NoticeListScreen() {
   );
 }
 
+/**
+ * 1件の連絡。上から順に、何の連絡か → 要点 → 誰がいつ → 操作、と優先度が下がる。
+ * 立ったまま数秒見るだけでも、タイトルと箇条書きだけで用が足りることを狙っている
+ */
 function NoticeCard({
   notice,
   read,
@@ -70,44 +75,50 @@ function NoticeCard({
 
   return (
     <article
-      className={`card overflow-hidden p-4 ${read ? "" : "border-brand"}`}
+      className={`card p-4 ${read ? "" : "border-brand"}`}
       aria-label={read ? undefined : "未読のお知らせ"}
     >
-      <div className="mb-1.5 flex items-center gap-2">
-        <span className="rounded-full border border-line bg-canvas px-2 py-0.5 text-note font-bold text-ink-muted">
-          <span aria-hidden>{category.emoji}</span> {category.label}
-        </span>
+      {/* 何の連絡かを最初に置く。スクロール中に見失わないよう追従も試したが、
+          タイトルが本文を覆って画面を圧迫するのでやめた。
+          箇条書きを切り出して本文が短くなり、追従させる必要自体が減っている */}
+      <h2 className="text-title text-ink">{notice.title}</h2>
+
+      <div className="mb-2.5 mt-1.5 flex flex-wrap items-center gap-1.5">
         {read ? null : (
-          <span className="rounded-full bg-brand px-2 py-0.5 text-note font-bold text-white">
-            新着
+          <span className="tag border-brand bg-brand text-white">
+            <span aria-hidden>🔔</span> 新着
           </span>
         )}
-        <span className="ml-auto text-note text-ink-faint">
-          {formatDateTime(notice.createdAt)}
+        <span className={`tag ${category.tone} bg-canvas text-ink`}>
+          <span aria-hidden>{category.emoji}</span> {category.label}
         </span>
       </div>
 
-      <h2 className="text-head text-ink">{notice.title}</h2>
-      <p className="mt-1.5 whitespace-pre-wrap text-body text-ink">{notice.body}</p>
+      <NoticeBody body={notice.body} />
 
-      <p className="mt-3 text-note text-ink-faint">{authorName} より</p>
+      <p className="mt-3 text-note text-ink-faint">
+        {authorName} より・{formatDateTime(notice.createdAt)}
+      </p>
 
       {notice.reportId ? (
-        <Link
-          href={`/report/${notice.reportId}`}
-          className="mt-1 inline-flex min-h-11 items-center text-note font-bold text-brand"
-        >
-          もとになった報告を見る →
+        <Link href={`/report/${notice.reportId}`} className="btn-link-row mt-2.5">
+          <span aria-hidden>📄</span>
+          もとになった報告を見る
+          <span aria-hidden className="ml-auto">
+            →
+          </span>
         </Link>
       ) : null}
 
       {read ? (
-        <p className="mt-2 text-note font-bold text-dot-adopted">✓ 確認ずみ</p>
+        <p className="btn btn-outline mt-2.5 w-full border-dot-adopted text-dot-adopted">
+          <span aria-hidden>✓</span> 確認済み
+        </p>
       ) : (
         <button
           type="button"
           onClick={() => markNoticeRead(notice.id)}
-          className="mt-2 min-h-12 w-full rounded-full bg-brand text-body font-bold text-white transition active:scale-[0.99]"
+          className="btn btn-lg btn-primary mt-2.5"
         >
           確認しました
         </button>

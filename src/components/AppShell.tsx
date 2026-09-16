@@ -29,7 +29,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             isAdmin ? "max-w-5xl" : "max-w-[520px]"
           }`}
         >
-          <Link href={isAdmin ? "/admin" : "/"} className="flex items-center gap-2">
+          <Link href={isAdmin ? "/admin" : "/"} className="flex min-h-11 items-center gap-2">
             <span
               aria-hidden
               className="grid h-8 w-8 place-items-center rounded-lg bg-brand text-sm font-black text-white"

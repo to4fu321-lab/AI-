@@ -329,7 +329,7 @@ function StepButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="min-h-14 w-full rounded-full bg-brand text-head text-white transition active:scale-[0.99] disabled:bg-line disabled:text-ink-faint"
+      className="btn btn-lg btn-primary"
     >
       {children}
     </button>
@@ -358,13 +358,13 @@ function SubmittedScreen({ report, isEdit }: { report: Report; isEdit: boolean }
       <div className="grid gap-2">
         <Link
           href={`/report/${report.id}`}
-          className="grid min-h-14 place-items-center rounded-full bg-brand text-head text-white"
+          className="btn btn-lg btn-primary"
         >
           投稿を見る
         </Link>
         <Link
           href="/"
-          className="grid min-h-14 place-items-center rounded-full border border-line bg-surface text-head text-ink"
+          className="btn btn-lg btn-outline"
         >
           フィードにもどる
         </Link>

@@ -279,17 +279,50 @@ export function shareOf(value: ShareActionType) {
   return SHARE_OPTIONS.find((s) => s.value === value) ?? SHARE_OPTIONS[0];
 }
 
-/** 管理者からの連絡の種類。現場が「何の話か」を一目で判別できる4つだけ */
+/**
+ * 管理者からの連絡の種類。現場が「何の話か」を一目で判別できる4つだけ。
+ *
+ * 見分けは絵文字と文字が主で、枠線の色はあくまで補助。
+ * 色だけで意味を持たせると、色が分かりにくい人や、
+ * 明るい倉庫で画面が見づらいときに区別できなくなる。
+ * 文字は種類によらず濃いままにして、塗りつぶしの札は使わない（警告だらけにしないため）
+ */
 export const NOTICE_CATEGORIES: {
   value: NoticeCategory;
   label: string;
   emoji: string;
   hint: string;
+  /** 札の枠線の色 */
+  tone: string;
 }[] = [
-  { value: "rule", label: "ルール変更", emoji: "📋", hint: "やり方や決まりが変わります" },
-  { value: "share", label: "他拠点の改善", emoji: "🏢", hint: "よその改善事例を紹介します" },
-  { value: "monthly", label: "今月のまとめ", emoji: "📊", hint: "改善の数字を共有します" },
-  { value: "info", label: "お知らせ", emoji: "📣", hint: "そのほかの連絡" },
+  {
+    value: "rule",
+    label: "ルール変更",
+    emoji: "📋",
+    hint: "やり方や決まりが変わります",
+    tone: "border-dot-new",
+  },
+  {
+    value: "share",
+    label: "他拠点の改善",
+    emoji: "🏢",
+    hint: "よその改善事例を紹介します",
+    tone: "border-dot-partial",
+  },
+  {
+    value: "monthly",
+    label: "今月のまとめ",
+    emoji: "📊",
+    hint: "改善の数字を共有します",
+    tone: "border-dot-progress",
+  },
+  {
+    value: "info",
+    label: "お知らせ",
+    emoji: "📣",
+    hint: "そのほかの連絡",
+    tone: "border-line",
+  },
 ];
 
 export function noticeCategoryOf(value: NoticeCategory) {

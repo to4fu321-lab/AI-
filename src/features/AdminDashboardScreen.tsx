@@ -131,11 +131,7 @@ export function AdminDashboardScreen() {
                 type="button"
                 onClick={() => setFilter(item.value)}
                 aria-pressed={active}
-                className={`min-h-11 flex-1 whitespace-nowrap rounded-full border px-3 text-note font-bold transition ${
-                  active
-                    ? "border-brand bg-brand text-white"
-                    : "border-line bg-surface text-ink-muted"
-                }`}
+                className={`chip flex-1 ${active ? "chip-on" : ""}`}
               >
                 {item.label}（{count}）
               </button>
@@ -145,11 +141,7 @@ export function AdminDashboardScreen() {
             type="button"
             onClick={() => setFilter("shared")}
             aria-pressed={filter === "shared"}
-            className={`min-h-11 flex-1 whitespace-nowrap rounded-full border px-3 text-note font-bold transition ${
-              filter === "shared"
-                ? "border-brand bg-brand text-white"
-                : "border-line bg-surface text-ink-muted"
-            }`}
+            className={`chip flex-1 ${filter === "shared" ? "chip-on" : ""}`}
           >
             🏢 他拠点（{sharedFromOtherSites.length}）
           </button>

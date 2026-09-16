@@ -102,7 +102,7 @@ export function PolishButton({
         type="button"
         onClick={run}
         disabled={!canRun}
-        className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-full border border-brand bg-brand-soft text-note font-bold text-brand-dark transition active:scale-[0.99] disabled:border-line disabled:bg-canvas disabled:text-ink-faint"
+        className="btn w-full border border-brand bg-brand-soft text-note text-brand-dark active:bg-brand active:text-white disabled:border-line disabled:bg-canvas disabled:text-ink-faint"
       >
         {loading ? "整えています…" : "✨ AIに報告文へ整えてもらう"}
       </button>
@@ -121,7 +121,7 @@ export function PolishButton({
                 onApply({ ...result, rawNote: rawNoteSource });
                 dismiss();
               }}
-              className="min-h-11 flex-1 rounded-full bg-brand text-note font-bold text-white transition active:scale-[0.99]"
+              className="btn btn-primary flex-1 text-note"
             >
               これにする
             </button>
