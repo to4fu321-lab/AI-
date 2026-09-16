@@ -287,7 +287,7 @@ export const NOTICE_CATEGORIES: {
   hint: string;
 }[] = [
   { value: "rule", label: "ルール変更", emoji: "📋", hint: "やり方や決まりが変わります" },
-  { value: "share", label: "他拠点の改善", emoji: "🏢", hint: "よその良い事例を取り入れます" },
+  { value: "share", label: "他拠点の改善", emoji: "🏢", hint: "よその改善事例を紹介します" },
   { value: "monthly", label: "今月のまとめ", emoji: "📊", hint: "改善の数字を共有します" },
   { value: "info", label: "お知らせ", emoji: "📣", hint: "そのほかの連絡" },
 ];

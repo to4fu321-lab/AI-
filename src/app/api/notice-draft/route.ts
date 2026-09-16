@@ -29,8 +29,11 @@ const SYSTEM = `あなたは物流センターのセンター長が現場スタ�
 const MONTHLY_INSTRUCTION = `今月の改善活動のまとめを、現場スタッフ向けのお知らせにしてください。
 報告してくれた人が「自分の報告がどうなったか」を感じられる文章にします。`;
 
-const SHARE_INSTRUCTION = `他の拠点で採用された改善を、自分の拠点でも取り入れることを知らせるお知らせにしてください。
-どこの拠点の、どんな改善で、何が良くなるのかが伝わる文章にします。`;
+const SHARE_INSTRUCTION = `他の拠点で実際にあった改善事例を、自分の拠点のスタッフに紹介するお知らせにしてください。
+「これから取り入れます」ではなく、「よそでこんな改善があり、こう良くなった」という
+事例紹介として書きます。何がきっかけで、どんな改善をして、現場がどう変わったかが伝わる
+文章にしてください。現場からの報告や、対応した管理者のコメントがあれば、
+そのまま引用してもかまいません。`;
 
 interface DraftRequest {
   kind?: unknown;
@@ -82,11 +85,24 @@ function shareContext(report: Record<string, unknown>): string {
   const title = text(report.title, 80);
   if (!title) return "";
 
+  const timeline = Array.isArray(report.timeline)
+    ? report.timeline
+        .map((item) => {
+          if (typeof item !== "object" || item === null) return "";
+          const entry = item as Record<string, unknown>;
+          const label = text(entry.label, 20);
+          const comment = text(entry.comment, 300);
+          return label && comment ? `・${label}: ${comment}` : "";
+        })
+        .filter(Boolean)
+        .join("\n")
+    : "";
+
   return [
     text(report.site, 40) ? `改善が生まれた拠点: ${text(report.site, 40)}` : "",
-    `改善の内容: ${title}`,
-    text(report.body) ? `くわしい内容: ${text(report.body)}` : "",
-    text(report.result) ? `その拠点で実際に変わったこと: ${text(report.result)}` : "",
+    `きっかけになった現場からの報告: ${title}`,
+    text(report.body) ? `報告の内容（現場の声）: ${text(report.body)}` : "",
+    timeline ? `その拠点での対応の経過（管理者のコメント）:\n${timeline}` : "",
   ]
     .filter(Boolean)
     .join("\n");

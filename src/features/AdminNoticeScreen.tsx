@@ -4,7 +4,13 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { formatDateTime } from "@/lib/format";
-import { NOTICE_CATEGORIES, audienceText, noticeCategoryOf, noticeReaches } from "@/lib/labels";
+import {
+  NOTICE_CATEGORIES,
+  actionOf,
+  audienceText,
+  noticeCategoryOf,
+  noticeReaches,
+} from "@/lib/labels";
 import { monthlySummary, type MonthlySummary } from "@/lib/stats";
 import {
   audienceSize,
@@ -13,7 +19,34 @@ import {
   useDemoState,
 } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
-import type { Notice, NoticeAudience, NoticeCategory, Report, User } from "@/lib/types";
+import type {
+  AdminAction,
+  DecisionActionType,
+  Notice,
+  NoticeAudience,
+  NoticeCategory,
+  Report,
+  User,
+} from "@/lib/types";
+
+/** 決定・対応・完了など、コメントが残っているアクションだけを時系列で並べる */
+const TIMELINE_ACTION_TYPES: DecisionActionType[] = [
+  "reviewing",
+  "adopted",
+  "partial",
+  "in_progress",
+  "done",
+];
+
+function reportTimeline(report: Report): { label: string; comment: string }[] {
+  return report.actions
+    .filter(
+      (action): action is AdminAction & { type: DecisionActionType } =>
+        TIMELINE_ACTION_TYPES.includes(action.type as DecisionActionType) &&
+        action.comment.trim().length > 0,
+    )
+    .map((action) => ({ label: actionOf(action.type).pastLabel, comment: action.comment }));
+}
 
 type AudienceKind = NoticeAudience["kind"];
 
@@ -82,6 +115,7 @@ export function AdminNoticeScreen() {
 
   const reach = audienceSize(demo, mySite, audience);
   const canSend = category !== null && title.trim().length > 0 && reach > 0;
+  const selectedSourceReport = sharedReports.find((item) => item.id === sourceReportId) ?? null;
 
   const selectCategory = (value: NoticeCategory) => {
     setCategory(value);
@@ -124,7 +158,7 @@ export function AdminNoticeScreen() {
                     site: report.site,
                     title: report.title,
                     body: report.body,
-                    result: report.actions.find((action) => action.type === "done")?.comment ?? "",
+                    timeline: reportTimeline(report),
                   }
                 : null,
             };
@@ -285,7 +319,7 @@ export function AdminNoticeScreen() {
               {category === "share" ? (
                 <label className="block">
                   <span className="mb-1 block text-note text-ink-muted">
-                    どの拠点の改善を取り入れますか？
+                    どの拠点の改善事例を紹介しますか？
                   </span>
                   <select
                     value={sourceReportId}
@@ -300,6 +334,10 @@ export function AdminNoticeScreen() {
                     ))}
                   </select>
                 </label>
+              ) : null}
+
+              {category === "share" && selectedSourceReport ? (
+                <SharePreview report={selectedSourceReport} />
               ) : null}
 
               {category === "monthly" ? <SummaryPreview summary={summary} /> : null}
@@ -481,6 +519,36 @@ function SummaryPreview({ summary }: { summary: MonthlySummary }) {
   );
 }
 
+/** AIに渡す材料をそのまま見せる。現場の声と管理者コメントの出どころが分かるようにするため */
+function SharePreview({ report }: { report: Report }) {
+  const timeline = reportTimeline(report);
+
+  return (
+    <div className="rounded-lg border border-line bg-canvas p-3">
+      <p className="mb-2 text-note font-bold text-ink">
+        {report.site}の報告（材料としてそのまま使います）
+      </p>
+      <p className="text-note text-ink-faint">現場からの報告</p>
+      <p className="mb-2 whitespace-pre-wrap text-body text-ink">{report.body}</p>
+      {timeline.length > 0 ? (
+        <>
+          <p className="text-note text-ink-faint">対応の経過（管理者コメント）</p>
+          <ul className="space-y-1">
+            {timeline.map((item, index) => (
+              <li key={index} className="text-body text-ink">
+                <span className="font-bold text-ink-muted">{item.label}：</span>
+                {item.comment}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="text-note text-ink-faint">まだ対応の経過コメントはありません</p>
+      )}
+    </div>
+  );
+}
+
 function SentList({ notices, staff }: { notices: Notice[]; staff: User[] }) {
   return (
     <section className="space-y-2.5">
@@ -543,13 +611,15 @@ function monthlyTemplate(summary: MonthlySummary): { title: string; body: string
 }
 
 function shareTemplate(report: Report): { title: string; body: string } {
-  const result = report.actions.find((action) => action.type === "done")?.comment ?? "";
+  const timeline = reportTimeline(report);
+  const outcome = timeline.find((item) => item.label.includes("完了"))?.comment ?? "";
+
   return {
-    title: `${report.site}の「${report.title}」を取り入れます`.slice(0, 40),
+    title: `他拠点の改善事例：${report.title}`.slice(0, 40),
     body: [
-      `${report.site}で採用された改善を、当センターでも取り入れます。`,
-      report.body,
-      result ? `その拠点では、${result}` : "",
+      `${report.site}であった改善事例を紹介します。`,
+      `現場からの報告：${report.body}`,
+      outcome ? `対応後、現場は次のように変わりました：${outcome}` : "",
     ]
       .filter(Boolean)
       .join("\n"),
