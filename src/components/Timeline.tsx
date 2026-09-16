@@ -56,7 +56,7 @@ export function Timeline({ report, users }: { report: Report; users: User[] }) {
             )}
             <p className="text-body font-bold text-ink">{item.title}</p>
             {item.body ? (
-              <p className="mt-0.5 whitespace-pre-wrap text-body text-ink-muted">{item.body}</p>
+              <p className="mt-0.5 whitespace-pre-wrap text-body text-ink">{item.body}</p>
             ) : null}
             {item.meta ? <p className="mt-0.5 text-note text-ink-faint">{item.meta}</p> : null}
           </li>

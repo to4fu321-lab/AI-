@@ -120,13 +120,14 @@ export function ReportDetailScreen({ id }: { id: string }) {
         ) : null}
 
         {report.body ? (
-          <p className="mt-3 whitespace-pre-wrap text-body text-ink-muted">{report.body}</p>
+          <p className="mt-3 whitespace-pre-wrap text-body text-ink">{report.body}</p>
         ) : null}
 
         <div className="mt-4 flex items-center gap-2">
           <Avatar user={author} anonymous={report.anonymous} size={28} />
           <p className="text-note text-ink-muted">
-            {authorName(author, report.anonymous)}・{timeAgo(report.createdAt, now)}
+            <span className="font-bold text-ink">{authorName(author, report.anonymous)}</span>・
+            {timeAgo(report.createdAt, now)}
           </p>
         </div>
       </section>

@@ -88,7 +88,7 @@ function NoticeCard({
       </div>
 
       <h2 className="text-head text-ink">{notice.title}</h2>
-      <p className="mt-1.5 whitespace-pre-wrap text-body text-ink-muted">{notice.body}</p>
+      <p className="mt-1.5 whitespace-pre-wrap text-body text-ink">{notice.body}</p>
 
       <p className="mt-3 text-note text-ink-faint">{authorName} より</p>
 

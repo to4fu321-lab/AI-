@@ -96,7 +96,7 @@ export function AdminReportScreen({ id }: { id: string }) {
                 .join("・")}
             </p>
             {report.body ? (
-              <p className="mt-3 whitespace-pre-wrap text-body text-ink-muted">{report.body}</p>
+              <p className="mt-3 whitespace-pre-wrap text-body text-ink">{report.body}</p>
             ) : null}
 
             {report.rawNote ? (
@@ -111,9 +111,11 @@ export function AdminReportScreen({ id }: { id: string }) {
             <div className="mt-4 flex items-center gap-2">
               <Avatar user={author} anonymous={report.anonymous} size={28} />
               <p className="text-note text-ink-muted">
-                {authorName(author, report.anonymous)}
-                {author && !report.anonymous ? `（${author.team}）` : ""}・
-                {formatDateTime(report.createdAt)}
+                <span className="font-bold text-ink">
+                  {authorName(author, report.anonymous)}
+                  {author && !report.anonymous ? `（${author.team}）` : ""}
+                </span>
+                ・{formatDateTime(report.createdAt)}
               </p>
               {report.reactions.like.length + report.reactions.same.length > 0 ? (
                 <p className="mt-1 text-note font-bold text-ink">

@@ -7,10 +7,16 @@
   --color-brand-dark: #c34503;
   --color-brand-soft: #fff3ec;
 
-  /* テキスト・面 */
+  /* テキスト・面。
+     現場は明るい倉庫でスマホを見るので、薄いグレーは白飛びして読めなくなる。
+     白背景に対するコントラスト比を実測して決めている（WCAG AAは4.5:1）
+       ink       15.6:1 … 見出し・カードタイトル・必ず読ませたい本文
+       ink-muted  7.6:1 … 本文・説明
+       ink-faint  5.0:1 … 日時などの補足。いちばん薄いここでも、
+                          カード外の薄いグレー地(#f4f6f9)に載せてAAを下回らせない */
   --color-ink: #14243a;
-  --color-ink-muted: #5f7086;
-  --color-ink-faint: #94a2b3;
+  --color-ink-muted: #4b5563;
+  --color-ink-faint: #65707e;
   --color-surface: #ffffff;
   --color-canvas: #f4f6f9;
   --color-line: #e8ecf1;
@@ -66,8 +72,8 @@
     --color-brand-soft: #35190c;
 
     --color-ink: #e9eef5;
-    --color-ink-muted: #a6b4c6;
-    --color-ink-faint: #7b8a9d;
+    --color-ink-muted: #b4c0cf;
+    --color-ink-faint: #8f9db0;
     --color-surface: #161d27;
     --color-canvas: #0d131b;
     --color-line: #2a3442;
@@ -96,8 +102,8 @@
   --color-brand-soft: #35190c;
 
   --color-ink: #e9eef5;
-  --color-ink-muted: #a6b4c6;
-  --color-ink-faint: #7b8a9d;
+  --color-ink-muted: #b4c0cf;
+  --color-ink-faint: #8f9db0;
   --color-surface: #161d27;
   --color-canvas: #0d131b;
   --color-line: #2a3442;
@@ -126,6 +132,11 @@ body {
 
 body {
   -webkit-tap-highlight-color: transparent;
+  /* 細い明朝寄りの見え方だと、明るい倉庫では線が飛んで読みにくい。
+     本文の基本を 500 にして輪郭を残す。
+     ユーティリティ（font-bold 等）のほうが必ず強いので、
+     見出しやボタンの 700／数字の 800 はそのまま効く */
+  font-weight: 500;
 }
 
 :focus-visible {
@@ -161,7 +172,7 @@ body {
 
 @utility text-note {
   font-size: 0.875rem; /* 14px */
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 @utility text-num {
