@@ -178,14 +178,14 @@ export function PhotoAnnotator({
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-ink">
       <div className="flex items-center justify-between px-4 py-3 text-white">
-        <button type="button" onClick={onCancel} className="min-h-11 text-sm font-bold">
+        <button type="button" onClick={onCancel} className="min-h-11 text-base font-bold">
           キャンセル
         </button>
-        <p className="text-sm font-bold">写真に書き込む</p>
+        <p className="text-base font-bold">写真に書き込む</p>
         <button
           type="button"
           onClick={save}
-          className="min-h-11 rounded-full bg-brand px-4 text-sm font-bold"
+          className="min-h-11 rounded-full bg-brand px-4 text-base font-bold"
         >
           完了
         </button>
@@ -225,7 +225,7 @@ export function PhotoAnnotator({
               top: textDraft.top,
               transform: "translate(-4px, -50%)",
             }}
-            className="z-10 min-w-32 rounded-md border-2 border-brand bg-white px-2 py-1 text-sm text-ink outline-none"
+            className="z-10 min-w-32 rounded-md border-2 border-brand bg-white px-2 py-1 text-base text-ink outline-none"
           />
         ) : null}
       </div>
@@ -253,7 +253,7 @@ export function PhotoAnnotator({
               type="button"
               onClick={() => setStrokes((list) => list.slice(0, -1))}
               disabled={strokes.length === 0}
-              className="min-h-11 rounded-xl bg-white/10 px-3 text-xs font-bold text-white disabled:opacity-40"
+              className="min-h-11 rounded-xl bg-white/10 px-3 text-sm font-bold text-white disabled:opacity-40"
             >
               1つ戻す
             </button>
@@ -261,7 +261,7 @@ export function PhotoAnnotator({
               type="button"
               onClick={() => setStrokes([])}
               disabled={strokes.length === 0}
-              className="min-h-11 rounded-xl bg-white/10 px-3 text-xs font-bold text-white disabled:opacity-40"
+              className="min-h-11 rounded-xl bg-white/10 px-3 text-sm font-bold text-white disabled:opacity-40"
             >
               全消し
             </button>
@@ -291,7 +291,7 @@ export function PhotoAnnotator({
                 type="button"
                 onClick={() => setWidth(item.value)}
                 aria-pressed={width === item.value}
-                className={`min-h-11 rounded-xl px-3 text-xs font-bold transition ${
+                className={`min-h-11 rounded-xl px-3 text-sm font-bold transition ${
                   width === item.value ? "bg-brand text-white" : "bg-white/10 text-white/70"
                 }`}
               >

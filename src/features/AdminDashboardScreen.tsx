@@ -120,7 +120,8 @@ export function AdminDashboardScreen() {
       ) : null}
 
       <section className="space-y-3">
-        <div className="flex gap-2">
+        {/* 文字を大きくしてもチップが2段に割れないよう、狭い画面では横スクロールさせる */}
+        <div className="no-scrollbar flex gap-2 overflow-x-auto">
           {ADMIN_FILTERS.map((item) => {
             const count = myReports.filter((r) => item.statuses.includes(r.status)).length;
             const active = filter === item.value;
@@ -130,7 +131,7 @@ export function AdminDashboardScreen() {
                 type="button"
                 onClick={() => setFilter(item.value)}
                 aria-pressed={active}
-                className={`min-h-10 flex-1 rounded-full border text-note font-bold transition ${
+                className={`min-h-11 flex-1 whitespace-nowrap rounded-full border px-3 text-note font-bold transition ${
                   active
                     ? "border-brand bg-brand text-white"
                     : "border-line bg-surface text-ink-muted"
@@ -144,7 +145,7 @@ export function AdminDashboardScreen() {
             type="button"
             onClick={() => setFilter("shared")}
             aria-pressed={filter === "shared"}
-            className={`min-h-10 flex-1 rounded-full border text-note font-bold transition ${
+            className={`min-h-11 flex-1 whitespace-nowrap rounded-full border px-3 text-note font-bold transition ${
               filter === "shared"
                 ? "border-brand bg-brand text-white"
                 : "border-line bg-surface text-ink-muted"
@@ -234,7 +235,7 @@ function ReportRow({
       >
         <UrgencyBar urgency={report.urgency} />
         <div className="min-w-0 flex-1 pl-1">
-          <p className="truncate text-head text-ink">{report.title}</p>
+          <p className="line-clamp-2 text-head text-ink">{report.title}</p>
           <p className="mt-0.5 truncate text-note text-ink-muted">{meta.join("・")}</p>
         </div>
         {report.sharedToSites ? <span title="横展開ずみ">🏢</span> : null}

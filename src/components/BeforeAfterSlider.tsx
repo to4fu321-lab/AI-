@@ -37,10 +37,10 @@ export function BeforeAfterSlider({
         </span>
       </div>
 
-      <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-ink/80 px-2 py-1 text-[11px] font-bold text-white">
+      <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-ink/80 px-2 py-1 text-[13px] font-bold text-white">
         Before
       </span>
-      <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-brand px-2 py-1 text-[11px] font-bold text-white">
+      <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-brand px-2 py-1 text-[13px] font-bold text-white">
         After
       </span>
 

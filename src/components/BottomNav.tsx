@@ -37,7 +37,7 @@ export function BottomNav() {
                 <span aria-hidden className="relative text-base leading-none">
                   {item.icon}
                   {badge > 0 ? (
-                    <span className="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[10px] font-bold leading-none text-white">
+                    <span className="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[11px] font-bold leading-none text-white">
                       {badge}
                     </span>
                   ) : null}

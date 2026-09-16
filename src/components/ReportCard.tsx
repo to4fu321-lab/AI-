@@ -28,12 +28,12 @@ export function ReportCard({
   const reactions = report.reactions.like.length + report.reactions.same.length;
   // 完了した報告は「何がどう変わったか」までカードで見せる
   const outcome = [...report.actions].reverse().find((action) => action.type === "done");
+  // 共感数はメタ行に混ぜると文字が伸びたときに真っ先に切れてしまうので、行末に固定で置く
   const meta = [
     typeText(report.type),
     authorName(author, report.anonymous),
     timeAgo(report.createdAt, now),
   ];
-  if (reactions > 0) meta.push(`🙌 共感${reactions}`);
 
   return (
     <Link
@@ -56,7 +56,12 @@ export function ReportCard({
           <h3 className="line-clamp-2 text-head text-ink">{report.title}</h3>
           <StatusDot status={report.status} />
         </div>
-        <p className="mt-1 truncate text-note text-ink-muted">{meta.join("・")}</p>
+        <div className="mt-1 flex items-center gap-1.5">
+          <p className="min-w-0 flex-1 truncate text-note text-ink-muted">{meta.join("・")}</p>
+          {reactions > 0 ? (
+            <p className="shrink-0 text-note text-ink-muted">🙌 {reactions}</p>
+          ) : null}
+        </div>
         {outcome?.comment ? (
           <p className="mt-1 line-clamp-2 text-note text-dot-adopted">🎊 {outcome.comment}</p>
         ) : null}
