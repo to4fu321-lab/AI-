@@ -176,7 +176,7 @@ export function PhotoAnnotator({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-ink">
+    <div className="fixed inset-0 z-50 flex flex-col bg-stage">
       <div className="flex items-center justify-between px-4 py-3 text-white">
         <button type="button" onClick={onCancel} className="min-h-11 text-base font-bold">
           キャンセル
@@ -225,12 +225,12 @@ export function PhotoAnnotator({
               top: textDraft.top,
               transform: "translate(-4px, -50%)",
             }}
-            className="z-10 min-w-32 rounded-md border-2 border-brand bg-white px-2 py-1 text-base text-ink outline-none"
+            className="z-10 min-w-32 rounded-md border-2 border-brand bg-white px-2 py-1 text-base text-stage outline-none"
           />
         ) : null}
       </div>
 
-      <div className="space-y-3 bg-ink px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
+      <div className="space-y-3 bg-stage px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
         <div className="flex items-center justify-between gap-2">
           <div className="flex gap-1.5">
             {TOOLS.map((item) => (

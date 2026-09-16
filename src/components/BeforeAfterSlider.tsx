@@ -17,7 +17,7 @@ export function BeforeAfterSlider({
   const [position, setPosition] = useState(50);
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-line bg-ink">
+    <div className="relative overflow-hidden rounded-2xl border border-line bg-stage">
       <ReportImage src={after} alt="改善後の写真" className="block w-full" />
 
       <div
@@ -32,12 +32,12 @@ export function BeforeAfterSlider({
         className="pointer-events-none absolute inset-y-0 w-0.5 bg-white shadow"
         style={{ left: `${position}%` }}
       >
-        <span className="absolute top-1/2 left-1/2 grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-white text-xs font-bold text-ink shadow-lg">
+        <span className="absolute top-1/2 left-1/2 grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-white text-xs font-bold text-stage shadow-lg">
           ⇔
         </span>
       </div>
 
-      <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-ink/80 px-2 py-1 text-[13px] font-bold text-white">
+      <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-stage/85 px-2 py-1 text-[13px] font-bold text-white">
         Before
       </span>
       <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-brand px-2 py-1 text-[13px] font-bold text-white">

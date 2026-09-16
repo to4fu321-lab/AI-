@@ -32,13 +32,23 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
+/**
+ * 保存した明るさ設定を、画面が描かれる前に反映する。
+ * React の描画を待つと、暗いモードの人に一瞬だけ白い画面が光ってしまう
+ */
+const APPLY_THEME = `try{var t=localStorage.getItem("kaizen-board:theme");if(t==="dark"||t==="light")document.documentElement.dataset.theme=t}catch(e){}`;
+
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ja" className={notoSansJP.variable}>
+    // data-theme は上のスクリプトが描画前に書き込むので、サーバーの出力とは必ず食い違う
+    <html lang="ja" className={notoSansJP.variable} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: APPLY_THEME }} />
+      </head>
       <body className="min-h-dvh font-sans antialiased">
         <AppShell>{children}</AppShell>
       </body>

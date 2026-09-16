@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { BottomNav } from "./BottomNav";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { ThemeToggle } from "./ThemeToggle";
 import { ServiceWorkerRegister } from "./ServiceWorkerRegister";
 import { setRole, useDemoState } from "@/lib/store";
 
@@ -38,11 +39,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="text-[17px] font-bold tracking-tight text-ink">
               カイゼンボード
             </span>
-            <span className="rounded border border-line px-1.5 py-0.5 text-[11px] font-bold leading-none text-ink-faint">
+            {/* 明るさ切替を置くぶん、狭い画面ではDEMOバッジを畳む */}
+            <span className="hidden rounded border border-line px-1.5 py-0.5 text-[11px] font-bold leading-none text-ink-faint min-[400px]:inline">
               DEMO
             </span>
           </Link>
-          <RoleSwitcher />
+          <div className="flex shrink-0 items-center gap-1.5">
+            <ThemeToggle />
+            <RoleSwitcher />
+          </div>
         </div>
       </header>
 

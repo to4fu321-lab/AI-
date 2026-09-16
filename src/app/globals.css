@@ -27,17 +27,94 @@
   /* 緊急度（カード左端の帯） */
   --color-danger: #d92020;
   --color-warn: #d08700;
+  /* 危険な未対応をまとめる警告ブロックの面と枠 */
+  --color-danger-soft: #fef2f2;
+  --color-danger-line: #fecaca;
 
   /* 採用ハンコ（朱色。モチベが上がる「押した」感を出す唯一の例外演出） */
   --color-stamp: #c81e1e;
+
+  /* 写真の上に重ねるものは、明暗どちらのモードでも常に暗いまま。
+     写真を見るための背景なので、テーマに合わせて明るくすると写真が見づらくなる */
+  --color-stage: #14243a;
+  --color-scrim: #14243a;
 
   --radius-card: 14px;
 
   --font-sans: var(--font-noto-sans-jp), ui-sans-serif, system-ui, sans-serif;
 }
 
+/* ------------------------------------------------------------------
+   暗いモード。
+   倉庫の現場は高天井のLEDで明るく、その環境では白背景のほうが
+   照明の映り込みに負けず読みやすいので、既定は明るいモードのまま。
+   夜勤・早朝・冷蔵倉庫・夜間の荷捌き場のために選べるようにしている。
+
+   端末の設定（prefers-color-scheme）に従いつつ、
+   アプリ内で明示的に選んだとき（data-theme）はそちらを優先する
+   ------------------------------------------------------------------ */
 :root {
   color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --color-brand: #ff6a1f;
+    --color-brand-dark: #ffa06b;
+    --color-brand-soft: #35190c;
+
+    --color-ink: #e9eef5;
+    --color-ink-muted: #a6b4c6;
+    --color-ink-faint: #7b8a9d;
+    --color-surface: #161d27;
+    --color-canvas: #0d131b;
+    --color-line: #2a3442;
+
+    --color-dot-new: #f59e0b;
+    --color-dot-reviewing: #eab308;
+    --color-dot-adopted: #34d399;
+    --color-dot-partial: #22d3ee;
+    --color-dot-progress: #60a5fa;
+    --color-dot-declined: #7b8a9d;
+
+    --color-danger: #f87171;
+    --color-warn: #eab308;
+    --color-danger-soft: #2c1517;
+    --color-danger-line: #5b2427;
+
+    --color-stamp: #ff6b6b;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-brand: #ff6a1f;
+  --color-brand-dark: #ffa06b;
+  --color-brand-soft: #35190c;
+
+  --color-ink: #e9eef5;
+  --color-ink-muted: #a6b4c6;
+  --color-ink-faint: #7b8a9d;
+  --color-surface: #161d27;
+  --color-canvas: #0d131b;
+  --color-line: #2a3442;
+
+  --color-dot-new: #f59e0b;
+  --color-dot-reviewing: #eab308;
+  --color-dot-adopted: #34d399;
+  --color-dot-partial: #22d3ee;
+  --color-dot-progress: #60a5fa;
+  --color-dot-declined: #7b8a9d;
+
+  --color-danger: #f87171;
+  --color-warn: #eab308;
+  --color-danger-soft: #2c1517;
+  --color-danger-line: #5b2427;
+
+  --color-stamp: #ff6b6b;
 }
 
 html,

@@ -101,7 +101,7 @@ export function AdminDashboardScreen() {
       </section>
 
       {urgent.length > 0 ? (
-        <section className="rounded-[14px] border border-red-200 bg-red-50 p-3">
+        <section className="rounded-[14px] border border-danger-line bg-danger-soft p-3">
           <h2 className="mb-2 text-note font-bold text-danger">
             ⚠️ 今すぐ確認：危険の報告が {urgent.length}件
           </h2>
@@ -230,7 +230,7 @@ function ReportRow({
       <Link
         href={readOnly ? `/report/${report.id}` : `/admin/${report.id}`}
         className={`relative flex items-center gap-3 overflow-hidden rounded-[14px] border p-3 transition hover:border-ink-faint ${
-          tone === "alert" ? "border-red-200 bg-surface" : "card"
+          tone === "alert" ? "border-danger-line bg-surface" : "card"
         }`}
       >
         <UrgencyBar urgency={report.urgency} />
