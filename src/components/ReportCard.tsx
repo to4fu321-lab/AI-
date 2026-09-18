@@ -38,7 +38,7 @@ export function ReportCard({
   return (
     <Link
       href={href}
-      className="card relative flex gap-3 overflow-hidden p-3 transition active:bg-canvas"
+      className="card-proposal relative flex gap-3 overflow-hidden p-3 transition active:bg-canvas"
     >
       <UrgencyBar urgency={report.urgency} />
 
