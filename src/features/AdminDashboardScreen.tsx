@@ -221,8 +221,10 @@ function ReportRow({
     <li>
       <Link
         href={readOnly ? `/report/${report.id}` : `/admin/${report.id}`}
-        className={`relative flex items-center gap-3 overflow-hidden rounded-[14px] border p-3 transition hover:border-ink-faint ${
-          tone === "alert" ? "border-danger-line bg-surface" : "card-proposal"
+        className={`relative flex items-center gap-3 overflow-hidden rounded-[14px] p-3 transition ${
+          tone === "alert"
+            ? "border border-danger-line bg-surface hover:border-ink-faint"
+            : "card-proposal"
         }`}
       >
         <UrgencyBar urgency={report.urgency} />
