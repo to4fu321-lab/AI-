@@ -170,7 +170,7 @@ body {
 /* 現場からの提案（報告）カード専用。card と面・角丸は同じで、枠だけグリーンにする */
 @utility card-proposal {
   background: var(--color-surface);
-  border: 1px solid var(--color-proposal);
+  border: 2px solid var(--color-proposal);
   border-radius: var(--radius-card);
 }
 
