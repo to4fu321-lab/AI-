@@ -3,9 +3,9 @@ import type { DemoState, Notice, Report, User } from "@/lib/types";
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-const SAPPORO = "札幌物流センター";
-const FUNABASHI = "船橋物流センター";
-const OSAKA = "大阪物流センター";
+const SAPPORO = "プラネット北海道";
+const FUNABASHI = "プラネット埼玉";
+const OSAKA = "プラネット神戸";
 
 export const SEED_USERS: User[] = [
   { id: "u1", name: "森下 陽介", role: "staff", site: SAPPORO, team: "ピッキングA班", color: "#ea5504" },
@@ -434,7 +434,7 @@ export function createSeedState(now: number): DemoState {
       category: "share",
       title: "他拠点の改善事例：パレットの積載上限ライン",
       body:
-        "大阪物流センターであった改善事例を紹介します。\n" +
+        `${OSAKA}であった改善事例を紹介します。\n` +
         "現場からの報告：積み上げすぎて崩れかけたことがあります。柱に「ここまで」のラインがあれば、誰が積んでも同じ高さで止められます。\n" +
         "対応：安全衛生委員会でも同じ意見が出ており、全ヤードに表示することになりました。誰が積んでも同じ高さで止められるようになり、崩れかけるヒヤリが減っています。",
       audience: { kind: "teams", teams: ["入出荷B班"] },

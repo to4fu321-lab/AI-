@@ -164,7 +164,7 @@ const STATUS_BY_ACTION: Record<DecisionActionType, ReportStatus | null> = {
 
 function currentUserSite(current: DemoState): string {
   return (
-    current.users.find((user) => user.id === current.staffUserId)?.site ?? "札幌物流センター"
+    current.users.find((user) => user.id === current.staffUserId)?.site ?? "プラネット北海道"
   );
 }
 
@@ -260,7 +260,7 @@ export function createNotice(input: NewNoticeInput): Notice {
   const admin = current.users.find((user) => user.id === current.adminUserId);
   const notice: Notice = {
     id: newId("n"),
-    site: admin?.site ?? "札幌物流センター",
+    site: admin?.site ?? "プラネット北海道",
     category: input.category,
     title: input.title.trim(),
     body: input.body.trim(),
