@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { BottomNav } from "./BottomNav";
+import { FirstRunIntro } from "./FirstRunIntro";
 import { RoleSwitcher } from "./RoleSwitcher";
 import { ThemeToggle } from "./ThemeToggle";
 import { ServiceWorkerRegister } from "./ServiceWorkerRegister";
@@ -23,10 +24,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col bg-canvas">
       <ServiceWorkerRegister />
+      <FirstRunIntro />
       <header className="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
         <div
           className={`mx-auto flex h-14 items-center justify-between gap-3 px-4 ${
-            isAdmin ? "max-w-5xl" : "max-w-[520px]"
+            isAdmin ? "max-w-5xl" : "max-w-[520px] lg:max-w-[640px]"
           }`}
         >
           <Link href={isAdmin ? "/admin" : "/"} className="flex min-h-11 items-center gap-2">
@@ -53,7 +55,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <main
         className={`mx-auto w-full flex-1 px-4 pt-4 ${isAdmin ? "pb-12" : "pb-28"} ${
-          isAdmin ? "max-w-5xl" : "max-w-[520px]"
+          isAdmin ? "max-w-5xl" : "max-w-[520px] lg:max-w-[640px]"
         }`}
       >
         {children}

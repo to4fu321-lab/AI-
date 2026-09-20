@@ -1,8 +1,6 @@
 "use client";
 
-import { useState } from "react";
-
-const SEEN_KEY = "kaizen-board:intro-seen";
+import { useIntroGuide } from "@/lib/introGuide";
 
 const STEPS = [
   { emoji: "👀", label: "気づく", note: "危ない・やりにくいに気づく" },
@@ -11,31 +9,14 @@ const STEPS = [
   { emoji: "🎊", label: "改善する", note: "担当者が動き、現場が変わる" },
 ];
 
-function hasSeen(): boolean {
-  if (typeof window === "undefined") return true;
-  try {
-    return window.localStorage.getItem(SEEN_KEY) === "1";
-  } catch {
-    return true;
-  }
-}
-
 /**
- * 初回だけ出る導入。毎回出ると現場では邪魔になるので、閉じたら二度と出さない。
+ * 初回だけ出る導入。閉じたら二度と自動では出さないが、
+ * DemoNote の「使い方をもう一度見る」からいつでも呼び戻せる
  */
 export function FirstRunIntro() {
-  const [open, setOpen] = useState(() => !hasSeen());
+  const [open, setOpen] = useIntroGuide();
 
   if (!open) return null;
-
-  const close = () => {
-    try {
-      window.localStorage.setItem(SEEN_KEY, "1");
-    } catch {
-      // 保存できなくても体験は止めない
-    }
-    setOpen(false);
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim/50 px-4 pb-6 pt-10 sm:items-center">
@@ -46,6 +27,17 @@ export function FirstRunIntro() {
           <br />
           カイゼンに変える。
         </h2>
+        <p className="mt-2 text-note text-ink-muted">
+          個人制作のポートフォリオです（トラスコ中山様への応募用デモ）。
+        </p>
+
+        <div className="mt-4 rounded-[14px] bg-canvas p-3">
+          <p className="text-note font-bold text-ink">このデモの登場人物</p>
+          <p className="mt-1 text-note text-ink-muted">
+            今あなたは現場スタッフの<b className="text-ink">森下 陽介</b>として見ています。
+            管理者は<b className="text-ink">中村 隆志</b>（センター長）です。
+          </p>
+        </div>
 
         <ol className="mt-4 space-y-2.5">
           {STEPS.map((step, index) => (
@@ -66,11 +58,11 @@ export function FirstRunIntro() {
           ))}
         </ol>
 
-        <button
-          type="button"
-          onClick={close}
-          className="btn btn-lg btn-primary mt-5"
-        >
+        <p className="mt-4 text-note text-ink-muted">
+          右上のボタンで「現場」⇄「管理者」をいつでも切り替えられます。両方見てみてください。
+        </p>
+
+        <button type="button" onClick={() => setOpen(false)} className="btn btn-lg btn-primary mt-5">
           はじめる
         </button>
       </div>

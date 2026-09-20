@@ -20,7 +20,7 @@ export function BottomNav() {
       aria-label="メインナビゲーション"
       className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)]"
     >
-      <ul className="mx-auto flex max-w-[520px] items-stretch">
+      <ul className="mx-auto flex max-w-[520px] items-stretch lg:max-w-[640px]">
         {ITEMS.map((item) => {
           const active =
             item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

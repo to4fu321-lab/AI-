@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { DemoNote } from "@/components/DemoNote";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
-import { FirstRunIntro } from "@/components/FirstRunIntro";
 import { LevelProgress } from "@/components/LevelProgress";
 import { ReportCard } from "@/components/ReportCard";
 import { ACCEPTED_STATUSES } from "@/lib/labels";
@@ -45,8 +44,6 @@ export function FeedScreen() {
 
   return (
     <div className="space-y-5">
-      <FirstRunIntro />
-
       <section className="card p-4">
         <p className="text-note text-ink-muted">{me.site}</p>
         <p className="mb-3 text-head text-ink">{me.name} さん</p>
@@ -106,13 +103,17 @@ export function FeedScreen() {
 
       <DemoNote />
 
-      <Link
-        href="/new"
-        className="btn btn-primary fixed bottom-20 right-[max(1rem,calc(50%-238px))] z-30 min-h-14 px-5 text-head"
-      >
-        <span aria-hidden>＋</span>
-        報告する
-      </Link>
+      <div className="pointer-events-none fixed inset-x-0 bottom-20 z-30">
+        <div className="mx-auto flex max-w-[520px] justify-end px-4 lg:max-w-[640px]">
+          <Link
+            href="/new"
+            className="btn btn-primary pointer-events-auto min-h-14 px-5 text-head"
+          >
+            <span aria-hidden>＋</span>
+            報告する
+          </Link>
+        </div>
+      </div>
     </div>
   );
 }
