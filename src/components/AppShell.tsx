@@ -6,6 +6,7 @@ import { useEffect } from "react";
 import { BottomNav } from "./BottomNav";
 import { FirstRunIntro } from "./FirstRunIntro";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { SideNav } from "./SideNav";
 import { ThemeToggle } from "./ThemeToggle";
 import { ServiceWorkerRegister } from "./ServiceWorkerRegister";
 import { setRole, useDemoState } from "@/lib/store";
@@ -22,44 +23,50 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [demo, isAdmin]);
 
   return (
-    <div className="flex min-h-dvh flex-col bg-canvas">
+    <div className="flex min-h-dvh flex-col bg-canvas md:flex-row">
       <ServiceWorkerRegister />
       <FirstRunIntro />
-      <header className="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur">
-        <div
-          className={`mx-auto flex h-14 items-center justify-between gap-3 px-4 ${
-            isAdmin ? "max-w-5xl" : "max-w-[520px] lg:max-w-[640px]"
-          }`}
-        >
-          <Link href={isAdmin ? "/admin" : "/"} className="flex min-h-11 items-center gap-2">
-            <span
-              aria-hidden
-              className="grid h-8 w-8 place-items-center rounded-lg bg-brand text-sm font-black text-white"
-            >
-              改
-            </span>
-            <span className="text-[17px] font-bold tracking-tight text-ink">
-              カイゼンボード
-            </span>
-            {/* 明るさ切替を置くぶん、狭い画面ではDEMOバッジを畳む */}
-            <span className="hidden rounded border border-line px-1.5 py-0.5 text-[11px] font-bold leading-none text-ink-faint min-[400px]:inline">
-              DEMO
-            </span>
-          </Link>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <ThemeToggle />
-            <RoleSwitcher />
-          </div>
-        </div>
-      </header>
 
-      <main
-        className={`mx-auto w-full flex-1 px-4 pt-4 ${isAdmin ? "pb-12" : "pb-28"} ${
-          isAdmin ? "max-w-5xl" : "max-w-[520px] lg:max-w-[640px]"
-        }`}
-      >
-        {children}
-      </main>
+      {/* 幅のある端末（タブレット縦向き以上）では、下のバーではなく横のナビに切り替える */}
+      <SideNav isAdmin={isAdmin} />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur md:hidden">
+          <div
+            className={`mx-auto flex h-14 items-center justify-between gap-3 px-4 ${
+              isAdmin ? "max-w-5xl" : "max-w-[520px]"
+            }`}
+          >
+            <Link href={isAdmin ? "/admin" : "/"} className="flex min-h-11 items-center gap-2">
+              <span
+                aria-hidden
+                className="grid h-8 w-8 place-items-center rounded-lg bg-brand text-sm font-black text-white"
+              >
+                改
+              </span>
+              <span className="text-[17px] font-bold tracking-tight text-ink">
+                カイゼンボード
+              </span>
+              {/* 明るさ切替を置くぶん、狭い画面ではDEMOバッジを畳む */}
+              <span className="hidden rounded border border-line px-1.5 py-0.5 text-[11px] font-bold leading-none text-ink-faint min-[400px]:inline">
+                DEMO
+              </span>
+            </Link>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <ThemeToggle />
+              <RoleSwitcher />
+            </div>
+          </div>
+        </header>
+
+        <main
+          className={`mx-auto w-full flex-1 px-4 pt-4 ${
+            isAdmin ? "pb-12" : "pb-28 md:pb-12"
+          } ${isAdmin ? "max-w-5xl" : "max-w-[520px] lg:max-w-[640px]"}`}
+        >
+          {children}
+        </main>
+      </div>
 
       {isAdmin ? null : <BottomNav />}
     </div>

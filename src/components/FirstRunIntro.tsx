@@ -59,7 +59,7 @@ export function FirstRunIntro() {
         </ol>
 
         <p className="mt-4 text-note text-ink-muted">
-          右上のボタンで「現場」⇄「管理者」をいつでも切り替えられます。両方見てみてください。
+          「現場」⇄「管理者」のボタンでいつでも切り替えられます。両方見てみてください。
         </p>
 
         <button type="button" onClick={() => setOpen(false)} className="btn btn-lg btn-primary mt-5">

@@ -103,7 +103,8 @@ export function FeedScreen() {
 
       <DemoNote />
 
-      <div className="pointer-events-none fixed inset-x-0 bottom-20 z-30">
+      {/* 横ナビが出る幅では、サイドバーの「＋ 報告する」がこの役割を担う */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-20 z-30 md:hidden">
         <div className="mx-auto flex max-w-[520px] justify-end px-4 lg:max-w-[640px]">
           <Link
             href="/new"
