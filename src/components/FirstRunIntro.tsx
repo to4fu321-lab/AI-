@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useIntroGuide } from "@/lib/introGuide";
 
 const STEPS = [
@@ -10,61 +11,129 @@ const STEPS = [
 ];
 
 /**
- * 初回だけ出る導入。閉じたら二度と自動では出さないが、
- * DemoNote の「使い方をもう一度見る」からいつでも呼び戻せる
+ * 初回だけ出る導入。1枚目にこのアプリを作った想い、2枚目に使い方を置く。
+ * 閉じたら二度と自動では出さないが、DemoNote の「このアプリについて」から呼び戻せる
  */
 export function FirstRunIntro() {
   const [open, setOpen] = useIntroGuide();
+  // このコンポーネントは常時マウントされたままなので、閉じるときに1枚目へ戻す
+  const [step, setStep] = useState<0 | 1>(0);
 
   if (!open) return null;
 
+  const close = () => {
+    setStep(0);
+    setOpen(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim/50 px-4 pb-6 pt-10 sm:items-center">
-      <div className="w-full max-w-[440px] rounded-[14px] bg-surface p-5">
-        <p className="text-note font-bold text-brand">カイゼンボード</p>
-        <h2 className="mt-1 text-title text-ink">
-          現場の「ちょっと困った」を、
-          <br />
-          カイゼンに変える。
-        </h2>
-        <p className="mt-2 text-note text-ink-muted">
-          個人制作のポートフォリオです（トラスコ中山様への応募用デモ）。
-        </p>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="intro-title"
+        className="max-h-[calc(100dvh-4rem)] w-full max-w-[440px] overflow-y-auto rounded-[14px] bg-surface p-5"
+      >
+        {step === 0 ? (
+          <>
+            <p className="text-note font-bold text-brand">このアプリを作った想い</p>
+            <h2 id="intro-title" className="mt-1 text-title text-ink">
+              最先端システムに、現場で働く人間の
+              <span className="text-brand">「熱い想い」</span>をプラスしたい。
+            </h2>
 
-        <div className="mt-4 rounded-[14px] bg-canvas p-3">
-          <p className="text-note font-bold text-ink">このデモの登場人物</p>
-          <p className="mt-1 text-note text-ink-muted">
-            今あなたは現場スタッフの<b className="text-ink">森下 陽介</b>として見ています。
-            管理者は<b className="text-ink">中村 隆志</b>（センター長）です。
-          </p>
+            <div className="mt-4 space-y-3 text-body text-ink-muted">
+              <p>
+                貴社のデジタル化最前線でのピッキングや配送に携わりたいという想いから、このアプリを自作しました。
+              </p>
+              <p>
+                現場で生まれる工夫や気づきを互いに共有し、ボトムアップで業務を高め合えるチームを作りたいという考えがあります。
+              </p>
+              <p>
+                現場の声を大切にし、テクノロジーと人間の知恵を融合させた新しい物流サービスに、私も一員として挑戦したいと考えています！
+              </p>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-note font-bold text-brand">カイゼンボード</p>
+            <h2 id="intro-title" className="mt-1 text-title text-ink">
+              現場の「ちょっと困った」を、
+              <br />
+              カイゼンに変える。
+            </h2>
+            <p className="mt-2 text-note text-ink-muted">
+              個人制作のポートフォリオです（トラスコ中山様への応募用デモ）。
+            </p>
+
+            <div className="mt-4 rounded-[14px] bg-canvas p-3">
+              <p className="text-note font-bold text-ink">このデモの登場人物</p>
+              <p className="mt-1 text-note text-ink-muted">
+                今あなたは現場スタッフの<b className="text-ink">森下 陽介</b>として見ています。
+                管理者は<b className="text-ink">中村 隆志</b>（センター長）です。
+              </p>
+            </div>
+
+            <ol className="mt-4 space-y-2.5">
+              {STEPS.map((item, index) => (
+                <li key={item.label} className="flex items-center gap-3">
+                  <span
+                    aria-hidden
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-canvas text-base"
+                  >
+                    {item.emoji}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="text-body font-bold text-ink">
+                      {index + 1}. {item.label}
+                    </span>
+                    <span className="block text-note text-ink-muted">{item.note}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
+
+            <p className="mt-4 text-note text-ink-muted">
+              「現場」⇄「管理者」のボタンでいつでも切り替えられます。両方見てみてください。
+            </p>
+          </>
+        )}
+
+        <div className="mt-5 flex items-center justify-center gap-1.5" aria-hidden>
+          <span
+            className={`h-1.5 rounded-full transition-all ${
+              step === 0 ? "w-4 bg-brand" : "w-1.5 bg-line"
+            }`}
+          />
+          <span
+            className={`h-1.5 rounded-full transition-all ${
+              step === 1 ? "w-4 bg-brand" : "w-1.5 bg-line"
+            }`}
+          />
         </div>
 
-        <ol className="mt-4 space-y-2.5">
-          {STEPS.map((step, index) => (
-            <li key={step.label} className="flex items-center gap-3">
-              <span
-                aria-hidden
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-canvas text-base"
-              >
-                {step.emoji}
-              </span>
-              <span className="min-w-0">
-                <span className="text-body font-bold text-ink">
-                  {index + 1}. {step.label}
-                </span>
-                <span className="block text-note text-ink-muted">{step.note}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
-
-        <p className="mt-4 text-note text-ink-muted">
-          「現場」⇄「管理者」のボタンでいつでも切り替えられます。両方見てみてください。
-        </p>
-
-        <button type="button" onClick={() => setOpen(false)} className="btn btn-lg btn-primary mt-5">
-          はじめる
-        </button>
+        {step === 0 ? (
+          <button
+            type="button"
+            onClick={() => setStep(1)}
+            className="btn btn-lg btn-primary mt-3"
+          >
+            アプリを見る
+          </button>
+        ) : (
+          <>
+            <button type="button" onClick={close} className="btn btn-lg btn-primary mt-3">
+              はじめる
+            </button>
+            <button
+              type="button"
+              onClick={() => setStep(0)}
+              className="mt-1 min-h-11 w-full text-note font-bold text-ink-faint"
+            >
+              ← 想いを読む
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

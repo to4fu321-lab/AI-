@@ -15,7 +15,7 @@ export function DemoNote() {
         onClick={() => setOpen(true)}
         className="mt-1 min-h-11 text-note font-bold text-brand-dark"
       >
-        使い方をもう一度見る
+        このアプリについて
       </button>
     </div>
   );
