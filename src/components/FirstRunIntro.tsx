@@ -38,26 +38,28 @@ export function FirstRunIntro() {
           <>
             <p className="text-note font-bold text-brand">このアプリを作った想い</p>
             <h2 id="intro-title" className="mt-1 text-title text-ink">
-              貴社の物流現場で、ピッキングや配送を実際に経験しながら、
-              <span className="text-brand">現場の小さな気づきを改善につなげたい。</span>
+              貴社の物流現場でピッキングや配送に携わり、
+              <span className="text-brand">現場の小さな気づきを「改善」につなげたい。</span>
             </h2>
 
             <p className="mt-3 text-body text-ink-muted">
-              そのために、私は現場改善アプリを自作しました。
+              その想いを、まずは一つの<b className="text-ink">改善共有モックアプリ</b>
+              として形にしました。
             </p>
 
             {/* このアプリが扱うのはまさにこの3つ。段落に流さず、独立した声として見せる */}
             <ul className="mt-3 space-y-1.5 rounded-[14px] bg-canvas p-3 text-body text-ink">
               <li>「この作業、もっと早くできないか」</li>
-              <li>「この情報が共有されていれば、ミスを減らせるのではないか」</li>
-              <li>「現場で生まれた工夫を、チーム全体で共有できないか」</li>
+              <li>「この情報があれば、ミスを減らせるはず」</li>
+              <li>「現場の工夫を、チーム全体で共有したい」</li>
             </ul>
 
             <div className="mt-3 space-y-3 text-body text-ink-muted">
-              <p>そんな一つひとつの気づきを、改善として形にしていきたいと考えています。</p>
-              <p>最先端のシステムに、現場で働く人の知恵を掛け合わせたい。</p>
               <p>
-                現場で働きながら、新しい物流の仕組みをつくる側として挑戦したいと考えています。
+                高度なDXが進む物流現場だからこそ、システムの力と、そこで働く人の知恵を掛け合わせたいと考えています。
+              </p>
+              <p>
+                このモックを出発点に、現場を深く知り、現場から新しい物流を考える側として挑戦したいです！
               </p>
             </div>
 
