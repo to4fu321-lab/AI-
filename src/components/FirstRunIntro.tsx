@@ -56,14 +56,14 @@ export function FirstRunIntro() {
 
             <div className="mt-3 space-y-3 text-body text-ink-muted">
               <p>
-                高度なDXが進む物流現場だからこそ、システムの力と、そこで働く人の知恵を掛け合わせたいと考えています。
+                60万点を超える在庫を、ロボットによる自動化で動かす世界水準の物流。その仕組みだからこそ、現場で働く人にしか気づけないことが、大きな価値になると考えています。
               </p>
               <p>
                 このモックを出発点に、現場を深く知り、現場から新しい物流を考える側として挑戦したいです！
               </p>
             </div>
 
-            <p className="mt-4 text-right text-note text-ink-muted">吉岡 敏文</p>
+            <p className="mt-3 text-right text-note text-ink-muted">吉岡 敏文</p>
           </>
         ) : (
           <>
