@@ -38,21 +38,30 @@ export function FirstRunIntro() {
           <>
             <p className="text-note font-bold text-brand">このアプリを作った想い</p>
             <h2 id="intro-title" className="mt-1 text-title text-ink">
-              最先端システムに、現場で働く人間の
-              <span className="text-brand">「熱い想い」</span>をプラスしたい。
+              貴社の物流現場で、ピッキングや配送を実際に経験しながら、
+              <span className="text-brand">現場の小さな気づきを改善につなげたい。</span>
             </h2>
 
-            <div className="mt-4 space-y-3 text-body text-ink-muted">
+            <p className="mt-3 text-body text-ink-muted">
+              そのために、私は現場改善アプリを自作しました。
+            </p>
+
+            {/* このアプリが扱うのはまさにこの3つ。段落に流さず、独立した声として見せる */}
+            <ul className="mt-3 space-y-1.5 rounded-[14px] bg-canvas p-3 text-body text-ink">
+              <li>「この作業、もっと早くできないか」</li>
+              <li>「この情報が共有されていれば、ミスを減らせるのではないか」</li>
+              <li>「現場で生まれた工夫を、チーム全体で共有できないか」</li>
+            </ul>
+
+            <div className="mt-3 space-y-3 text-body text-ink-muted">
+              <p>そんな一つひとつの気づきを、改善として形にしていきたいと考えています。</p>
+              <p>最先端のシステムに、現場で働く人の知恵を掛け合わせたい。</p>
               <p>
-                貴社のデジタル化最前線でのピッキングや配送に携わりたいという想いから、このアプリを自作しました。
-              </p>
-              <p>
-                現場で生まれる工夫や気づきを互いに共有し、ボトムアップで業務を高め合えるチームを作りたいという考えがあります。
-              </p>
-              <p>
-                現場の声を大切にし、テクノロジーと人間の知恵を融合させた新しい物流サービスに、私も一員として挑戦したいと考えています！
+                現場で働きながら、新しい物流の仕組みをつくる側として挑戦したいと考えています。
               </p>
             </div>
+
+            <p className="mt-4 text-right text-note text-ink-muted">吉岡 敏文</p>
           </>
         ) : (
           <>
