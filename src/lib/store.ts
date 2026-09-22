@@ -13,6 +13,7 @@ import type {
   ShareActionType,
   AdminAction,
   DemoState,
+  ImprovementEffect,
   Notice,
   NoticeAudience,
   NoticeCategory,
@@ -172,7 +173,7 @@ export function addAdminAction(
   reportId: string,
   type: DecisionActionType,
   comment: string,
-  options: { plannedDate?: string } = {},
+  options: { plannedDate?: string; effect?: ImprovementEffect } = {},
 ): AdminAction {
   const current = requireState();
   const action: AdminAction = {
@@ -183,6 +184,7 @@ export function addAdminAction(
     actorId: current.adminUserId,
     createdAt: Date.now(),
     plannedDate: options.plannedDate?.trim() || undefined,
+    effect: options.effect,
   };
   const nextStatus = STATUS_BY_ACTION[type];
   commit({

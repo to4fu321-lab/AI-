@@ -1,3 +1,4 @@
+import { formatEffect } from "@/lib/format";
 import type { Report } from "@/lib/types";
 
 /**
@@ -25,7 +26,12 @@ export function ImprovementStory({ report }: { report: Report }) {
           note={decided.plannedDate ? `実施予定：${decided.plannedDate}` : undefined}
         />
         {finished ? (
-          <Step label="改善後" text={finished.comment} tone="done" />
+          <Step
+            label="改善後"
+            text={finished.comment}
+            tone="done"
+            effect={finished.effect ? formatEffect(finished.effect) : undefined}
+          />
         ) : (
           <Step label="改善後" text="対応が完了すると、現場がどう変わったかが記録されます" tone="pending" />
         )}
@@ -38,11 +44,14 @@ function Step({
   label,
   text,
   note,
+  effect,
   tone = "normal",
 }: {
   label: string;
   text: string;
   note?: string;
+  /** 「1日あたり 約50分」のような効果。この報告で一番効く数字なので目立たせる */
+  effect?: string;
   tone?: "normal" | "done" | "pending";
 }) {
   return (
@@ -62,6 +71,12 @@ function Step({
         {text}
       </p>
       {note ? <p className="mt-0.5 text-note text-ink-muted">{note}</p> : null}
+      {effect ? (
+        <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-lg bg-canvas px-2.5 py-1 text-body font-bold text-dot-adopted">
+          <span aria-hidden>⏱</span>
+          {effect}
+        </p>
+      ) : null}
     </li>
   );
 }

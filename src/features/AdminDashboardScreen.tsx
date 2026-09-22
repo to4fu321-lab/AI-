@@ -97,6 +97,14 @@ export function AdminDashboardScreen() {
             <span className="font-bold text-danger">危険 {stats.dangerCount}件・</span>
           ) : null}
           今月 {stats.monthlyCount}件・採用率 {Math.round(stats.adoptionRate * 100)}%
+          {stats.monthlySavedMinutesPerDay > 0 ? (
+            <>
+              ・
+              <span className="font-bold text-dot-adopted">
+                今月の改善で 1日 約{Math.round(stats.monthlySavedMinutesPerDay)}分の短縮
+              </span>
+            </>
+          ) : null}
         </p>
       </section>
 

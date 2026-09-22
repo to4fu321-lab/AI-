@@ -129,60 +129,16 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
         ))}
       </div>
 
+      {/*
+        入力順は「その場を離れたら取れないもの → 選ぶだけのもの → 考えるもの」。
+        写真はその場にいる今しか撮れないので最初に確保する。
+        文章を書いている間に持ち場へ戻ってしまうと、写真だけが永久に撮れなくなる
+      */}
       {step === 0 ? (
-        <section className="space-y-3">
-          <h1 className="text-title text-ink">どんな内容ですか？</h1>
-          <div className="grid grid-cols-2 gap-2">
-            {REPORT_TYPES.map((item) => (
-              <button
-                key={item.value}
-                type="button"
-                onClick={() => setType(item.value)}
-                aria-pressed={type === item.value}
-                className={`card flex min-h-16 flex-row items-center gap-2 p-2.5 text-left transition ${
-                  type === item.value ? "border-brand bg-brand-soft" : ""
-                }`}
-              >
-                <span aria-hidden className="text-lg">
-                  {item.emoji}
-                </span>
-                <span className="text-head text-ink">{item.label}</span>
-              </button>
-            ))}
-          </div>
-
-          <div>
-            <p className="mb-1.5 text-body font-bold text-ink">急ぎ具合</p>
-            <div className="flex gap-2">
-              {[...URGENCIES].reverse().map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  onClick={() => setUrgency(item.value)}
-                  aria-pressed={urgency === item.value}
-                  className={`min-h-11 flex-1 rounded-full border text-note font-bold transition ${
-                    urgency === item.value
-                      ? "border-brand bg-brand-soft text-brand-dark"
-                      : "border-line bg-surface text-ink-muted"
-                  }`}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <StepButton disabled={!type} onClick={() => setStep(1)}>
-            つぎへ
-          </StepButton>
-        </section>
-      ) : null}
-
-      {step === 1 ? (
         <section className="space-y-4">
-          <h1 className="text-title text-ink">写真で伝えましょう</h1>
+          <h1 className="text-title text-ink">まず、写真を撮りましょう</h1>
           <p className="-mt-2 text-note text-ink-muted">
-            撮った写真に、指で丸や矢印を書き込めます。
+            その場でしか撮れないので先に。撮った写真に、指で丸や矢印を書き込めます。
           </p>
           <PhotoField
             label="現状（Before）"
@@ -202,13 +158,68 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
               setAfter(value);
             }}
           />
-          <StepButton onClick={() => setStep(2)}>つぎへ</StepButton>
+          <StepButton onClick={() => setStep(1)}>つぎへ</StepButton>
+        </section>
+      ) : null}
+
+      {step === 1 ? (
+        <section className="space-y-4">
+          <h1 className="text-title text-ink">どこで、何がありましたか？</h1>
+
+          <div className="card space-y-4 p-4">
+            <Field label="場所">
+              <select
+                value={area}
+                onChange={(event) => setArea(event.target.value)}
+                className="min-h-12 w-full rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
+              >
+                {AREAS.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field label="場所のメモ（任意）">
+              <input
+                value={areaNote}
+                onChange={(event) => setAreaNote(event.target.value)}
+                maxLength={40}
+                placeholder="例）A-3通路の突き当たり"
+                className="min-h-12 w-full rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
+              />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            {REPORT_TYPES.map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                onClick={() => setType(item.value)}
+                aria-pressed={type === item.value}
+                className={`card flex min-h-16 flex-row items-center gap-2 p-2.5 text-left transition ${
+                  type === item.value ? "border-brand bg-brand-soft" : ""
+                }`}
+              >
+                <span aria-hidden className="text-lg">
+                  {item.emoji}
+                </span>
+                <span className="text-head text-ink">{item.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <StepButton disabled={!type} onClick={() => setStep(2)}>
+            つぎへ
+          </StepButton>
         </section>
       ) : null}
 
       {step === 2 ? (
         <section className="space-y-4">
-          <h1 className="text-title text-ink">ひとことで教えてください</h1>
+          <h1 className="text-title text-ink">どんな状況ですか？</h1>
 
           <PolishHintBanner />
 
@@ -255,29 +266,27 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
               }}
             />
 
-            <Field label="場所">
-              <select
-                value={area}
-                onChange={(event) => setArea(event.target.value)}
-                className="min-h-12 w-full rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
-              >
-                {AREAS.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
+            {/* 何が起きているか書いた直後のほうが、急ぎかどうかを判断しやすい */}
+            <div>
+              <span className="mb-1 block text-note text-ink-muted">急ぎ具合</span>
+              <div className="flex gap-2">
+                {[...URGENCIES].reverse().map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    onClick={() => setUrgency(item.value)}
+                    aria-pressed={urgency === item.value}
+                    className={`min-h-11 flex-1 rounded-full border text-note font-bold transition ${
+                      urgency === item.value
+                        ? "border-brand bg-brand-soft text-brand-dark"
+                        : "border-line bg-surface text-ink-muted"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
                 ))}
-              </select>
-            </Field>
-
-            <Field label="場所のメモ（任意）">
-              <input
-                value={areaNote}
-                onChange={(event) => setAreaNote(event.target.value)}
-                maxLength={40}
-                placeholder="例）A-3通路の突き当たり"
-                className="min-h-12 w-full rounded-lg border border-line bg-canvas px-3 text-body text-ink outline-none focus:border-brand"
-              />
-            </Field>
+              </div>
+            </div>
 
             <label className="flex min-h-11 items-center justify-between gap-3">
               <span className="text-body text-ink">匿名で投稿する</span>

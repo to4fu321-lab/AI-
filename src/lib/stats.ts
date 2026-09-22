@@ -1,4 +1,4 @@
-import { isSameMonth } from "./format";
+import { effectSavedMinutesPerDay, isSameMonth } from "./format";
 import { ACCEPTED_STATUSES, FINISHED_STATUSES, reportTypeOf } from "./labels";
 import type { Report } from "./types";
 
@@ -11,6 +11,11 @@ export interface DashboardStats {
   dangerCount: number;
   /** 実際に改善が完了した件数（「現場が変わった数」） */
   improvedCount: number;
+  /**
+   * 今月完了した改善で、1日あたり何分浮いたかの合計。
+   * 歩数の効果は時間に換算せず、ここには含めない
+   */
+  monthlySavedMinutesPerDay: number;
 }
 
 /** 管理ダッシュボードのKPI。未対応件数を最重要に置く */
@@ -36,6 +41,13 @@ export function dashboardStats(reports: Report[], now: number): DashboardStats {
       (report) => report.urgency === "danger" && report.status === "new",
     ).length,
     improvedCount: reports.filter((report) => FINISHED_STATUSES.includes(report.status)).length,
+    monthlySavedMinutesPerDay: reports
+      .flatMap((report) => report.actions)
+      .filter((action) => action.type === "done" && isSameMonth(action.createdAt, now))
+      .reduce((sum, action) => {
+        const minutes = action.effect ? effectSavedMinutesPerDay(action.effect) : null;
+        return sum + (minutes ?? 0);
+      }, 0),
   };
 }
 

@@ -49,6 +49,21 @@ export type ReactionKind = "like" | "same";
  */
 export type ImageRef = string;
 
+/**
+ * 改善の効果。完了時に管理者がざっくり選ぶだけで入る。
+ *
+ * 現場には入力させない。測定の負担の正体は「測ること」ではなく
+ * 「正確に測ること」なので、精度を捨てて概算に振り、掛け算はアプリがやる
+ */
+export interface ImprovementEffect {
+  /** 1回あたりの削減量 */
+  amount: number;
+  /** 秒か歩か。倉庫の動線改善は歩数で語るほうが伝わる */
+  unit: "seconds" | "steps";
+  /** 1日あたりの発生回数 */
+  timesPerDay: number;
+}
+
 export interface AdminAction {
   id: string;
   type: ActionType;
@@ -60,6 +75,8 @@ export interface AdminAction {
   createdAt: number;
   /** 採用時の実施予定 */
   plannedDate?: string;
+  /** 完了時に記録する改善の効果（任意） */
+  effect?: ImprovementEffect;
 }
 
 export interface Report {

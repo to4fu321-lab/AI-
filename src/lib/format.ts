@@ -1,3 +1,5 @@
+import type { ImprovementEffect } from "./types";
+
 /** 「3時間前」のような相対表記。クライアント側でのみ呼ぶこと */
 export function timeAgo(timestamp: number, now: number = Date.now()): string {
   const diff = Math.max(0, now - timestamp);
@@ -29,4 +31,25 @@ export function isSameMonth(timestamp: number, now: number): boolean {
   const a = new Date(timestamp);
   const b = new Date(now);
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
+/** 改善効果の「1日あたり」の総量。秒単位の効果だけが分に換算できる */
+export function effectSavedMinutesPerDay(effect: ImprovementEffect): number | null {
+  if (effect.unit !== "seconds") return null;
+  return (effect.amount * effect.timesPerDay) / 60;
+}
+
+/**
+ * 「1日あたり 約50分」のような表記。
+ * 概算なので「約」を外さない。歩は時間に換算しない（根拠のない精度を作らないため）
+ */
+export function formatEffect(effect: ImprovementEffect): string {
+  if (effect.unit === "steps") {
+    return `1日あたり 約${(effect.amount * effect.timesPerDay).toLocaleString()}歩`;
+  }
+  const minutes = effectSavedMinutesPerDay(effect) ?? 0;
+  if (minutes < 60) return `1日あたり 約${Math.round(minutes)}分`;
+  const hours = minutes / 60;
+  // 「1.5時間」まで出すと概算に見えないので、0.5刻みで丸める
+  return `1日あたり 約${Math.round(hours * 2) / 2}時間`;
 }

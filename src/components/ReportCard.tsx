@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { StatusDot, UrgencyBar, authorName, typeText } from "./Badges";
 import { ReportImage } from "./ReportImage";
-import { timeAgo } from "@/lib/format";
+import { formatEffect, timeAgo } from "@/lib/format";
 import { reportTypeOf } from "@/lib/labels";
 import type { Report, User } from "@/lib/types";
 
@@ -64,6 +64,11 @@ export function ReportCard({
         </div>
         {outcome?.comment ? (
           <p className="mt-1 line-clamp-2 text-note text-dot-adopted">🎊 {outcome.comment}</p>
+        ) : null}
+        {outcome?.effect ? (
+          <p className="mt-0.5 truncate text-note font-bold text-dot-adopted">
+            ⏱ {formatEffect(outcome.effect)}
+          </p>
         ) : null}
         {fromOtherSite ? (
           <p className="mt-0.5 truncate text-note text-ink-faint">
