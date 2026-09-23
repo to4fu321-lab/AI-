@@ -101,6 +101,13 @@ export interface Report {
   areaNote: string;
   beforeImage?: ImageRef;
   afterImage?: ImageRef;
+  /**
+   * Afterの写真を誰がいつ追加したか。
+   * 投稿と同時とは限らない（その場で直せない・自力では直せない・
+   * そもそも直すか未定、など）ので、後から追加した人を記録する
+   */
+  afterImageBy?: string;
+  afterImageAt?: number;
   status: ReportStatus;
   /** 他拠点へ横展開された（他拠点のフィードにも流れる） */
   sharedToSites: boolean;

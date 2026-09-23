@@ -82,6 +82,11 @@ function tx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequ
   );
 }
 
+export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const response = await fetch(dataUrl);
+  return response.blob();
+}
+
 /** Blob を保存し、`idb:<id>` 形式の参照を返す */
 export async function putImage(blob: Blob): Promise<string> {
   const id = `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

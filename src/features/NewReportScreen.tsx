@@ -10,7 +10,7 @@ import { PolishButton, PolishHintBanner, usePolishAssist } from "@/components/Po
 import { VoiceInputButton } from "@/components/VoiceInputButton";
 import { AREAS, REPORT_TYPES, URGENCIES, reportTypeOf } from "@/lib/labels";
 import { postPointLines, postPoints } from "@/lib/points";
-import { putImage } from "@/lib/storage";
+import { dataUrlToBlob, putImage } from "@/lib/storage";
 import { createReport, updateReport, useDemoState, useImageUrl } from "@/lib/store";
 import type { Report, ReportType, Urgency } from "@/lib/types";
 
@@ -380,9 +380,4 @@ function SubmittedScreen({ report, isEdit }: { report: Report; isEdit: boolean }
       </div>
     </div>
   );
-}
-
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const response = await fetch(dataUrl);
-  return response.blob();
 }

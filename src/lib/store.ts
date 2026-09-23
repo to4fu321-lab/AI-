@@ -140,11 +140,37 @@ export function updateReport(reportId: string, input: NewReportInput): Report | 
       anonymous: input.anonymous,
       beforeImage: input.beforeImage,
       afterImage: input.afterImage,
+      // 修正フォームでAfterが新たに付いた/差し替わったときだけ、追加者を記録し直す
+      afterImageBy:
+        input.afterImage && input.afterImage !== report.afterImage
+          ? current.staffUserId
+          : report.afterImageBy,
+      afterImageAt:
+        input.afterImage && input.afterImage !== report.afterImage
+          ? Date.now()
+          : report.afterImageAt,
     };
     return updated;
   });
   commit({ ...current, reports });
   return updated;
+}
+
+/**
+ * Afterの写真を、投稿とは別のタイミングで追加/差し替える。
+ * その場で直せない・自力では直せない・そもそも直すか未定、といった投稿と、
+ * 完了報告が同時にならないケースのための入口（現場からも管理者からも呼べる）
+ */
+export function setAfterImage(reportId: string, image: string, userId: string) {
+  const current = requireState();
+  commit({
+    ...current,
+    reports: current.reports.map((report) =>
+      report.id === reportId
+        ? { ...report, afterImage: image, afterImageBy: userId, afterImageAt: Date.now() }
+        : report,
+    ),
+  });
 }
 
 /** 自分の投稿を取り消す */

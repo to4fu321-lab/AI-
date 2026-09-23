@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { AfterPhotoAdder } from "@/components/AfterPhotoAdder";
 import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
@@ -16,7 +17,7 @@ import {
   actionOf,
   nextActionsFor,
 } from "@/lib/labels";
-import { addAdminAction, toggleShare, useDemoState } from "@/lib/store";
+import { addAdminAction, toggleShare, useDemoState, useUserMap } from "@/lib/store";
 import type { DecisionActionType, ImprovementEffect } from "@/lib/types";
 
 /**
@@ -32,6 +33,7 @@ const TIMES_PER_DAY = [10, 50, 100, 300];
 
 export function AdminReportScreen({ id }: { id: string }) {
   const demo = useDemoState();
+  const userOf = useUserMap();
   const [selected, setSelected] = useState<DecisionActionType | null>(null);
   const [comment, setComment] = useState("");
   const [plannedDate, setPlannedDate] = useState("");
@@ -100,7 +102,15 @@ export function AdminReportScreen({ id }: { id: string }) {
       <div className="grid gap-5 md:grid-cols-[1.1fr_1fr] md:items-start">
         <div className="space-y-5">
           {report.afterImage ? (
-            <BeforeAfterSlider before={report.beforeImage} after={report.afterImage} />
+            <div>
+              <BeforeAfterSlider before={report.beforeImage} after={report.afterImage} />
+              {report.afterImageBy ? (
+                <p className="mt-1.5 text-note text-ink-faint">
+                  Afterの写真：{authorName(userOf(report.afterImageBy), false)}が追加
+                  {report.afterImageAt ? `・${formatDateTime(report.afterImageAt)}` : ""}
+                </p>
+              ) : null}
+            </div>
           ) : report.beforeImage ? (
             <ReportImage
               src={report.beforeImage}
@@ -305,6 +315,20 @@ export function AdminReportScreen({ id }: { id: string }) {
                                 → {formatEffect(effect)}
                               </p>
                             ) : null}
+                          </div>
+                        ) : null}
+
+                        {action.value === "done" && !report.afterImage ? (
+                          <div className="rounded-lg border border-line bg-canvas p-3">
+                            <p className="text-note font-bold text-ink">
+                              直った後の写真（任意）
+                            </p>
+                            <p className="mt-0.5 text-note text-ink-faint">
+                              報告者が後から追加することもできます
+                            </p>
+                            <div className="mt-2">
+                              <AfterPhotoAdder reportId={report.id} userId={demo.adminUserId} />
+                            </div>
                           </div>
                         ) : null}
                         <button

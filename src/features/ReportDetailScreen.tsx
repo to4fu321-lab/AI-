@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { AfterPhotoAdder } from "@/components/AfterPhotoAdder";
 import { Avatar, StatusDot, UrgencyText, authorName, typeText } from "@/components/Badges";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { EmptyState, LoadingBlock } from "@/components/EmptyState";
 import { ImprovementStory } from "@/components/ImprovementStory";
 import { ReportImage } from "@/components/ReportImage";
 import { Timeline } from "@/components/Timeline";
-import { timeAgo } from "@/lib/format";
-import { deleteReport, toggleReaction, useDemoState } from "@/lib/store";
+import { formatDate, timeAgo } from "@/lib/format";
+import { deleteReport, toggleReaction, useDemoState, useUserMap } from "@/lib/store";
 import { useNow } from "@/lib/useNow";
 import type { ReactionKind } from "@/lib/types";
 
@@ -17,6 +19,8 @@ export function ReportDetailScreen({ id }: { id: string }) {
   const demo = useDemoState();
   const now = useNow();
   const router = useRouter();
+  const userOf = useUserMap();
+  const [addingPhoto, setAddingPhoto] = useState(false);
 
   if (!demo) return <LoadingBlock />;
 
@@ -88,13 +92,44 @@ export function ReportDetailScreen({ id }: { id: string }) {
       </div>
 
       {report.afterImage ? (
-        <BeforeAfterSlider before={report.beforeImage} after={report.afterImage} />
+        <div>
+          <BeforeAfterSlider before={report.beforeImage} after={report.afterImage} />
+          {report.afterImageBy ? (
+            <p className="mt-1.5 text-note text-ink-faint">
+              Afterの写真：{authorName(userOf(report.afterImageBy), false)}が追加
+              {report.afterImageAt ? `・${formatDate(report.afterImageAt)}` : ""}
+            </p>
+          ) : null}
+        </div>
       ) : report.beforeImage ? (
         <ReportImage
           src={report.beforeImage}
           alt="報告された現場の写真"
           className="w-full rounded-[14px] border border-line"
         />
+      ) : null}
+
+      {/*
+        その場で直せない・自力では直せない・そもそも直すか未定、といった報告は
+        投稿時にAfter写真を付けられない。直った後からでも追加できるようにする
+      */}
+      {isMine && !report.afterImage ? (
+        addingPhoto ? (
+          <AfterPhotoAdder
+            reportId={report.id}
+            userId={demo.staffUserId}
+            onAdded={() => setAddingPhoto(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAddingPhoto(true)}
+            className="btn btn-outline w-full"
+          >
+            <span aria-hidden>📸</span>
+            直った後の写真を追加する
+          </button>
+        )
       ) : null}
 
       <section>
