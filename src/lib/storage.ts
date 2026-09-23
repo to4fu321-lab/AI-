@@ -12,7 +12,7 @@ const VALID_TYPES = new Set<string>(REPORT_TYPES.map((item) => item.value));
 const VALID_STATUSES = new Set<string>(STATUSES.map((item) => item.value));
 
 // データ構造を変えたらキーを上げる（古い保存データを読み込まないため）
-const STATE_KEY = "kaizen-board:state:v10";
+const STATE_KEY = "kaizen-board:state:v11";
 const DB_NAME = "kaizen-board";
 const DB_VERSION = 1;
 const IMAGE_STORE = "images";
