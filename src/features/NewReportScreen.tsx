@@ -142,22 +142,27 @@ export function NewReportScreen({ editReport }: { editReport?: Report } = {}) {
           </p>
           <PhotoField
             label="現状（Before）"
-            hint="任意"
+            hint="任意・無くても報告できます"
             value={before}
             onChange={(value) => {
               beforeTouched.current = true;
               setBefore(value);
             }}
           />
-          <PhotoField
-            label="こうしたい / 直した後（After）"
-            hint="任意・+10pt"
-            value={after}
-            onChange={(value) => {
-              afterTouched.current = true;
-              setAfter(value);
-            }}
-          />
+          <div>
+            <PhotoField
+              label="こうしたい / 直した後（After）"
+              hint="任意・+10pt"
+              value={after}
+              onChange={(value) => {
+                afterTouched.current = true;
+                setAfter(value);
+              }}
+            />
+            <p className="mt-1.5 text-note text-ink-faint">
+              💡 まだ直っていなくても大丈夫です。改善できたら、報告の画面から後から追加できます
+            </p>
+          </div>
           <StepButton onClick={() => setStep(1)}>つぎへ</StepButton>
         </section>
       ) : null}
