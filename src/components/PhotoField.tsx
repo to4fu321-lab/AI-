@@ -15,11 +15,14 @@ const SAMPLES = [
 export function PhotoField({
   label,
   hint,
+  note,
   value,
   onChange,
 }: {
   label: string;
   hint: string;
+  /** ボタンの枠の中に添える短い案内。下に置いても読まれないような注意書き用 */
+  note?: string;
   value: string | null;
   onChange: (dataUrl: string | null) => void;
 }) {
@@ -81,6 +84,9 @@ export function PhotoField({
               📷
             </span>
             {busy ? "読み込み中…" : "写真を撮る / 選ぶ"}
+            {!busy && note ? (
+              <span className="text-note font-normal text-brand-dark/80">{note}</span>
+            ) : null}
           </button>
           <input
             ref={inputRef}
