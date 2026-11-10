@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // ffmpeg WebAssembly build copied in by scripts/copy-ffmpeg.mjs
+    "public/ffmpeg/**",
   ]),
 ]);
 

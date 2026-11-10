@@ -40,3 +40,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ffmpeg WebAssembly build, copied from node_modules by scripts/copy-ffmpeg.mjs
+/public/ffmpeg/
