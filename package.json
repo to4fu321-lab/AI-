@@ -3,12 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-ffmpeg.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-ffmpeg.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
     "@supabase/supabase-js": "^2.110.5",
     "next": "16.2.6",
     "react": "19.2.4",
