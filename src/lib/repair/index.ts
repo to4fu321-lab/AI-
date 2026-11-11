@@ -307,7 +307,22 @@ async function repairWithFacts(file: Blob, opts: RepairOptions, facts: Record<st
       return null;
     });
     facts["索引の利用"] = fixed ? "可" : "不可";
-    if (fixed) return finishFromIndex(file, boxes, fixed, headerDamaged, opts, progress);
+    if (fixed) {
+      const fromIndex = await finishFromIndex(file, boxes, fixed, headerDamaged, opts, progress);
+      if (fromIndex.audioFrames > 0) return fromIndex;
+      // The index gave no sound: either the video really has none, or the audio part of the
+      // index is missing (a cut-off moov) or unusable. Look for the sound in the raw data; keep
+      // that result if it found sound without losing picture.
+      const fromScan = await repairByScan(file, boxes, moov, opts, progress, headerDamaged, facts).catch((e) => {
+        if (e instanceof DOMException) throw e;
+        return null;
+      });
+      if (fromScan && fromScan.audioFrames > 0 && fromScan.videoFrames >= fromIndex.videoFrames * 0.9) {
+        facts["音声"] = "索引から読めないため生データから復元";
+        return fromScan;
+      }
+      return fromIndex;
+    }
   }
 
   // --- No usable index: find the frames in the raw data ---------------------------------------
@@ -444,6 +459,11 @@ async function repairByScan(
     if (ref.audio) {
       aacSrIndex = ref.audio.srIndex;
       audioBase = ref.audio;
+    } else if (!ref.unsupportedAudio) {
+      // No audio settings to go on (a reference without sound, or a damaged index): still look
+      // for AAC between the video frames, as when there is no reference at all.
+      const sample = await scanMedia(file, start, end, { codec, h264, hevc, aacSrIndex: 4, maxPictures: 300, signal: opts.signal });
+      aacSrIndex = sample.audio.offsets.length >= 4 ? 4 : await detectAacFamily(file, start, sample);
     }
     unsupportedAudio = ref.audio ? null : ref.unsupportedAudio;
   } else {

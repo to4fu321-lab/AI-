@@ -11,7 +11,7 @@ type Phase =
   | { kind: "error"; message: string; hint?: string; tips?: string[]; facts?: Record<string, string | number> };
 
 /** Shown in the footer so it is clear which version a browser is running (Safari keeps old tabs). */
-const APP_VERSION = "2026.11.11-4";
+const APP_VERSION = "2026.11.12-1";
 
 const STAGE_LABEL: Record<RepairStage, string> = {
   inspect: "ファイルを確認しています",
