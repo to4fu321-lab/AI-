@@ -88,8 +88,17 @@ function parseIcsInfo(br: BitReader, sr: number): IcsInfo | null {
 
 const sectCb = new Uint8Array(8 * 64);
 
+/**
+ * Stray bytes in other data (for example iPhone timed metadata) can pass as a tiny AAC frame.
+ * Those start with zeros, giving a global_gain no encoder writes into a real frame of that size
+ * (silent frames use a high gain). Checked when hunting for frames.
+ */
+const MIN_GLOBAL_GAIN = 40;
+const TINY_FRAME = 8;
+let lowestGain = 255;
+
 function parseIcs(br: BitReader, sr: number, shared: IcsInfo | null): boolean {
-  br.bits(8); // global_gain
+  lowestGain = Math.min(lowestGain, br.bits(8)); // global_gain
   const info = shared ?? parseIcsInfo(br, sr);
   if (!info) return false;
   const { short, maxSfb, groups } = info;
@@ -196,6 +205,10 @@ export interface AacFrame {
   /** Frame length in bytes. */
   length: number;
   channels: number;
+  /** Number of elements other than channel elements (fill, data, program config). */
+  extras: number;
+  /** Payload bytes carried by those elements. */
+  extraBytes: number;
 }
 
 /**
@@ -216,6 +229,9 @@ export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex
 
   const br = new BitReader(buf, off, Math.min(end, off + 8192));
   let channels = 0;
+  lowestGain = 255;
+  let extras = 0;
+  let extraBytes = 0;
   let seenPairs = 0;
   let seen = 0; // bit per (element type, instance tag) to catch duplicates
   for (let elements = 0; elements < 24; elements++) {
@@ -226,7 +242,8 @@ export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex
       br.alignByte();
       const length = (br.pos >> 3) - off;
       if (length > 768 * channels + 512) return null;
-      return { length, channels };
+      if (!anyStart && length <= TINY_FRAME && lowestGain < MIN_GLOBAL_GAIN) return null;
+      return { length, channels, extras, extraBytes };
     }
     switch (id) {
       case 0: // single_channel_element
@@ -264,6 +281,8 @@ export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex
         if (count === 255) count += br.bits(8);
         if (align) br.alignByte();
         br.skip(count * 8);
+        extras++;
+        extraBytes += count;
         break;
       }
       case 5: {
@@ -288,6 +307,8 @@ export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex
         let count = br.bits(4);
         if (count === 15) count += br.bits(8) - 1;
         br.skip(count * 8);
+        extras++;
+        extraBytes += count;
         break;
       }
       default:

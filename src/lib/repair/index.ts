@@ -7,6 +7,7 @@
 import { AAC_SAMPLE_RATES, parseAacFrame } from "./aac";
 import { analyzeHeads, estimateParameters, parseX264Options, samplesToAnnexB, type Prober } from "./estimate";
 import { buildAvcC, defaultH264Params, parsePps, parseSps, readAvcC, type H264Params } from "./h264";
+import { baseLayerOnly, guessAppleHevc } from "./appleHevc";
 import { hvcCFromParameterSets, parseHvcC, type HevcParams } from "./hevc";
 import { repairFromIndex, type TrackReport } from "./indexRepair";
 import {
@@ -156,7 +157,7 @@ async function zeroFraction(file: Blob): Promise<number> {
   return total ? zeros / total : 1;
 }
 
-const STANDARD_FPS = [12, 15, 24, 25, 30, 48, 50, 60, 100, 120, 240];
+const STANDARD_FPS = [12, 15, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120, 240];
 
 /** Display order of each picture relative to its decode position, from picture order counts. */
 function reorderFromPoc(scan: ScanResult, pocBits: number): number[] | null {
@@ -198,30 +199,44 @@ function reorderFromPoc(scan: ScanResult, pocBits: number): number[] | null {
 function framesPerAudioFrame(scan: ScanResult): number {
   const v = scan.video;
   const a = scan.audio.offsets;
-  const runs: number[] = [];
-  for (let i = 0; i < v.offsets.length; i++) {
-    if (i === 0 || v.offsets[i] !== v.offsets[i - 1] + v.sizes[i - 1]) runs.push(i);
-  }
-  // Audio frames in front of each run start (both lists are in file order).
+  // Points where a stretch of video begins right after audio. Counting frames and audio frames
+  // between two such points pairs them up exactly, whatever the interleaving.
+  const marks: number[] = [];
   const audioBefore: number[] = [];
   let k = 0;
-  for (const r of runs) {
-    while (k < a.length && a[k] < v.offsets[r]) k++;
-    audioBefore.push(k);
+  let last = -1;
+  for (let i = 0; i < v.offsets.length; i++) {
+    while (k < a.length && a[k] < v.offsets[i]) k++;
+    if (k > last) {
+      marks.push(i);
+      audioBefore.push(k);
+      last = k;
+    }
   }
-  // Ratios over windows of about 150 audio frames (a few seconds): long enough that whole-frame
-  // rounding does not matter, short enough that the median ignores windows spanning a hole.
+  // A mark with no audio after it is where the file was cut off: the sound for the frames
+  // there is missing, so it cannot close a measurement.
+  while (marks.length && audioBefore[audioBefore.length - 1] >= a.length) {
+    marks.pop();
+    audioBefore.pop();
+  }
+  if (marks.length < 2) return v.offsets.length / Math.max(1, a.length);
+
+  // Ratios over windows of about 150 audio frames (a few seconds); the median ignores windows
+  // that span a hole in the data.
   const ratios: number[] = [];
-  const WINDOW = Math.min(150, Math.floor(a.length / 3));
+  const WINDOW = Math.min(150, Math.floor((audioBefore[audioBefore.length - 1] - audioBefore[0]) / 3));
   let j = 0;
-  for (let i = 0; i < runs.length && WINDOW > 0; i++) {
+  for (let i = 0; i < marks.length && WINDOW > 0; i++) {
     if (j < i) j = i;
-    while (j < runs.length && audioBefore[j] - audioBefore[i] < WINDOW) j++;
-    if (j >= runs.length) break;
-    ratios.push((runs[j] - runs[i]) / (audioBefore[j] - audioBefore[i]));
+    while (j < marks.length && audioBefore[j] - audioBefore[i] < WINDOW) j++;
+    if (j >= marks.length) break;
+    ratios.push((marks[j] - marks[i]) / (audioBefore[j] - audioBefore[i]));
   }
-  if (ratios.length >= 3) return ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)];
-  return v.offsets.length / Math.max(1, a.length);
+  // Over the whole stretch the rounding error is smallest (needed to tell 29.97 from 30).
+  const whole = (marks[marks.length - 1] - marks[0]) / (audioBefore[audioBefore.length - 1] - audioBefore[0]);
+  if (ratios.length < 3) return whole;
+  const median = ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)];
+  return Math.abs(whole / median - 1) < 0.02 ? whole : median;
 }
 
 /** Find which AAC sampling-rate family parses the bytes between video frames. */
@@ -479,7 +494,44 @@ async function repairByScan(
       facts["埋め込み設定（VPS/SPS/PPS）"] = [asHevc.vps, asHevc.sps, asHevc.pps].map((x) => (x ? "有" : "無")).join("/");
       if (asHevc.video.offsets.length < 8) throw new RepairError("NO_VIDEO_FOUND");
       // HEVC: usable without a reference when the stream carries its own parameter sets.
-      const cfg = asHevc.vps && asHevc.sps && asHevc.pps ? hvcCFromParameterSets(asHevc.vps, asHevc.sps, asHevc.pps) : null;
+      let cfg = asHevc.vps && asHevc.sps && asHevc.pps ? hvcCFromParameterSets(asHevc.vps, asHevc.sps, asHevc.pps) : null;
+      if (!cfg && opts.prober) {
+        // iPhone recordings keep their settings only in the index. Apple's encoder settings are
+        // known, so try them on the first frames.
+        const recording = describeRecording(asHevc, {});
+        const fps = Number(/([0-9.]+)fps/.exec(recording ?? "")?.[1] ?? 30);
+        const first = asHevc.video.keys.indexOf(true);
+        if (first >= 0) {
+          progress("estimate", 0);
+          let prober: Prober | null = null;
+          try {
+            prober = await opts.prober();
+          } catch {
+            prober = null;
+          }
+          if (prober) {
+            const samples: Uint8Array[] = [];
+            for (let i = first; i < Math.min(first + 8, asHevc.video.sizes.length); i++) {
+              if (i > first && asHevc.video.keys[i]) break;
+              samples.push(await readSample(file, start, asHevc, i));
+            }
+            const guess = await guessAppleHevc(
+              samplesToAnnexB([samples[0]]),
+              samplesToAnnexB(samples),
+              samples.length,
+              fps,
+              prober,
+              (f) => progress("estimate", f),
+              opts.signal,
+            );
+            if (guess) {
+              cfg = hvcCFromParameterSets(guess.vps, guess.sps, guess.pps);
+              estimated = cfg !== null;
+              facts["推定した設定"] = `iPhone ${guess.variant.width}×${guess.variant.height} ${guess.variant.hdr ? "HDR" : "SDR"}`;
+            }
+          }
+        }
+      }
       if (!cfg) {
         const err = new RepairError("HEVC_NEEDS_REFERENCE", describeRecording(asHevc, facts));
         if (mdat && mdat.start + mdat.size > file.size + 16) facts["末尾の欠け"] = mdat.start + mdat.size - file.size;
@@ -669,6 +721,13 @@ async function repairByScan(
   const pocBits = codec === "h264" ? (h264 && h264.pocType === 0 ? h264.log2MaxPocLsb : 0) : (hevc?.log2MaxPocLsb ?? 0);
   const reorder = pocBits ? reorderFromPoc(scan, pocBits) : null;
 
+  // iPhone recordings carry the orientation they were held in as timed metadata; it outranks the
+  // reference's matrix, which may come from a video held differently.
+  const orientation = await findAppleOrientation(file, start, end);
+  if (orientation !== null) {
+    matrix = rotationMatrix(orientation, width, height);
+    facts["向き（撮影時）"] = `${orientation}°`;
+  }
   if (opts.rotation != null && opts.rotation !== -1) matrix = rotationMatrix(opts.rotation, width, height);
 
   let shift = 0;
@@ -828,7 +887,7 @@ async function checkReference(
   }
   stream.set(body, o);
   const prober = await getProber();
-  const out = await prober.decodeYuv(stream, width, height, samples.length - 1, codec);
+  const out = await prober.decodeYuv(codec === "hevc" ? baseLayerOnly(stream) : stream, width, height, samples.length - 1, codec);
   return out !== null && !out.errors;
 }
 
@@ -879,4 +938,39 @@ function describeRecording(sample: ScanResult, facts: Record<string, string | nu
     }
   }
   return label && bestDiff < 0.7 ? `${label}・${fps}fps` : `${fps}fps`;
+}
+
+/**
+ * The iPhone camera stores "com.apple.quicktime.video-orientation" as a timed-metadata sample of
+ * ten bytes: item size 10, local key id, then the EXIF orientation as a 16-bit value. The key
+ * table is in the lost index, but the sample itself is easy to recognise in the data. Returns the
+ * clockwise rotation in degrees, or null when none is found.
+ */
+async function findAppleOrientation(file: Blob, start: number, end: number): Promise<number | null> {
+  const EXIF_TO_DEGREES: Record<number, number> = { 1: 0, 3: 180, 6: 90, 8: 270 };
+  const votes = new Map<number, number>();
+  const CHUNK = 4 * 1024 * 1024;
+  // The orientation track has a sample at the start and one wherever it changed; reading the
+  // first and last stretch of the data is enough.
+  const ranges = [[start, Math.min(end, start + 2 * CHUNK)]];
+  if (end - start > 3 * CHUNK) ranges.push([end - CHUNK, end]);
+  for (const [from, to] of ranges) {
+    const buf = new Uint8Array(await file.slice(from, to).arrayBuffer());
+    for (let i = 0; i + 10 <= buf.length; i++) {
+      if (buf[i + 3] !== 10 || buf[i] | buf[i + 1] | buf[i + 2] | buf[i + 4] | buf[i + 5] | buf[i + 6] | buf[i + 8]) continue;
+      const key = buf[i + 7];
+      const value = buf[i + 9];
+      if (key < 1 || key > 32 || !(value in EXIF_TO_DEGREES)) continue;
+      votes.set(value, (votes.get(value) ?? 0) + 1);
+    }
+  }
+  let best: number | null = null;
+  let bestVotes = 0;
+  for (const [value, n] of votes) {
+    if (n > bestVotes) {
+      bestVotes = n;
+      best = value;
+    }
+  }
+  return best === null ? null : EXIF_TO_DEGREES[best];
 }
