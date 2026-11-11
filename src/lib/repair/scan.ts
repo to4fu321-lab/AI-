@@ -5,6 +5,7 @@
 
 import { parseAacFrame } from "./aac";
 import { unescapeRbsp } from "./bits";
+import { hasZeroRun } from "./zeros";
 import { parseSliceHeader, parseSliceStart, type H264Params } from "./h264";
 import { parseHevcSlice, type HevcParams } from "./hevc";
 import type { VideoCodec } from "./mp4";
@@ -15,7 +16,7 @@ const MAX_NAL = 48 * 1024 * 1024;
 const HEAD_BYTES = 96;
 
 /** Buffered random access into a Blob. */
-class Reader {
+export class Reader {
   private buf = new Uint8Array(0);
   private base = 0;
   private peekBuf = new Uint8Array(0);
@@ -84,6 +85,13 @@ export interface ScanResult {
     idr: boolean[];
     /** pic_order_cnt_lsb per sample, -1 when unknown. */
     pocLsb: number[];
+    /**
+     * True when the picture does not follow on from the one before it (frames were lost in
+     * between), so it cannot be decoded correctly until the next key frame.
+     */
+    gap: boolean[];
+    /** True when the picture's own data is damaged (it contains a block of zero bytes). */
+    bad: boolean[];
   };
   audio: { offsets: number[]; sizes: number[]; channels: number };
   heads: SliceHead[];
@@ -92,6 +100,8 @@ export interface ScanResult {
   pps: Uint8Array | null;
   /** Encoder settings text found in an x264 SEI message, if any. */
   x264Options: string | null;
+  /** Stretches of at least 4 KB between frames that are neither video nor audio: [offset, length]. */
+  junk: [number, number][];
   /** First byte after the last recognised frame. */
   endOfData: number;
 }
@@ -116,12 +126,13 @@ interface Item {
 export async function scanMedia(blob: Blob, start: number, end: number, opts: ScanOptions): Promise<ScanResult> {
   const reader = new Reader(blob, end);
   const res: ScanResult = {
-    video: { offsets: [], sizes: [], keys: [], idr: [], pocLsb: [] },
+    video: { offsets: [], sizes: [], keys: [], idr: [], pocLsb: [], gap: [], bad: [] },
     audio: { offsets: [], sizes: [], channels: 0 },
     heads: [],
     sps: null,
     pps: null,
     x264Options: null,
+    junk: [],
     endOfData: start,
   };
   const h264 = opts.codec === "h264";
@@ -256,6 +267,8 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
   let auKey = false;
   let auIdr = false;
   let auPoc = -1;
+  let auGap = false;
+  let auBad = false;
   let pictures = 0;
   const flushAu = () => {
     if (auStart >= 0 && auHasVcl) {
@@ -264,6 +277,8 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       res.video.keys.push(auKey);
       res.video.idr.push(auIdr);
       res.video.pocLsb.push(auPoc);
+      res.video.gap.push(auGap);
+      res.video.bad.push(auBad);
       pictures++;
     }
     auStart = -1;
@@ -271,8 +286,11 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
     auKey = false;
     auIdr = false;
     auPoc = -1;
+    auGap = false;
+    auBad = false;
   };
 
+  let auBadNext = false;
   let pos = start;
   let lastKind: "video" | "audio" | "" = "";
   let lastEnd = -1;
@@ -303,6 +321,10 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
     }
 
     const next = pos + item.length;
+    if (lastEnd >= 0 && pos - lastEnd >= 4096) res.junk.push([lastEnd - start, pos - lastEnd]);
+    if (item.kind === "video" && item.vcl && v.at + item.length <= v.buf.length && hasZeroRun(v.buf, v.at, v.at + item.length)) {
+      auBadNext = true;
+    }
     if (item.kind === "audio") {
       flushAu();
       res.audio.offsets.push(pos - start);
@@ -315,9 +337,16 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       if (!contiguous || (auHasVcl && (item.first || !item.vcl))) flushAu();
       if (auStart < 0) auStart = pos;
       auEnd = next;
+      if (auBadNext) auBad = true;
+      auBadNext = false;
       if (item.vcl) {
         if (item.length - 4 > maxNal / 8) maxNal = Math.min(MAX_NAL, (item.length - 4) * 8);
-        if (!auHasVcl) auPoc = item.pocLsb;
+        if (!auHasVcl) {
+          auPoc = item.pocLsb;
+          // With known stream parameters, a first slice that fails the continuity check
+          // (frame_num / picture order) means pictures are missing in front of it.
+          auGap = item.first && !item.strict && (h264 ? strictParams !== null : !!opts.hevc);
+        }
         auHasVcl = true;
         if (h264) {
           if (item.nalType === 5) {

@@ -201,15 +201,18 @@ export interface AacFrame {
 /**
  * Try to parse one raw AAC-LC frame starting at `off`.
  * Returns null unless the syntax is valid all the way to the END element.
+ * By default only frames that open with a channel element are accepted, which is what telling
+ * audio from arbitrary bytes needs.
  */
-export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex: number): AacFrame | null {
+export function parseAacFrame(buf: Uint8Array, off: number, end: number, srIndex: number, anyStart = false): AacFrame | null {
   if (!spectralBooks) {
     spectralBooks = SPECTRAL_BOOKS.map(buildBook);
     sfBook = buildBook(SCALEFACTOR_BOOK);
   }
   // Camera and phone encoders open every frame with a channel element (SCE or CPE). Accepting
   // frames that open with fill or data elements lets binary metadata pass as audio.
-  if (buf[off] >> 5 > 1) return null;
+  // (`anyStart` lifts this when the frame boundaries are already known from an index.)
+  if (!anyStart && buf[off] >> 5 > 1) return null;
 
   const br = new BitReader(buf, off, Math.min(end, off + 8192));
   let channels = 0;

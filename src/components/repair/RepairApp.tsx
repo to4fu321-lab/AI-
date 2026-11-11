@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { RepairError, repairVideo, type RepairErrorCode, type RepairResult, type RepairStage } from "@/lib/repair";
+import { RepairError, repairVideo, type DamageCause, type RepairErrorCode, type RepairResult, type RepairStage } from "@/lib/repair";
 import { createWasmProber, type WasmProber } from "@/lib/repair/wasmProber";
 
 type Phase =
@@ -39,11 +39,36 @@ const ERRORS: Record<RepairErrorCode, { message: string; hint?: string }> = {
     message: "再生に必要な設定を自動では割り出せませんでした。",
     hint: "同じカメラ・同じ設定で撮った正常な動画を「参考動画」に指定して、もう一度お試しください。",
   },
+  EMPTY_FILE: {
+    message: "ファイルが空か、小さすぎます。",
+    hint: "保存や転送が始まる前に失敗した可能性があります。元の機器やクラウドに動画が残っていないか確認してください。",
+  },
+  ZERO_FILLED: {
+    message: "ファイルの中身がすべて空（ゼロ）で、映像データが残っていません。",
+    hint: "コピーやSDカードからの復元の際に、サイズだけ確保されて中身が書き込まれなかった状態です。このファイルからは復元できないため、元の保存先から取り直してください。",
+  },
+  NOT_MP4: {
+    message: "このファイルはMP4・MOVではありません。",
+    hint: "このアプリが修復できるのはMP4・MOV形式の動画です。",
+  },
   PROBER_UNAVAILABLE: {
     message: "解析エンジンを読み込めませんでした。",
     hint: "通信環境を確認して再度お試しいただくか、参考動画を指定してください（参考動画があれば読み込みは不要です）。",
   },
 };
+
+const CAUSES: Record<DamageCause, string> = {
+  missing_index: "録画や保存が途中で終わり、再生に必要な索引が書き込まれていませんでした。",
+  damaged_index: "再生に必要な索引が壊れていて、読み取れませんでした。",
+  truncated: "ファイルが途中で切れていました（ダウンロード・コピー・転送の中断など）。",
+  corrupt_data: "映像・音声データの一部が、上書きされたり抜け落ちたりしていました。",
+  damaged_header: "ファイルの先頭部分が壊れていました。",
+  shifted_data: "データの位置がずれていて、索引が違う場所を指していました。",
+  healthy: "ファイルの構造に異常は見つかりませんでした。",
+};
+
+/** Video formats iPhone plays natively. */
+const PLAYABLE_VIDEO = ["avc1", "avc3", "hvc1", "hev1", "dvh1", "mp4v", "jpeg", "apch", "apcn", "apcs", "apco", "ap4h"];
 
 function formatBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
@@ -169,7 +194,12 @@ export function RepairApp() {
       if (e instanceof DOMException && e.name === "AbortError") {
         setPhase({ kind: "idle" });
       } else if (e instanceof RepairError) {
-        setPhase({ kind: "error", ...ERRORS[e.code] });
+        const known = ERRORS[e.code];
+        setPhase({
+          kind: "error",
+          message: e.code === "NOT_MP4" && e.detail ? `このファイルは ${e.detail} 形式で、MP4・MOVではありません。` : known.message,
+          hint: known.hint,
+        });
       } else {
         setPhase({ kind: "error", message: "修復中に問題が発生しました。", hint: "ファイルを選び直して、もう一度お試しください。" });
       }
@@ -195,7 +225,7 @@ export function RepairApp() {
       <header className="pt-2">
         <h1 className="text-2xl font-bold tracking-tight">動画修復</h1>
         <p className="mt-2 text-[15px] leading-relaxed text-black/65 dark:text-white/65">
-          撮影の中断や転送の失敗で再生できなくなったMP4・MOVを修復します。動画はこの端末の中だけで処理され、どこにも送信されません。
+          再生できなくなったMP4・MOVの壊れ方を調べて修復します。動画はこの端末の中だけで処理され、どこにも送信されません。
         </p>
       </header>
 
@@ -294,11 +324,36 @@ export function RepairApp() {
       {phase.kind === "done" && (
         <section className="flex flex-col gap-4 rounded-2xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-white/5">
           <div>
-            <p className="text-lg font-bold">修復できました</p>
+            <p className="text-lg font-bold">{phase.result.diagnosis.causes.includes("healthy") ? "確認が終わりました" : "修復できました"}</p>
             <p className="mt-1 text-[15px] text-black/65 dark:text-white/65">
               {phase.result.width}×{phase.result.height}・{formatDuration(phase.result.durationSeconds)}・
               {phase.result.audioFrames > 0 ? "音声あり" : "音声なし"}・{formatBytes(phase.result.blob.size)}
             </p>
+          </div>
+          <div className="rounded-xl bg-neutral-100 px-3 py-3 text-[15px] leading-relaxed dark:bg-white/10">
+            <p className="text-sm font-bold text-black/55 dark:text-white/55">診断結果</p>
+            <ul className="mt-1 flex list-disc flex-col gap-1 pl-5">
+              {phase.result.diagnosis.causes.map((c) => (
+                <li key={c}>
+                  {CAUSES[c]}
+                  {c === "truncated" && phase.result.diagnosis.missingFraction > 0.005 && (
+                    <>（全体の約{Math.max(1, Math.round(phase.result.diagnosis.missingFraction * 100))}%が失われています）</>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {phase.result.diagnosis.videoDropped > 0 && phase.result.diagnosis.causes.includes("corrupt_data") && (
+              <p className="mt-2 text-sm text-black/60 dark:text-white/60">
+                壊れていた箇所の映像は取り除き、その間は直前の画面を表示するようにしました。
+              </p>
+            )}
+            {phase.result.diagnosis.causes.includes("healthy") && (
+              <p className="mt-2 text-sm text-black/60 dark:text-white/60">
+                {phase.result.diagnosis.videoFormat && !PLAYABLE_VIDEO.includes(phase.result.diagnosis.videoFormat)
+                  ? `映像の形式（${phase.result.diagnosis.videoFormat.trim()}）にこの端末が対応していないため再生できない可能性があります。その場合、修復では解決できず、別の形式への変換が必要です。`
+                  : "念のため索引を作り直したファイルを用意しました。これでも再生できない場合は、映像データそのものが壊れている可能性があります。"}
+              </p>
+            )}
           </div>
           <video src={phase.url} controls playsInline preload="metadata" className="max-h-[70vh] w-full rounded-xl bg-black" />
           <div className="flex flex-col gap-2">
@@ -335,14 +390,15 @@ export function RepairApp() {
             {phase.result.estimated && (
               <li>設定を自動で割り出して修復しました。色や明るさが不自然な場合は、参考動画を指定してやり直してください。</li>
             )}
-            {phase.result.hadMoov && <li>このファイルには再生用の索引が残っていましたが、映像データから作り直しました。</li>}
             {phase.result.discardedBytes > 0 && <li>ファイルの末尾で途切れていた最後の一瞬（{formatBytes(phase.result.discardedBytes)}）は復元できませんでした。</li>}
           </ul>
         </section>
       )}
 
       <footer className="mt-auto pt-4 text-sm leading-relaxed text-black/50 dark:text-white/50">
-        <p>対応形式：H.264 / HEVC（H.265）の映像とAAC音声を含むMP4・MOV。記録の途中で終了して索引（moov）が書き込まれなかったファイルを修復します。</p>
+        <p>
+          対応形式：MP4・MOV。録画の中断で索引が書き込まれなかったファイル、途中で切れたファイル、一部が上書きされたファイル、先頭が壊れたファイルなどを診断して修復します。索引が失われている場合は、H.264 / HEVC（H.265）の映像とAAC音声が対象です。
+        </p>
       </footer>
     </main>
     </div>
