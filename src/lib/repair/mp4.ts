@@ -314,10 +314,19 @@ export function rotationMatrix(degrees: number, width: number, height: number): 
   return out;
 }
 
+/** VisualSampleEntry for HEVC built from scratch. */
+export function buildHvc1Entry(hvcC: Uint8Array, width: number, height: number): Uint8Array {
+  return visualEntry("hvc1", "hvcC", hvcC, width, height);
+}
+
 /** VisualSampleEntry for H.264 built from scratch (used when there is no reference file). */
 export function buildAvc1Entry(avcC: Uint8Array, width: number, height: number): Uint8Array {
+  return visualEntry("avc1", "avcC", avcC, width, height);
+}
+
+function visualEntry(format: string, configType: string, config: Uint8Array, width: number, height: number): Uint8Array {
   return box(
-    "avc1",
+    format,
     new Bytes()
       .zeros(6)
       .u16(1)
@@ -332,7 +341,7 @@ export function buildAvc1Entry(avcC: Uint8Array, width: number, height: number):
       .u16(0x18)
       .u16(0xffff)
       .done(),
-    box("avcC", avcC),
+    box(configType, config),
   );
 }
 

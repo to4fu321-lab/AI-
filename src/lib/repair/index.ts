@@ -7,12 +7,13 @@
 import { AAC_SAMPLE_RATES, parseAacFrame } from "./aac";
 import { analyzeHeads, estimateParameters, parseX264Options, type Prober } from "./estimate";
 import { buildAvcC, defaultH264Params, parsePps, parseSps, readAvcC, type H264Params } from "./h264";
-import { parseHvcC } from "./hevc";
+import { hvcCFromParameterSets, parseHvcC, type HevcParams } from "./hevc";
 import { repairFromIndex, type TrackReport } from "./indexRepair";
 import {
   buildAacEntry,
   buildAvc1Entry,
   buildHeader,
+  buildHvc1Entry,
   findMoov,
   listTopBoxes,
   parseReference,
@@ -46,6 +47,8 @@ export class RepairError extends Error {
   ) {
     super(code);
   }
+  /** What was found in the file, for the user to pass on when asking for help. */
+  facts: Record<string, string | number> = {};
 }
 
 /** What turned out to be wrong with the file. */
@@ -201,12 +204,16 @@ function framesPerAudioFrame(scan: ScanResult): number {
     while (k < a.length && a[k] < v.offsets[r]) k++;
     audioBefore.push(k);
   }
-  // Ratios over short windows; the median ignores windows that span a hole in the data.
+  // Ratios over windows of about 150 audio frames (a few seconds): long enough that whole-frame
+  // rounding does not matter, short enough that the median ignores windows spanning a hole.
   const ratios: number[] = [];
-  const span = Math.max(1, Math.min(12, Math.floor(runs.length / 4)));
-  for (let i = 0; i + span < runs.length; i++) {
-    const audio = audioBefore[i + span] - audioBefore[i];
-    if (audio > 0) ratios.push((runs[i + span] - runs[i]) / audio);
+  const WINDOW = Math.min(150, Math.floor(a.length / 3));
+  let j = 0;
+  for (let i = 0; i < runs.length && WINDOW > 0; i++) {
+    if (j < i) j = i;
+    while (j < runs.length && audioBefore[j] - audioBefore[i] < WINDOW) j++;
+    if (j >= runs.length) break;
+    ratios.push((runs[j] - runs[i]) / (audioBefore[j] - audioBefore[i]));
   }
   if (ratios.length >= 3) return ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)];
   return v.offsets.length / Math.max(1, a.length);
@@ -252,6 +259,16 @@ async function readSample(blob: Blob, start: number, scan: ScanResult, i: number
 }
 
 export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise<RepairResult> {
+  const facts: Record<string, string | number> = {};
+  try {
+    return await repairWithFacts(file, opts, facts);
+  } catch (e) {
+    if (e instanceof RepairError) e.facts = facts;
+    throw e;
+  }
+}
+
+async function repairWithFacts(file: Blob, opts: RepairOptions, facts: Record<string, string | number>): Promise<RepairResult> {
   const progress = opts.onProgress ?? (() => {});
   progress("inspect", 0);
 
@@ -264,6 +281,11 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
   const boxes = await listTopBoxes(file);
   const mdat = boxes.find((b) => b.type === "mdat");
   const moov = await findMoov(file, boxes).catch(() => null);
+  facts["サイズ"] = file.size;
+  facts["構造"] = boxes.slice(0, 6).map((b) => `${b.type}(${b.size})`).join(" ") || "認識できず";
+  facts["索引（moov）"] = moov ? (boxes.some((b) => b.type === "moov") ? "あり" : "あり（位置ずれ）") : "なし";
+  facts["ゼロの割合"] = `${Math.round(zeros * 100)}%`;
+  facts["先頭16バイト"] = Array.from(head.subarray(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
   const moovInPlace = boxes.some((b) => b.type === "moov");
   if (!mdat && !moov) {
     const other = sniffOtherFormat(head);
@@ -279,12 +301,13 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
       if (e instanceof DOMException) throw e;
       return null;
     });
+    facts["索引の利用"] = fixed ? "可" : "不可";
     if (fixed) return finishFromIndex(file, boxes, fixed, headerDamaged, opts, progress);
   }
 
   // --- No usable index: find the frames in the raw data ---------------------------------------
   try {
-    return await repairByScan(file, boxes, moov, opts, progress, headerDamaged);
+    return await repairByScan(file, boxes, moov, opts, progress, headerDamaged, facts);
   } catch (e) {
     if (e instanceof RepairError && e.code === "NO_VIDEO_FOUND" && zeros > 0.9) throw new RepairError("ZERO_FILLED");
     throw e;
@@ -354,6 +377,7 @@ async function repairByScan(
   opts: RepairOptions,
   progress: (stage: RepairStage, fraction: number) => void,
   headerDamaged: boolean,
+  facts: Record<string, string | number>,
 ): Promise<RepairResult> {
   // Locate the media data. Without a usable mdat header the whole file is scanned. The scan
   // always runs to the end of the file: whatever is not a frame is skipped anyway.
@@ -392,7 +416,10 @@ async function repairByScan(
   let unsupportedAudio: string | null = null;
   let estimated = false;
   let scan: ScanResult;
-  let hevc = null;
+  let hevc: HevcParams | null = null;
+  // Set when the codec settings are known up front and only the full scan remains.
+  let fullScan = false;
+  let h264Sample: ScanResult | null = null;
 
   if (ref?.video) {
     codec = ref.video.codec;
@@ -414,14 +441,31 @@ async function repairByScan(
     }
     unsupportedAudio = ref.audio ? null : ref.unsupportedAudio;
   } else {
-    // No reference: sample the start of the file and work the H.264 settings out from it.
+    // No reference: sample the start of the file and work the settings out from it.
     progress("sample", 0);
-    let sample = await scanMedia(file, start, end, { codec: "h264", aacSrIndex: 4, maxPictures: 600, collectHeads: true, signal: opts.signal });
+    const sample = await scanMedia(file, start, end, { codec: "h264", aacSrIndex: 4, maxPictures: 600, collectHeads: true, signal: opts.signal });
+    h264Sample = sample;
+    facts["H.264フレーム（先頭部）"] = sample.video.offsets.length;
+    let asHevc: ScanResult | null = null;
     if (sample.video.offsets.length < 8) {
-      const asHevc = await scanMedia(file, start, end, { codec: "hevc", aacSrIndex: 4, maxPictures: 60, signal: opts.signal });
-      if (asHevc.video.offsets.length >= 8) throw new RepairError("HEVC_NEEDS_REFERENCE");
-      throw new RepairError("NO_VIDEO_FOUND");
+      asHevc = await scanMedia(file, start, end, { codec: "hevc", aacSrIndex: 4, maxPictures: 60, signal: opts.signal });
+      facts["HEVCフレーム（先頭部）"] = asHevc.video.offsets.length;
+      facts["埋め込み設定（VPS/SPS/PPS）"] = [asHevc.vps, asHevc.sps, asHevc.pps].map((x) => (x ? "有" : "無")).join("/");
+      if (asHevc.video.offsets.length < 8) throw new RepairError("NO_VIDEO_FOUND");
+      // HEVC: usable without a reference when the stream carries its own parameter sets.
+      const cfg = asHevc.vps && asHevc.sps && asHevc.pps ? hvcCFromParameterSets(asHevc.vps, asHevc.sps, asHevc.pps) : null;
+      if (!cfg) throw new RepairError("HEVC_NEEDS_REFERENCE");
+      codec = "hevc";
+      hevc = cfg.params;
+      width = cfg.sps.width;
+      height = cfg.sps.height;
+      entry = buildHvc1Entry(cfg.hvcC, width, height);
+      aacSrIndex = asHevc.audio.offsets.length >= 4 ? 4 : await detectAacFamily(file, start, asHevc);
+      fullScan = true;
     }
+  }
+  if (!ref?.video && !fullScan && h264Sample) {
+    let sample = h264Sample;
     aacSrIndex = sample.audio.offsets.length >= 4 ? 4 : await detectAacFamily(file, start, sample);
     if (aacSrIndex !== 4 && aacSrIndex >= 0) {
       // Audio in the gaps helps to confirm frames, so sample again with the right tables.
@@ -491,7 +535,7 @@ async function repairByScan(
     entry = buildAvc1Entry(buildAvcC(sps, pps), width, height);
   }
 
-  if (ref) {
+  if (ref || fullScan) {
     progress("scan", 0);
     scan = await scanMedia(file, start, end, {
       codec,
@@ -509,6 +553,8 @@ async function repairByScan(
   // to the next key frame, and their time is given to the frame shown before them.
   const firstKey = scan.video.keys.indexOf(true);
   if (firstKey < 0 || scan.video.offsets.length - firstKey < 1) throw new RepairError("NO_VIDEO_FOUND");
+  // Measured before damaged frames are taken out, which would otherwise skew it.
+  const videoPerAudio = framesPerAudioFrame(scan);
   const found = scan.video.offsets.length - firstKey;
   const gaps = scan.video.gap.filter((g, i) => g && i > firstKey).length;
   // Many "holes" mean the continuity check does not fit this stream; then nothing is dropped.
@@ -550,7 +596,7 @@ async function repairByScan(
     let bestIdx = candidates[0];
     let bestErr = Infinity;
     for (const idx of candidates) {
-      const fps = (framesPerAudioFrame(scan) * AAC_SAMPLE_RATES[idx]) / 1024;
+      const fps = (videoPerAudio * AAC_SAMPLE_RATES[idx]) / 1024;
       const err = Math.min(...STANDARD_FPS.map((s) => Math.abs(Math.log(fps / s))));
       if (err < bestErr) {
         bestErr = err;
@@ -571,7 +617,7 @@ async function repairByScan(
   // rate, snapped to the reference's value or to the nearest standard rate.
   let fps = refFps || 30;
   if (audioFrames > 20 && audioBase) {
-    const measured = (framesPerAudioFrame(scan) * audioBase.timescale) / audioBase.sampleDelta;
+    const measured = (videoPerAudio * audioBase.timescale) / audioBase.sampleDelta;
     if (!(refFps && Math.abs(Math.log(measured / refFps)) < 0.12)) {
       fps = STANDARD_FPS.reduce((a, b) => (Math.abs(Math.log(measured / b)) < Math.abs(Math.log(measured / a)) ? b : a));
     }

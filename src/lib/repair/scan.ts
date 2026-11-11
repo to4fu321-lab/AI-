@@ -98,6 +98,8 @@ export interface ScanResult {
   /** In-band parameter sets, when the stream carries them. */
   sps: Uint8Array | null;
   pps: Uint8Array | null;
+  /** HEVC only: in-band video parameter set. */
+  vps: Uint8Array | null;
   /** Encoder settings text found in an x264 SEI message, if any. */
   x264Options: string | null;
   /** Stretches of at least 4 KB between frames that are neither video nor audio: [offset, length]. */
@@ -131,6 +133,7 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
     heads: [],
     sps: null,
     pps: null,
+    vps: null,
     x264Options: null,
     junk: [],
     endOfData: start,
@@ -229,7 +232,11 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       }
       return item;
     }
-    if (type >= 32 && type <= 40) return len <= 65536 ? item : null;
+    if (type >= 32 && type <= 40) {
+      if (len > 65536) return null;
+      if (type <= 34 && len <= 1024) item.head = buf.slice(at + 4, headEnd);
+      return item;
+    }
     return null;
   };
 
@@ -364,6 +371,10 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
           if (item.nalType === 19 || item.nalType === 20) auIdr = true;
           if (item.first && item.pocLsb >= 0) prevPoc = item.pocLsb;
         }
+      } else if (!h264 && item.head) {
+        if (item.nalType === 32) res.vps ??= item.head;
+        else if (item.nalType === 33) res.sps ??= item.head;
+        else if (item.nalType === 34) res.pps ??= item.head;
       } else if (h264 && item.head) {
         if (item.nalType === 7) res.sps ??= item.head;
         else if (item.nalType === 8) res.pps ??= item.head;
