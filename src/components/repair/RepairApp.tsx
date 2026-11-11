@@ -8,7 +8,10 @@ type Phase =
   | { kind: "idle" }
   | { kind: "running"; stage: RepairStage; fraction: number }
   | { kind: "done"; result: RepairResult; url: string; name: string }
-  | { kind: "error"; message: string; hint?: string };
+  | { kind: "error"; message: string; hint?: string; facts?: Record<string, string | number> };
+
+/** Shown in the footer so it is clear which version a browser is running (Safari keeps old tabs). */
+const APP_VERSION = "2026.11.11-3";
 
 const STAGE_LABEL: Record<RepairStage, string> = {
   inspect: "ファイルを確認しています",
@@ -32,8 +35,8 @@ const ERRORS: Record<RepairErrorCode, { message: string; hint?: string }> = {
     hint: "同じカメラ・同じ設定で撮った正常な動画を「参考動画」に指定すると、修復できる場合があります。",
   },
   HEVC_NEEDS_REFERENCE: {
-    message: "この動画はHEVC（高効率）形式のため、参考動画が必要です。",
-    hint: "同じカメラ・同じ設定で撮った正常な動画を「参考動画」に指定して、もう一度お試しください。",
+    message: "この動画はHEVC（高効率）形式で、再生に必要な設定がファイル内に残っていないため、参考動画が必要です。",
+    hint: "同じ機器・同じ設定（解像度・フレームレート）で数秒だけ撮影した動画を「参考動画」に指定して、もう一度お試しください。新しく撮ったものでかまいません。",
   },
   ESTIMATE_FAILED: {
     message: "再生に必要な設定を自動では割り出せませんでした。",
@@ -199,6 +202,7 @@ export function RepairApp() {
           kind: "error",
           message: e.code === "NOT_MP4" && e.detail ? `このファイルは ${e.detail} 形式で、MP4・MOVではありません。` : known.message,
           hint: known.hint,
+          facts: { ...e.facts, エラー: e.code, バージョン: APP_VERSION },
         });
       } else {
         setPhase({ kind: "error", message: "修復中に問題が発生しました。", hint: "ファイルを選び直して、もう一度お試しください。" });
@@ -318,6 +322,19 @@ export function RepairApp() {
         <section className="rounded-2xl border border-red-600/30 bg-red-50 p-4 dark:border-red-400/30 dark:bg-red-950/40" role="alert">
           <p className="font-bold text-red-800 dark:text-red-200">{phase.message}</p>
           {phase.hint && <p className="mt-1 text-[15px] leading-relaxed text-red-900/80 dark:text-red-100/80">{phase.hint}</p>}
+          {phase.facts && (
+            <details className="mt-3 text-sm text-red-950/70 dark:text-red-100/70">
+              <summary className="cursor-pointer">詳しい調査結果</summary>
+              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all">
+                {Object.entries(phase.facts).map(([k, v]) => (
+                  <div key={k} className="contents">
+                    <dt className="font-medium">{k}</dt>
+                    <dd>{typeof v === "number" ? v.toLocaleString() : v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </details>
+          )}
         </section>
       )}
 
@@ -399,6 +416,7 @@ export function RepairApp() {
         <p>
           対応形式：MP4・MOV。録画の中断で索引が書き込まれなかったファイル、途中で切れたファイル、一部が上書きされたファイル、先頭が壊れたファイルなどを診断して修復します。索引が失われている場合は、H.264 / HEVC（H.265）の映像とAAC音声が対象です。
         </p>
+        <p className="mt-2">バージョン {APP_VERSION}</p>
       </footer>
     </main>
     </div>
