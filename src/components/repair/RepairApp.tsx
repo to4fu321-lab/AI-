@@ -11,7 +11,7 @@ type Phase =
   | { kind: "error"; message: string; hint?: string; tips?: string[]; facts?: Record<string, string | number> };
 
 /** Shown in the footer so it is clear which version a browser is running (Safari keeps old tabs). */
-const APP_VERSION = "2026.11.12-1";
+const APP_VERSION = "2026.11.12-3";
 
 const STAGE_LABEL: Record<RepairStage, string> = {
   inspect: "ファイルを確認しています",
@@ -281,7 +281,7 @@ export function RepairApp() {
           onClear={() => setReference(null)}
         />
         <p className="text-sm leading-relaxed text-black/55 dark:text-white/55">
-          壊れた動画と同じカメラ・同じ設定で撮った正常な動画があれば指定してください。なくても、一般的な形式（H.264）なら自動で修復を試みます。
+          壊れた動画と同じカメラ・同じ設定で撮った正常な動画があれば指定してください。なくても、一般的な形式（H.264）やiPhoneで撮った動画なら自動で修復を試みます。
         </p>
       </section>
 

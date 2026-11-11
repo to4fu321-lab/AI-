@@ -117,6 +117,11 @@ interface Item {
   vcl: boolean;
   /** Starts a new picture (first slice / first slice segment). */
   first: boolean;
+  /**
+   * Non-VCL units that belong to the picture before them (suffix SEI, end of sequence, filler,
+   * Dolby Vision metadata, second-layer data) rather than opening the next one.
+   */
+  trailing: boolean;
   /** Passed the checks that need known stream parameters. */
   strict: boolean;
   frameNum: number;
@@ -163,6 +168,7 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       refIdc: 0,
       vcl: false,
       first: false,
+      trailing: false,
       strict: false,
       frameNum: -1,
       pocLsb: -1,
@@ -200,8 +206,15 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
         item.vcl = true;
         return item;
       }
+      if (type === 10 || type === 11) {
+        // end of sequence / end of stream
+        if (len !== 1) return null;
+        item.trailing = true;
+        return item;
+      }
       if (type === 6 || type === 9 || type === 12) {
         if (refIdc !== 0 || len > 65536) return null;
+        item.trailing = type === 12;
         if (type === 6 && opts.collectHeads && len > 64) item.head = buf.slice(at + 4, Math.min(headEnd, at + 4 + 4096));
         return item;
       }
@@ -216,8 +229,16 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
     // HEVC
     const type = (b0 >> 1) & 63;
     const b1 = buf[at + 5];
-    if ((b0 & 1) !== 0 || b1 >> 3 !== 0 || (b1 & 7) === 0) return null; // nuh_layer_id 0, temporal id valid
+    if ((b1 & 7) === 0) return null; // nuh_temporal_id_plus1
+    const layer = ((b0 & 1) << 5) | (b1 >> 3);
     item.nalType = type;
+    if (layer !== 0) {
+      // Second-layer data (MV-HEVC spatial video, scalable streams) rides along with the base
+      // picture; only the base layer is decoded.
+      if (layer > 8 || len > MAX_NAL) return null;
+      item.trailing = true;
+      return item;
+    }
     if (type <= 9 || (type >= 16 && type <= 21)) {
       if (len < 4) return null;
       const s = parseHevcSlice(unescapeRbsp(buf, at + 6, headEnd, 32), type, opts.hevc ?? null);
@@ -235,6 +256,14 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
     if (type >= 32 && type <= 40) {
       if (len > 65536) return null;
       if (type <= 34 && len <= 1024) item.head = buf.slice(at + 4, headEnd);
+      // EOS, EOB, filler and suffix SEI close the picture they follow.
+      item.trailing = type >= 36 && type !== 39;
+      return item;
+    }
+    if (type >= 48) {
+      // Unspecified types: Apple appends Dolby Vision metadata (type 62) after each picture.
+      if (len > 65536) return null;
+      item.trailing = true;
       return item;
     }
     return null;
@@ -256,6 +285,7 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
           refIdc: 0,
           vcl: false,
           first: false,
+          trailing: false,
           strict: false,
           frameNum: -1,
           pocLsb: -1,
@@ -307,9 +337,49 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
   while (pos < end - 4) {
     if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const v = reader.view(pos) ?? (await reader.load(pos));
-    const item = probe(v.buf, v.at, pos);
+    let item = probe(v.buf, v.at, pos);
     let accept = false;
-    if (item) {
+    if (!item && opts.aacSrIndex >= 0) {
+      // Some encoders open a frame with a fill or data element (FFmpeg writes its name into
+      // every 256th frame). Such frames are only taken inside a run of audio, or right in front
+      // of a regular audio frame, where they cannot be stray bytes.
+      const f = parseAacFrame(v.buf, v.at, v.buf.length, opts.aacSrIndex, true);
+      // The real thing is one short tag in front of the channel data. A long or repeated
+      // element is more likely foreign bytes swallowed in front of a real frame.
+      let real = f !== null && f.length >= 8 && f.extras === 1 && f.extraBytes <= 32 && pos + f.length <= end;
+      // If a regular frame starts inside it and ends at the same byte, the front part is foreign
+      // data and that inner frame is the real one (the scan will reach it on its own).
+      for (let q = v.at + 1; real && f && q + 8 <= v.at + f.length; q++) {
+        if (v.buf[q] >> 5 > 1) continue;
+        const inner = parseAacFrame(v.buf, q, v.buf.length, opts.aacSrIndex);
+        if (inner && q + inner.length === v.at + f.length) real = false;
+      }
+      if (f && real) {
+        let ok = lastKind === "audio" && lastEnd === pos;
+        if (!ok && pos + f.length < end - 4) {
+          const nv = await reader.peek(pos + f.length);
+          ok = probe(nv.buf, nv.at, pos + f.length)?.kind === "audio";
+        }
+        if (ok) {
+          item = {
+            kind: "audio",
+            length: f.length,
+            nalType: 0,
+            refIdc: 0,
+            vcl: false,
+            first: false,
+            trailing: false,
+            strict: false,
+            frameNum: -1,
+            pocLsb: -1,
+            channels: f.channels,
+            head: null,
+          };
+          accept = true;
+        }
+      }
+    }
+    if (item && !accept) {
       const next = pos + item.length;
       if (next >= end - 4) {
         accept = true;
@@ -320,6 +390,11 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       } else {
         const nv = await reader.peek(next);
         accept = probe(nv.buf, nv.at, next) !== null;
+        if (!accept && item.kind === "audio" && opts.aacSrIndex >= 0) {
+          // The next frame may be one that opens with a fill element.
+          const f = parseAacFrame(nv.buf, nv.at, nv.buf.length, opts.aacSrIndex, true);
+          accept = f !== null && f.length >= 8 && f.extras === 1 && f.extraBytes <= 32;
+        }
       }
     }
     if (!item || !accept) {
@@ -341,7 +416,7 @@ export async function scanMedia(blob: Blob, start: number, end: number, opts: Sc
       const contiguous = auStart >= 0 && auEnd === pos;
       // A new access unit starts at a picture's first slice, or at any non-VCL NAL that
       // follows slice data.
-      if (!contiguous || (auHasVcl && (item.first || !item.vcl))) flushAu();
+      if (!contiguous || (auHasVcl && (item.first || (!item.vcl && !item.trailing)))) flushAu();
       if (auStart < 0) auStart = pos;
       auEnd = next;
       if (auBadNext) auBad = true;
