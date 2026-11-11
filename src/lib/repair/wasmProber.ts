@@ -66,7 +66,7 @@ export async function createWasmProber(): Promise<WasmProber> {
   let runs = 0;
 
   return {
-    async decodeYuv(annexB, width, height, frame) {
+    async decodeYuv(annexB, width, height, frame, codec = "h264") {
       if (!instance || runs >= RUNS_PER_INSTANCE) {
         instance?.terminate();
         instance = null;
@@ -76,7 +76,7 @@ export async function createWasmProber(): Promise<WasmProber> {
       runs++;
       try {
         // The stream buffer is rebuilt for every trial, so it can be handed over.
-        const reply = await instance.call({ type: "decode", stream: annexB, width, height, frame }, [annexB.buffer]);
+        const reply = await instance.call({ type: "decode", stream: annexB, width, height, frame, codec }, [annexB.buffer]);
         return reply.frame ? { data: reply.frame, errors: reply.errors === true } : null;
       } catch {
         // A decoder that died on one candidate must not end the search: count it as a miss.

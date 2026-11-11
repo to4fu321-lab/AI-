@@ -17,7 +17,13 @@ export interface Prober {
    * planar YUV 4:2:0 (null when the decoder produced fewer frames). Undecoded areas must come
    * back as zeros.
    */
-  decodeYuv(annexB: Uint8Array, width: number, height: number, frame: number): Promise<{ data: Uint8Array; errors: boolean } | null>;
+  decodeYuv(
+    annexB: Uint8Array,
+    width: number,
+    height: number,
+    frame: number,
+    codec?: "h264" | "hevc",
+  ): Promise<{ data: Uint8Array; errors: boolean } | null>;
 }
 
 /** Encoder settings x264 embeds as text in the first frame. */

@@ -33,12 +33,13 @@ self.onmessage = async ({ data }) => {
 
     logs = [];
     remove("out.raw");
-    core.FS.writeFile("in.h264", data.stream);
+    const input = data.codec === "hevc" ? "in.hevc" : "in.h264";
+    core.FS.writeFile(input, data.stream);
     core.setTimeout(-1);
     // -ec 0: no error concealment, so anything that failed to decode stays visibly empty.
     // Only the requested frame is written out, so memory use does not grow with the frame count.
     core.exec(
-      "-v", "error", "-threads", "1", "-ec", "0", "-i", "in.h264",
+      "-v", "error", "-threads", "1", "-ec", "0", "-i", input,
       "-vf", "select=gte(n\\," + data.frame + ")", "-frames:v", "1",
       "-pix_fmt", "yuv420p", "-f", "rawvideo", "-y", "out.raw",
     );
@@ -53,9 +54,9 @@ self.onmessage = async ({ data }) => {
       // the decoder produced nothing
     }
     remove("out.raw");
-    remove("in.h264");
+    remove(input);
 
-    const errors = logs.some((l) => /\[h264 @|rror|nvalid/.test(l) && !l.includes("co located POCs unavailable"));
+    const errors = logs.some((l) => /\[(h264|hevc) @|rror|nvalid/.test(l) && !l.includes("co located POCs unavailable"));
     if (frame) self.postMessage({ id, ok: true, frame, errors }, [frame.buffer]);
     else self.postMessage({ id, ok: true, frame: null, errors: true });
   } catch (e) {

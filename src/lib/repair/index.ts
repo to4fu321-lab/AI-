@@ -5,7 +5,7 @@
 // of a small new header plus a slice of the original file, so multi-gigabyte files work on a phone.
 
 import { AAC_SAMPLE_RATES, parseAacFrame } from "./aac";
-import { analyzeHeads, estimateParameters, parseX264Options, type Prober } from "./estimate";
+import { analyzeHeads, estimateParameters, parseX264Options, samplesToAnnexB, type Prober } from "./estimate";
 import { buildAvcC, defaultH264Params, parsePps, parseSps, readAvcC, type H264Params } from "./h264";
 import { hvcCFromParameterSets, parseHvcC, type HevcParams } from "./hevc";
 import { repairFromIndex, type TrackReport } from "./indexRepair";
@@ -111,6 +111,11 @@ export interface RepairResult {
   discardedBytes: number;
   /** True when the decoder settings were estimated rather than taken from a reference. */
   estimated: boolean;
+  /**
+   * Reference video only: whether test-decoding the first frames with its settings went cleanly.
+   * false means the reference was most likely recorded with different settings.
+   */
+  referenceMatches: boolean | null;
   hadMoov: boolean;
   /** Fourcc of an audio format that could not be recovered. */
   unsupportedAudio: string | null;
@@ -355,6 +360,7 @@ async function finishFromIndex(
     durationSeconds: fixed.durationSeconds,
     discardedBytes: 0,
     estimated: false,
+    referenceMatches: null,
     hadMoov: true,
     unsupportedAudio: null,
     diagnosis: {
@@ -454,7 +460,11 @@ async function repairByScan(
       if (asHevc.video.offsets.length < 8) throw new RepairError("NO_VIDEO_FOUND");
       // HEVC: usable without a reference when the stream carries its own parameter sets.
       const cfg = asHevc.vps && asHevc.sps && asHevc.pps ? hvcCFromParameterSets(asHevc.vps, asHevc.sps, asHevc.pps) : null;
-      if (!cfg) throw new RepairError("HEVC_NEEDS_REFERENCE");
+      if (!cfg) {
+        const err = new RepairError("HEVC_NEEDS_REFERENCE", describeRecording(asHevc, facts));
+        if (mdat && mdat.start + mdat.size > file.size + 16) facts["末尾の欠け"] = mdat.start + mdat.size - file.size;
+        throw err;
+      }
       codec = "hevc";
       hevc = cfg.params;
       width = cfg.sps.width;
@@ -547,6 +557,15 @@ async function repairByScan(
     });
   }
   scan = scan!;
+
+  // A reference recorded with other settings gives a file that does not play or shows garbage.
+  // Test-decode the first frames with its settings to catch that.
+  let referenceMatches: boolean | null = null;
+  if (ref?.video && opts.prober && entry) {
+    progress("estimate", 0);
+    referenceMatches = await checkReference(file, start, scan, codec, ref.video.config, width, height, opts.prober).catch(() => null);
+    progress("estimate", 1);
+  }
 
   // Decoding can only start at a key frame: drop anything before the first one. The same goes
   // for frames behind a hole in the data (overwritten or missing frames): they are left out up
@@ -724,6 +743,7 @@ async function repairByScan(
     durationSeconds: videoDurations.reduce((n, x) => n + x, firstKey * sampleDelta) / timescale,
     discardedBytes: end - scan.endOfData,
     estimated,
+    referenceMatches,
     hadMoov,
     unsupportedAudio: hasAudio ? null : unsupportedAudio,
     diagnosis: {
@@ -737,4 +757,106 @@ async function repairByScan(
       audioFormat: hasAudio ? "mp4a" : null,
     },
   };
+}
+
+/** Parameter-set NAL units stored in an avcC / hvcC payload. */
+function configNals(codec: VideoCodec, config: Uint8Array): Uint8Array[] {
+  const nals: Uint8Array[] = [];
+  if (codec === "h264") {
+    const c = readAvcC(config);
+    if (c) nals.push(c.sps, c.pps);
+    return nals;
+  }
+  let o = 22;
+  const arrays = config[o++];
+  for (let a = 0; a < arrays && o + 3 <= config.length; a++) {
+    const count = (config[o + 1] << 8) | config[o + 2];
+    o += 3;
+    for (let i = 0; i < count && o + 2 <= config.length; i++) {
+      const len = (config[o] << 8) | config[o + 1];
+      nals.push(config.subarray(o + 2, o + 2 + len));
+      o += 2 + len;
+    }
+  }
+  return nals;
+}
+
+async function checkReference(
+  file: Blob,
+  start: number,
+  scan: ScanResult,
+  codec: VideoCodec,
+  config: Uint8Array,
+  width: number,
+  height: number,
+  getProber: () => Promise<Prober>,
+): Promise<boolean | null> {
+  const first = scan.video.keys.indexOf(true);
+  if (first < 0) return null;
+  const samples: Uint8Array[] = [];
+  for (let i = first; i < Math.min(first + 6, scan.video.sizes.length); i++) samples.push(await readSample(file, start, scan, i));
+  const params = configNals(codec, config);
+  if (!params.length) return null;
+  const body = samplesToAnnexB(samples);
+  const head = params.reduce((n, x) => n + x.length + 4, 0);
+  const stream = new Uint8Array(head + body.length);
+  let o = 0;
+  for (const nal of params) {
+    stream[o + 3] = 1;
+    stream.set(nal, o + 4);
+    o += nal.length + 4;
+  }
+  stream.set(body, o);
+  const prober = await getProber();
+  const out = await prober.decodeYuv(stream, width, height, samples.length - 1, codec);
+  return out !== null && !out.errors;
+}
+
+const IPHONE_HEVC_MB_PER_MIN: [string, number, number][] = [
+  // Apple's published sizes for one minute of HEVC video: [label, fps, MB]
+  ["720p", 30, 40],
+  ["1080p", 30, 60],
+  ["1080p", 60, 90],
+  ["4K", 24, 135],
+  ["4K", 30, 170],
+  ["4K", 60, 400],
+];
+
+/**
+ * Work out from the frames found how the video was probably recorded, so the user knows which
+ * settings to record a reference video with. Returns a short description, or null.
+ */
+function describeRecording(sample: ScanResult, facts: Record<string, string | number>): string | null {
+  const frames = sample.video.offsets.length;
+  const audio = sample.audio.offsets.length;
+  if (frames < 30 || audio < 30) return null;
+  const perAudio = framesPerAudioFrame(sample);
+  let fps = 0;
+  let bestErr = Infinity;
+  for (const rate of [44100, 48000]) {
+    const measured = (perAudio * rate) / 1024;
+    for (const std of STANDARD_FPS) {
+      const err = Math.abs(Math.log(measured / std));
+      if (err < bestErr) {
+        bestErr = err;
+        fps = std;
+      }
+    }
+  }
+  if (bestErr > 0.08) return null;
+  const bytes = sample.video.sizes.reduce((n, x) => n + x, 0) + sample.audio.sizes.reduce((n, x) => n + x, 0);
+  const mbPerMin = (bytes / (frames / fps) / 1e6) * 60;
+  facts["推定フレームレート"] = `${fps}fps`;
+  facts["推定データ量"] = `${Math.round(mbPerMin)}MB/分`;
+  let label = "";
+  let bestDiff = Infinity;
+  for (const [name, f, mb] of IPHONE_HEVC_MB_PER_MIN) {
+    if (Math.abs(f - fps) > 1) continue;
+    const diff = Math.abs(Math.log(mbPerMin / mb));
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      label = name;
+    }
+  }
+  return label && bestDiff < 0.7 ? `${label}・${fps}fps` : `${fps}fps`;
 }

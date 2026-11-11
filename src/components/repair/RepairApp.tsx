@@ -8,10 +8,10 @@ type Phase =
   | { kind: "idle" }
   | { kind: "running"; stage: RepairStage; fraction: number }
   | { kind: "done"; result: RepairResult; url: string; name: string }
-  | { kind: "error"; message: string; hint?: string; facts?: Record<string, string | number> };
+  | { kind: "error"; message: string; hint?: string; tips?: string[]; facts?: Record<string, string | number> };
 
 /** Shown in the footer so it is clear which version a browser is running (Safari keeps old tabs). */
-const APP_VERSION = "2026.11.11-3";
+const APP_VERSION = "2026.11.11-4";
 
 const STAGE_LABEL: Record<RepairStage, string> = {
   inspect: "ファイルを確認しています",
@@ -72,6 +72,30 @@ const CAUSES: Record<DamageCause, string> = {
 
 /** Video formats iPhone plays natively. */
 const PLAYABLE_VIDEO = ["avc1", "avc3", "hvc1", "hev1", "dvh1", "mp4v", "jpeg", "apch", "apcn", "apcs", "apco", "ap4h"];
+
+/** Extra advice that depends on what was found in the file. */
+function errorTips(e: RepairError): string[] {
+  const tips: string[] = [];
+  if (e.code === "HEVC_NEEDS_REFERENCE") {
+    const iphone = String(e.facts["先頭16バイト"] ?? "").startsWith("0000001466747970717420");
+    tips.push(
+      e.detail
+        ? `参考動画は「${e.detail}」で撮影してください（壊れた動画のデータから推定した設定です）。`
+        : "参考動画は、壊れた動画と同じ解像度・フレームレートで撮影してください。",
+    );
+    if (iphone) {
+      tips.push(
+        "iPhoneで撮影された動画のようです。「設定」→「カメラ」→「フォーマット」が「高効率」のまま、「ビデオ撮影」の解像度とフレームレートを合わせ、「HDRビデオ」のオン・オフも撮影時と同じにして、数秒撮影してください。",
+      );
+    }
+  }
+  if (typeof e.facts["末尾の欠け"] === "number") {
+    tips.push(
+      "録画自体は最後まで終わっていますが、コピーや転送の途中でファイルの末尾が切れています。元の端末・iCloud・送信元に完全なファイルが残っていれば、そちらを使うのが確実です。",
+    );
+  }
+  return tips;
+}
 
 function formatBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
@@ -202,6 +226,7 @@ export function RepairApp() {
           kind: "error",
           message: e.code === "NOT_MP4" && e.detail ? `このファイルは ${e.detail} 形式で、MP4・MOVではありません。` : known.message,
           hint: known.hint,
+          tips: errorTips(e),
           facts: { ...e.facts, エラー: e.code, バージョン: APP_VERSION },
         });
       } else {
@@ -322,6 +347,13 @@ export function RepairApp() {
         <section className="rounded-2xl border border-red-600/30 bg-red-50 p-4 dark:border-red-400/30 dark:bg-red-950/40" role="alert">
           <p className="font-bold text-red-800 dark:text-red-200">{phase.message}</p>
           {phase.hint && <p className="mt-1 text-[15px] leading-relaxed text-red-900/80 dark:text-red-100/80">{phase.hint}</p>}
+          {phase.tips && phase.tips.length > 0 && (
+            <ul className="mt-3 flex list-disc flex-col gap-2 pl-5 text-[15px] leading-relaxed text-red-950/85 dark:text-red-50/85">
+              {phase.tips.map((t) => (
+                <li key={t}>{t}</li>
+              ))}
+            </ul>
+          )}
           {phase.facts && (
             <details className="mt-3 text-sm text-red-950/70 dark:text-red-100/70">
               <summary className="cursor-pointer">詳しい調査結果</summary>
@@ -402,6 +434,11 @@ export function RepairApp() {
                 {phase.result.unsupportedAudio
                   ? "この動画の音声形式には対応していないため、映像のみ修復しました。"
                   : "音声は見つからなかったため、映像のみ修復しました。"}
+              </li>
+            )}
+            {phase.result.referenceMatches === false && (
+              <li className="font-medium text-red-700 dark:text-red-300">
+                参考動画の設定（解像度・フレームレート・HDRなど）が、壊れた動画と合っていない可能性があります。映像が乱れる・再生できない場合は、撮影時と同じ設定で撮った参考動画でやり直してください。
               </li>
             )}
             {phase.result.estimated && (
