@@ -15,9 +15,9 @@ if (!input || !output) {
 const dir = mkdtempSync(join(tmpdir(), "repair-"));
 let probes = 0;
 const prober: Prober = {
-  async decodeYuv(annexB, width, height, frame) {
+  async decodeYuv(annexB, width, height, frame, codec = "h264") {
     probes++;
-    const src = join(dir, "in.h264");
+    const src = join(dir, codec === "hevc" ? "in.hevc" : "in.h264");
     const dst = join(dir, "out.raw");
     writeFileSync(src, annexB);
     rmSync(dst, { force: true });
