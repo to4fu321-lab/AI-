@@ -8,7 +8,21 @@ import { AAC_SAMPLE_RATES, parseAacFrame } from "./aac";
 import { analyzeHeads, estimateParameters, parseX264Options, type Prober } from "./estimate";
 import { buildAvcC, defaultH264Params, parsePps, parseSps, readAvcC, type H264Params } from "./h264";
 import { parseHvcC } from "./hevc";
-import { buildAvc1Entry, buildHeader, listTopBoxes, parseReference, rotationMatrix, type MuxAudio, type MuxVideo, type VideoCodec } from "./mp4";
+import { repairFromIndex, type TrackReport } from "./indexRepair";
+import {
+  buildAacEntry,
+  buildAvc1Entry,
+  buildHeader,
+  findMoov,
+  listTopBoxes,
+  parseReference,
+  referenceFromMoov,
+  rotationMatrix,
+  type OutTrack,
+  type Reference,
+  type TopBox,
+  type VideoCodec,
+} from "./mp4";
 import { scanMedia, type ScanResult } from "./scan";
 
 export type { Prober } from "./estimate";
@@ -19,12 +33,52 @@ export type RepairErrorCode =
   | "NO_VIDEO_FOUND"
   | "HEVC_NEEDS_REFERENCE"
   | "ESTIMATE_FAILED"
-  | "PROBER_UNAVAILABLE";
+  | "PROBER_UNAVAILABLE"
+  | "EMPTY_FILE"
+  | "ZERO_FILLED"
+  | "NOT_MP4";
 
 export class RepairError extends Error {
-  constructor(readonly code: RepairErrorCode) {
+  constructor(
+    readonly code: RepairErrorCode,
+    /** Extra information for the message, e.g. the container format that was recognised. */
+    readonly detail: string | null = null,
+  ) {
     super(code);
   }
+}
+
+/** What turned out to be wrong with the file. */
+export type DamageCause =
+  /** The index (moov) was never written: recording or saving was interrupted. */
+  | "missing_index"
+  /** The index is there but unreadable. */
+  | "damaged_index"
+  /** The file ends early: an incomplete download, copy or transfer. */
+  | "truncated"
+  /** Parts of the media data were overwritten (zeros, garbage) or frames are missing inside. */
+  | "corrupt_data"
+  /** The start of the file (ftyp / headers) is damaged. */
+  | "damaged_header"
+  /** Bytes were lost or added in front of the media data, so the index pointed to the wrong places. */
+  | "shifted_data"
+  /** Nothing structurally wrong was found. */
+  | "healthy";
+
+export interface Diagnosis {
+  causes: DamageCause[];
+  /** How the file was rebuilt: from its own index, or by scanning the raw data for frames. */
+  method: "index" | "scan";
+  /** Frames listed in the index (index method only). */
+  videoTotal: number;
+  /** Frames that had to be left out: lost, overwritten, or depending on a lost frame. */
+  videoDropped: number;
+  audioDropped: number;
+  /** Share of the indexed video that lies beyond the end of the file (0..1). */
+  missingFraction: number;
+  /** Fourcc of the video / audio formats found in the index. */
+  videoFormat: string | null;
+  audioFormat: string | null;
 }
 
 export type RepairStage = "inspect" | "sample" | "estimate" | "scan" | "write";
@@ -42,7 +96,8 @@ export interface RepairOptions {
 
 export interface RepairResult {
   blob: Blob;
-  codec: VideoCodec;
+  /** Fourcc of the video format (avc1, hvc1 ...). */
+  codec: string;
   width: number;
   height: number;
   fps: number;
@@ -56,6 +111,41 @@ export interface RepairResult {
   hadMoov: boolean;
   /** Fourcc of an audio format that could not be recovered. */
   unsupportedAudio: string | null;
+  diagnosis: Diagnosis;
+}
+
+/** Recognise other container formats by their first bytes. */
+function sniffOtherFormat(h: Uint8Array): string | null {
+  const ascii = (o: number, n: number) => String.fromCharCode(...h.subarray(o, o + n));
+  if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "AVI ") return "AVI";
+  if (h[0] === 0x1a && h[1] === 0x45 && h[2] === 0xdf && h[3] === 0xa3) return "MKV / WebM";
+  if (h.length > 400 && h[0] === 0x47 && h[188] === 0x47 && h[376] === 0x47) return "MPEG-TS（.ts / .mts）";
+  if (h.length > 400 && h[4] === 0x47 && h[196] === 0x47 && h[388] === 0x47) return "AVCHD（.m2ts / .mts）";
+  if (h[0] === 0 && h[1] === 0 && h[2] === 1 && (h[3] === 0xba || h[3] === 0xb3)) return "MPEG（.mpg / .vob）";
+  if (ascii(0, 3) === "FLV") return "FLV";
+  if (h[0] === 0x30 && h[1] === 0x26 && h[2] === 0xb2 && h[3] === 0x75) return "WMV / ASF";
+  if (ascii(0, 4) === "OggS") return "Ogg";
+  if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) return "JPEG";
+  if (h[0] === 0x89 && ascii(1, 3) === "PNG") return "PNG";
+  if (ascii(0, 4) === "PK\x03\x04") return "ZIP";
+  if (ascii(0, 4) === "%PDF") return "PDF";
+  if (ascii(4, 4) === "ftyp" && ["heic", "heix", "mif1", "avif"].includes(ascii(8, 4))) return "HEIC / AVIF";
+  return null;
+}
+
+/** Fraction of the file that is zero bytes, from samples spread over its length. */
+async function zeroFraction(file: Blob): Promise<number> {
+  const points = 24;
+  const size = 4096;
+  let zeros = 0;
+  let total = 0;
+  for (let i = 0; i < points; i++) {
+    const at = Math.floor(((file.size - size) * i) / (points - 1));
+    const buf = new Uint8Array(await file.slice(Math.max(0, at), Math.max(0, at) + size).arrayBuffer());
+    total += buf.length;
+    for (const b of buf) if (b === 0) zeros++;
+  }
+  return total ? zeros / total : 1;
 }
 
 const STANDARD_FPS = [12, 15, 24, 25, 30, 48, 50, 60, 100, 120, 240];
@@ -104,14 +194,22 @@ function framesPerAudioFrame(scan: ScanResult): number {
   for (let i = 0; i < v.offsets.length; i++) {
     if (i === 0 || v.offsets[i] !== v.offsets[i - 1] + v.sizes[i - 1]) runs.push(i);
   }
-  if (runs.length >= 4) {
-    const i1 = runs[Math.floor(runs.length * 0.1)];
-    const i2 = runs[Math.max(Math.floor(runs.length * 0.1) + 1, Math.floor((runs.length - 1) * 0.95))];
-    let count = 0;
-    for (const off of a) if (off >= v.offsets[i1] && off < v.offsets[i2]) count++;
-    if (count >= 20) return (i2 - i1) / count;
+  // Audio frames in front of each run start (both lists are in file order).
+  const audioBefore: number[] = [];
+  let k = 0;
+  for (const r of runs) {
+    while (k < a.length && a[k] < v.offsets[r]) k++;
+    audioBefore.push(k);
   }
-  return v.offsets.length / a.length;
+  // Ratios over short windows; the median ignores windows that span a hole in the data.
+  const ratios: number[] = [];
+  const span = Math.max(1, Math.min(12, Math.floor(runs.length / 4)));
+  for (let i = 0; i + span < runs.length; i++) {
+    const audio = audioBefore[i + span] - audioBefore[i];
+    if (audio > 0) ratios.push((runs[i + span] - runs[i]) / audio);
+  }
+  if (ratios.length >= 3) return ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)];
+  return v.offsets.length / Math.max(1, a.length);
 }
 
 /** Find which AAC sampling-rate family parses the bytes between video frames. */
@@ -157,12 +255,130 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
   const progress = opts.onProgress ?? (() => {});
   progress("inspect", 0);
 
-  // Locate the media data. Without a usable mdat header the whole file is scanned.
+  // --- Diagnosis -----------------------------------------------------------------------------
+  if (file.size < 1024) throw new RepairError("EMPTY_FILE");
+  const head = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
+  const zeros = await zeroFraction(file);
+  if (zeros > 0.999) throw new RepairError("ZERO_FILLED");
+
   const boxes = await listTopBoxes(file);
   const mdat = boxes.find((b) => b.type === "mdat");
-  const hadMoov = boxes.some((b) => b.type === "moov");
+  const moov = await findMoov(file, boxes).catch(() => null);
+  const moovInPlace = boxes.some((b) => b.type === "moov");
+  if (!mdat && !moov) {
+    const other = sniffOtherFormat(head);
+    if (other) throw new RepairError("NOT_MP4", other);
+  }
+  // A file that does not even begin with a box has lost its start.
+  const headerDamaged = boxes.length === 0 || (moov !== null && !moovInPlace);
+
+  // --- A surviving index: check every sample it lists against the file ------------------------
+  if (moov) {
+    progress("scan", 0);
+    const fixed = await repairFromIndex(file, moov, (f) => progress("scan", f), opts.signal).catch((e) => {
+      if (e instanceof DOMException) throw e;
+      return null;
+    });
+    if (fixed) return finishFromIndex(file, boxes, fixed, headerDamaged, opts, progress);
+  }
+
+  // --- No usable index: find the frames in the raw data ---------------------------------------
+  try {
+    return await repairByScan(file, boxes, moov, opts, progress, headerDamaged);
+  } catch (e) {
+    if (e instanceof RepairError && e.code === "NO_VIDEO_FOUND" && zeros > 0.9) throw new RepairError("ZERO_FILLED");
+    throw e;
+  }
+}
+
+async function finishFromIndex(
+  file: Blob,
+  boxes: TopBox[],
+  fixed: NonNullable<Awaited<ReturnType<typeof repairFromIndex>>>,
+  headerDamaged: boolean,
+  opts: RepairOptions,
+  progress: (stage: RepairStage, fraction: number) => void,
+): Promise<RepairResult> {
+  progress("write", 0);
+  const video = fixed.tracks[0];
+  const videoReport = fixed.reports.find((r) => r.kind === "vide")!;
+  const audioReports = fixed.reports.filter((r) => r.kind === "soun");
+  const sum = (rs: TrackReport[], f: (r: TrackReport) => number) => rs.reduce((n, r) => n + f(r), 0);
+
+  const causes: DamageCause[] = [];
+  if (headerDamaged) causes.push("damaged_header");
+  if (fixed.shift !== 0) causes.push("shifted_data");
+  if (fixed.reports.some((r) => r.missing > 0)) causes.push("truncated");
+  if (fixed.reports.some((r) => r.corrupt > 0)) causes.push("corrupt_data");
+  if (!causes.length) causes.push("healthy");
+
+  if (opts.rotation != null && opts.rotation !== -1) video.matrix = rotationMatrix(opts.rotation, fixed.width, fixed.height);
+
+  // The original file is carried along whole, behind a new header: nothing is copied or moved.
+  // Its ftyp is kept, so that a QuickTime (.mov) file keeps being read as one.
+  const first = boxes[0];
+  const ftyp = first?.type === "ftyp" && first.size <= 4096 ? new Uint8Array(await file.slice(0, first.size).arrayBuffer()) : null;
+  const blob = new Blob([buildHeader(fixed.tracks, file.size, ftyp) as BlobPart, file], { type: "video/mp4" });
+  progress("write", 1);
+  const audio = fixed.tracks.find((t) => t.kind === "soun");
+  return {
+    blob,
+    codec: videoReport.format,
+    width: fixed.width,
+    height: fixed.height,
+    fps: fixed.fps,
+    videoFrames: videoReport.kept,
+    audioFrames: audio ? audio.sizes.length : 0,
+    durationSeconds: fixed.durationSeconds,
+    discardedBytes: 0,
+    estimated: false,
+    hadMoov: true,
+    unsupportedAudio: null,
+    diagnosis: {
+      causes,
+      method: "index",
+      videoTotal: videoReport.total,
+      videoDropped: videoReport.total - videoReport.kept,
+      audioDropped: sum(audioReports, (r) => r.total - r.kept),
+      missingFraction: videoReport.total ? videoReport.missing / videoReport.total : 0,
+      videoFormat: videoReport.format,
+      audioFormat: audioReports[0]?.format ?? null,
+    },
+  };
+}
+
+async function repairByScan(
+  file: Blob,
+  boxes: TopBox[],
+  moov: Uint8Array | null,
+  opts: RepairOptions,
+  progress: (stage: RepairStage, fraction: number) => void,
+  headerDamaged: boolean,
+): Promise<RepairResult> {
+  // Locate the media data. Without a usable mdat header the whole file is scanned. The scan
+  // always runs to the end of the file: whatever is not a frame is skipped anyway.
+  const mdat = boxes.find((b) => b.type === "mdat");
+  const hadMoov = moov !== null;
   const start = mdat ? mdat.start + mdat.headerSize : 0;
-  const end = mdat && mdat.start + mdat.size < file.size ? mdat.start + mdat.size : file.size;
+  const end = file.size;
+
+  // Codec settings come from the reference video, or from what is left of the file's own index.
+  let ref: Reference | null = null;
+  if (opts.reference) {
+    try {
+      ref = await parseReference(opts.reference);
+    } catch {
+      throw new RepairError("REFERENCE_INVALID");
+    }
+    if (!ref.video) throw new RepairError("REFERENCE_UNSUPPORTED");
+  } else if (moov) {
+    try {
+      const own = referenceFromMoov(moov);
+      if (own.video) ref = own;
+    } catch {
+      // the index is too damaged to give settings
+    }
+  }
 
   let codec: VideoCodec = "h264";
   let h264: H264Params | null = null;
@@ -172,20 +388,13 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
   let matrix: Uint8Array | null = null;
   let refFps = 0;
   let aacSrIndex = -1;
-  let audioBase: Pick<MuxAudio, "asc" | "sampleRate" | "channels" | "timescale" | "sampleDelta"> | null = null;
+  let audioBase: { asc: Uint8Array; sampleRate: number; channels: number; timescale: number; sampleDelta: number } | null = null;
   let unsupportedAudio: string | null = null;
   let estimated = false;
   let scan: ScanResult;
   let hevc = null;
 
-  if (opts.reference) {
-    let ref;
-    try {
-      ref = await parseReference(opts.reference);
-    } catch {
-      throw new RepairError("REFERENCE_INVALID");
-    }
-    if (!ref.video) throw new RepairError("REFERENCE_UNSUPPORTED");
+  if (ref?.video) {
     codec = ref.video.codec;
     entry = ref.video.entry;
     width = ref.video.width;
@@ -282,7 +491,7 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
     entry = buildAvc1Entry(buildAvcC(sps, pps), width, height);
   }
 
-  if (opts.reference) {
+  if (ref) {
     progress("scan", 0);
     scan = await scanMedia(file, start, end, {
       codec,
@@ -295,12 +504,39 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
   }
   scan = scan!;
 
-  // Decoding can only start at a key frame: drop anything before the first one.
+  // Decoding can only start at a key frame: drop anything before the first one. The same goes
+  // for frames behind a hole in the data (overwritten or missing frames): they are left out up
+  // to the next key frame, and their time is given to the frame shown before them.
   const firstKey = scan.video.keys.indexOf(true);
   if (firstKey < 0 || scan.video.offsets.length - firstKey < 1) throw new RepairError("NO_VIDEO_FOUND");
-  if (firstKey > 0) {
-    for (const k of ["offsets", "sizes", "keys", "idr", "pocLsb"] as const) (scan.video[k] as unknown[]).splice(0, firstKey);
+  const found = scan.video.offsets.length - firstKey;
+  const gaps = scan.video.gap.filter((g, i) => g && i > firstKey).length;
+  // Many "holes" mean the continuity check does not fit this stream; then nothing is dropped.
+  const trustGaps = gaps > 0 && gaps <= Math.max(3, found * 0.01);
+  const hold: number[] = [];
+  {
+    const v = scan.video;
+    const keep: number[] = [];
+    let waitForKey = false;
+    for (let i = firstKey; i < v.offsets.length; i++) {
+      if (v.keys[i]) waitForKey = false;
+      else if (trustGaps && v.gap[i]) waitForKey = true;
+      // A frame with a blanked-out block is unusable itself, key frame or not.
+      if (v.bad[i]) waitForKey = true;
+      if (waitForKey) {
+        if (hold.length) hold[hold.length - 1]++;
+        continue;
+      }
+      keep.push(i);
+      hold.push(0);
+    }
+    for (const k of ["offsets", "sizes", "keys", "idr", "pocLsb", "gap", "bad"] as const) {
+      const src = v[k] as unknown[];
+      (v as Record<string, unknown[]>)[k] = keep.map((i) => src[i]);
+    }
   }
+  const droppedFrames = found - scan.video.offsets.length;
+  if (!scan.video.offsets.length) throw new RepairError("NO_VIDEO_FOUND");
   progress("write", 0);
 
   const frames = scan.video.offsets.length;
@@ -350,25 +586,86 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
 
   if (opts.rotation != null && opts.rotation !== -1) matrix = rotationMatrix(opts.rotation, width, height);
 
-  const video: MuxVideo = {
-    codec,
-    entry: entry!,
-    width,
-    height,
-    timescale,
-    sampleDelta,
-    matrix,
-    offsets: scan.video.offsets,
-    sizes: scan.video.sizes,
-    keys: scan.video.keys,
-    reorder,
-  };
-  const audio: MuxAudio | null = audioFrames && audioBase ? { ...audioBase, offsets: scan.audio.offsets, sizes: scan.audio.sizes } : null;
+  let shift = 0;
+  if (reorder) for (const r of reorder) if (-r > shift) shift = -r;
+
+  // Holes in the data (blocks that are neither video nor audio) took some playing time with
+  // them. How much is estimated from the average data rate, and the same amount is inserted
+  // into both tracks at that spot, so picture and sound stay together after the hole.
+  const videoDurations = hold.map((h) => (h + 1) * sampleDelta);
+  const audioDelta = audioBase?.sampleDelta ?? 1024;
+  const audioDurations = new Array<number>(audioFrames).fill(audioDelta);
+  const frameBytes = scan.video.sizes.reduce((n, x) => n + x, 0) + scan.audio.sizes.reduce((n, x) => n + x, 0);
+  const seconds = (frames * sampleDelta) / timescale;
+  let lostSeconds = 0;
+  if (frameBytes > 0 && seconds > 0) {
+    const lastBefore = (offsets: number[], at: number) => {
+      let lo = 0;
+      let hi = offsets.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (offsets[mid] < at) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo - 1;
+    };
+    for (const [at, length] of scan.junk) {
+      const lost = (length / frameBytes) * seconds;
+      if (lost < 0.1) continue; // ordinary non-media data (metadata tracks)
+      lostSeconds += lost;
+      const vi = lastBefore(scan.video.offsets, at);
+      if (vi >= 0) videoDurations[vi] += Math.round(lost * fps) * sampleDelta;
+      const ai = lastBefore(scan.audio.offsets, at);
+      if (ai >= 0 && audioBase) audioDurations[ai] += Math.round(lost * fps) * Math.round((sampleDelta / timescale) * audioBase.timescale);
+    }
+  }
+  const tracks: OutTrack[] = [
+    {
+      kind: "vide",
+      entry: entry!,
+      timescale,
+      matrix,
+      width: width * 65536,
+      height: height * 65536,
+      offsets: scan.video.offsets,
+      sizes: scan.video.sizes,
+      durations: videoDurations,
+      cts: reorder ? reorder.map((r) => (r + shift) * sampleDelta) : null,
+      sync: scan.video.keys,
+      mediaTime: shift * sampleDelta,
+      // Frames in front of the first key frame cannot be shown; their time stays empty so the
+      // sound that goes with them does not slide against the picture.
+      startDelay: firstKey * sampleDelta,
+    },
+  ];
+  const hasAudio = audioFrames > 0 && audioBase !== null;
+  if (hasAudio && audioBase) {
+    tracks.push({
+      kind: "soun",
+      entry: buildAacEntry(audioBase.asc, audioBase.sampleRate, audioBase.channels),
+      timescale: audioBase.timescale,
+      matrix: null,
+      width: 0,
+      height: 0,
+      offsets: scan.audio.offsets,
+      sizes: scan.audio.sizes,
+      durations: audioDurations,
+      cts: null,
+      sync: null,
+      mediaTime: 0,
+      startDelay: 0,
+    });
+  }
 
   const dataSize = scan.endOfData - start;
-  const header = buildHeader(video, audio, dataSize);
+  const header = buildHeader(tracks, dataSize);
   const blob = new Blob([header as BlobPart, file.slice(start, scan.endOfData)], { type: "video/mp4" });
   progress("write", 1);
+
+  const causes: DamageCause[] = [hadMoov ? "damaged_index" : "missing_index"];
+  if (headerDamaged && !causes.includes("damaged_header")) causes.push("damaged_header");
+  if (mdat && mdat.start + mdat.size > file.size + 16) causes.push("truncated");
+  if (droppedFrames > 0 || lostSeconds > 0) causes.push("corrupt_data");
 
   return {
     blob,
@@ -378,10 +675,20 @@ export async function repairVideo(file: Blob, opts: RepairOptions = {}): Promise
     fps,
     videoFrames: frames,
     audioFrames,
-    durationSeconds: (frames * sampleDelta) / timescale,
+    durationSeconds: videoDurations.reduce((n, x) => n + x, firstKey * sampleDelta) / timescale,
     discardedBytes: end - scan.endOfData,
     estimated,
     hadMoov,
-    unsupportedAudio: audio ? null : unsupportedAudio,
+    unsupportedAudio: hasAudio ? null : unsupportedAudio,
+    diagnosis: {
+      causes,
+      method: "scan",
+      videoTotal: frames + droppedFrames,
+      videoDropped: droppedFrames,
+      audioDropped: 0,
+      missingFraction: 0,
+      videoFormat: codec === "h264" ? "avc1" : "hvc1",
+      audioFormat: hasAudio ? "mp4a" : null,
+    },
   };
 }

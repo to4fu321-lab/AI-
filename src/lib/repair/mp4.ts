@@ -112,6 +112,12 @@ export interface Reference {
   unsupportedAudio: string | null;
 }
 
+const MAX_MOOV = 512 * 1024 * 1024;
+
+function moovHeaderSize(buf: Uint8Array): number {
+  return u32(buf, 0) === 1 ? 16 : 8;
+}
+
 const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
 
 function mostCommonDelta(buf: Uint8Array, stts: Box | null): number {
@@ -158,11 +164,15 @@ function findAsc(entry: Uint8Array): Uint8Array | null {
 export async function parseReference(blob: Blob): Promise<Reference> {
   const moovBox = (await listTopBoxes(blob)).find((b) => b.type === "moov");
   if (!moovBox) throw new Error("NO_MOOV");
-  if (moovBox.size > 512 * 1024 * 1024) throw new Error("MOOV_TOO_LARGE");
-  const buf = await readBytes(blob, moovBox.start, moovBox.start + moovBox.size);
+  if (moovBox.size > MAX_MOOV) throw new Error("MOOV_TOO_LARGE");
+  return referenceFromMoov(await readBytes(blob, moovBox.start, moovBox.start + moovBox.size));
+}
+
+/** Codec configuration from the bytes of a complete moov box (header included). */
+export function referenceFromMoov(buf: Uint8Array): Reference {
   const ref: Reference = { video: null, audio: null, unsupportedAudio: null };
 
-  for (const trak of children(buf, moovBox.headerSize, buf.length)) {
+  for (const trak of children(buf, moovHeaderSize(buf), buf.length)) {
     if (trak.type !== "trak") continue;
     const tkhd = find(buf, trak.body, trak.end, "tkhd");
     const mdia = find(buf, trak.body, trak.end, "mdia");
@@ -326,7 +336,7 @@ export function buildAvc1Entry(avcC: Uint8Array, width: number, height: number):
   );
 }
 
-function buildMp4aEntry(a: MuxAudio): Uint8Array {
+function buildMp4aEntry(a: { asc: Uint8Array; sampleRate: number; channels: number }): Uint8Array {
   const dsi = new Bytes().u8(5).u8(a.asc.length).raw(a.asc).done();
   const dcd = new Bytes()
     .u8(4)
@@ -362,35 +372,72 @@ function buildMp4aEntry(a: MuxAudio): Uint8Array {
   );
 }
 
-export interface MuxVideo {
-  codec: VideoCodec;
-  entry: Uint8Array;
-  width: number;
-  height: number;
-  timescale: number;
-  sampleDelta: number;
-  matrix: Uint8Array | null;
-  /** Sample positions relative to the start of the recovered media data. */
-  offsets: number[];
-  sizes: number[];
-  keys: boolean[];
-  /** Composition offset per sample in frames (display index − decode index), or null. */
-  reorder: number[] | null;
+/** ISO mp4a sample entry for raw AAC. */
+export function buildAacEntry(asc: Uint8Array, sampleRate: number, channels: number): Uint8Array {
+  return buildMp4aEntry({ asc, sampleRate, channels });
 }
 
-export interface MuxAudio {
-  asc: Uint8Array;
-  sampleRate: number;
-  channels: number;
+/** One track of the file being written. */
+export interface OutTrack {
+  kind: "vide" | "soun";
+  /** Complete sample entry box. */
+  entry: Uint8Array;
   timescale: number;
-  sampleDelta: number;
-  offsets: number[];
-  sizes: number[];
+  matrix: Uint8Array | null;
+  /** Display size as 16.16 fixed point (0 for audio). */
+  width: number;
+  height: number;
+  /** Byte position of each sample inside the media data that follows the header. */
+  offsets: ArrayLike<number>;
+  sizes: ArrayLike<number>;
+  /** Duration of each sample in `timescale` units. */
+  durations: ArrayLike<number>;
+  /** Composition time offset of each sample, or null when display order equals decode order. */
+  cts: ArrayLike<number> | null;
+  /** Key-frame flag per sample, or null when every sample is a key frame. */
+  sync: ArrayLike<number | boolean> | null;
+  /** Media time presented at the start of the track (cancels the composition offset of B-frames). */
+  mediaTime: number;
+  /** Empty time before the first sample, in `timescale` units. */
+  startDelay: number;
 }
 
 const MOVIE_TIMESCALE = 1000;
 
-function sampleTables(offsets: number[], sizes: number[], base: number): Uint8Array[] {
+function runLength(values: ArrayLike<number>): number[] {
+  const runs: number[] = [];
+  for (let i = 0; i < values.length; i++) {
+    if (runs.length && runs[runs.length - 1] === values[i]) runs[runs.length - 2]++;
+    else runs.push(1, values[i]);
+  }
+  return runs;
+}
+
+function trackBox(id: number, t: OutTrack, base: number): { box: Uint8Array; seconds: number } {
+  const n = t.sizes.length;
+  let mediaDuration = 0;
+  for (let i = 0; i < n; i++) mediaDuration += t.durations[i];
+  const toMovie = (v: number) => Math.round((v / t.timescale) * MOVIE_TIMESCALE);
+  const movieDuration = toMovie(mediaDuration);
+  const delay = toMovie(t.startDelay);
+
+  const stbl: Uint8Array[] = [fullBox("stsd", 0, new Bytes().u32(1).done(), t.entry)];
+  const stts = runLength(t.durations);
+  stbl.push(fullBox("stts", 0, new Bytes().u32(stts.length / 2).done(), u32Table(stts)));
+  if (t.cts) {
+    const runs = runLength(t.cts);
+    const negative = runs.some((v, i) => i % 2 === 1 && v < 0);
+    const table = new Uint8Array(runs.length * 4);
+    const dv = new DataView(table.buffer);
+    runs.forEach((v, i) => dv.setInt32(i * 4, v));
+    stbl.push(box("ctts", new Bytes().u32(negative ? 0x01000000 : 0).u32(runs.length / 2).done(), table));
+  }
+  if (t.sync) {
+    const keys: number[] = [];
+    for (let i = 0; i < n; i++) if (t.sync[i]) keys.push(i + 1);
+    stbl.push(fullBox("stss", 0, new Bytes().u32(keys.length).done(), u32Table(keys)));
+  }
+
   // Consecutive samples form one chunk.
   const chunkOffsets: number[] = [];
   const stsc: number[] = [];
@@ -402,42 +449,32 @@ function sampleTables(offsets: number[], sizes: number[], base: number): Uint8Ar
       lastRun = run;
     }
   };
-  for (let i = 0; i < offsets.length; i++) {
-    if (i === 0 || offsets[i] !== offsets[i - 1] + sizes[i - 1]) {
+  for (let i = 0; i < n; i++) {
+    if (i === 0 || t.offsets[i] !== t.offsets[i - 1] + t.sizes[i - 1]) {
       flush();
-      chunkOffsets.push(offsets[i]);
+      chunkOffsets.push(t.offsets[i]);
       run = 0;
     }
     run++;
   }
   flush();
-
   const co = new Uint8Array(chunkOffsets.length * 8);
-  const dv = new DataView(co.buffer);
+  const cdv = new DataView(co.buffer);
   chunkOffsets.forEach((o, i) => {
     const abs = o + base;
-    dv.setUint32(i * 8, Math.floor(abs / 2 ** 32));
-    dv.setUint32(i * 8 + 4, abs >>> 0);
+    cdv.setUint32(i * 8, Math.floor(abs / 2 ** 32));
+    cdv.setUint32(i * 8 + 4, abs >>> 0);
   });
-  return [
+  const sizes = new Uint8Array(n * 4);
+  const sdv = new DataView(sizes.buffer);
+  for (let i = 0; i < n; i++) sdv.setUint32(i * 4, t.sizes[i]);
+  stbl.push(
     fullBox("stsc", 0, new Bytes().u32(stsc.length / 3).done(), u32Table(stsc)),
-    fullBox("stsz", 0, new Bytes().u32(0).u32(sizes.length).done(), u32Table(sizes)),
+    fullBox("stsz", 0, new Bytes().u32(0).u32(n).done(), sizes),
     fullBox("co64", 0, new Bytes().u32(chunkOffsets.length).done(), co),
-  ];
-}
+  );
 
-function trak(
-  id: number,
-  kind: "vide" | "soun",
-  timescale: number,
-  mediaDuration: number,
-  matrix: Uint8Array,
-  width: number,
-  height: number,
-  mediaTime: number,
-  stbl: Uint8Array,
-): Uint8Array {
-  const movieDuration = Math.round((mediaDuration / timescale) * MOVIE_TIMESCALE);
+  const audio = t.kind === "soun";
   const tkhd = fullBox(
     "tkhd",
     3,
@@ -445,80 +482,53 @@ function trak(
       .zeros(8)
       .u32(id)
       .zeros(4)
-      .u32(movieDuration)
+      .u32(delay + movieDuration)
       .zeros(8)
       .u16(0)
-      .u16(kind === "soun" ? 1 : 0)
-      .u16(kind === "soun" ? 0x100 : 0)
+      .u16(audio ? 1 : 0)
+      .u16(audio ? 0x100 : 0)
       .u16(0)
-      .raw(matrix)
-      .u32(width * 65536)
-      .u32(height * 65536)
+      .raw(t.matrix ?? IDENTITY_MATRIX)
+      .u32(t.width)
+      .u32(t.height)
       .done(),
   );
-  const edts = box("edts", fullBox("elst", 0, new Bytes().u32(1).u32(movieDuration).u32(mediaTime).u32(0x10000).done()));
-  const mdhd = fullBox("mdhd", 0, new Bytes().zeros(8).u32(timescale).u32(mediaDuration).u16(0x55c4).u16(0).done());
+  const edits = new Bytes().u32(delay > 0 ? 2 : 1);
+  if (delay > 0) edits.u32(delay).u32(0xffffffff).u32(0x10000); // empty edit
+  edits.u32(movieDuration).u32(t.mediaTime).u32(0x10000);
+  const edts = box("edts", fullBox("elst", 0, edits.done()));
+  const mdhd = fullBox("mdhd", 0, new Bytes().zeros(8).u32(t.timescale).u32(mediaDuration).u16(0x55c4).u16(0).done());
   const hdlr = fullBox(
     "hdlr",
     0,
     new Bytes()
       .zeros(4)
-      .str(kind)
+      .str(t.kind)
       .zeros(12)
-      .str(kind === "vide" ? "VideoHandler" : "SoundHandler")
+      .str(audio ? "SoundHandler" : "VideoHandler")
       .u8(0)
       .done(),
   );
-  const mediaHeader = kind === "vide" ? fullBox("vmhd", 1, new Uint8Array(8)) : fullBox("smhd", 0, new Uint8Array(4));
+  const mediaHeader = audio ? fullBox("smhd", 0, new Uint8Array(4)) : fullBox("vmhd", 1, new Uint8Array(8));
   const dinf = box("dinf", fullBox("dref", 0, new Bytes().u32(1).done(), fullBox("url ", 1)));
-  return box("trak", tkhd, edts, box("mdia", mdhd, hdlr, box("minf", mediaHeader, dinf, stbl)));
+  return {
+    box: box("trak", tkhd, edts, box("mdia", mdhd, hdlr, box("minf", mediaHeader, dinf, box("stbl", ...stbl)))),
+    seconds: (t.startDelay + mediaDuration) / t.timescale,
+  };
 }
 
 /**
- * Build `ftyp + moov + mdat header`. The recovered media data (dataSize bytes) is expected to
- * follow immediately, so the index sits in front of the data and the file starts playing at once.
+ * Build `ftyp + moov + mdat header`. The media data (dataSize bytes) is expected to follow
+ * immediately, so the index sits in front of the data and the file starts playing at once.
+ * `ftyp` may carry over the original file's box; otherwise a generic one is written.
  */
-export function buildHeader(video: MuxVideo, audio: MuxAudio | null, dataSize: number): Uint8Array {
-  const ftyp = box("ftyp", new Bytes().str("isom").u32(0x200).str("isomiso2").str(video.codec === "h264" ? "avc1" : "hvc1").str("mp41").done());
+export function buildHeader(tracks: OutTrack[], dataSize: number, ftyp?: Uint8Array | null): Uint8Array {
+  const hevc = tracks.some((t) => t.kind === "vide" && ["hvc1", "hev1"].includes(fourcc(t.entry, 4)));
+  const head = ftyp ?? box("ftyp", new Bytes().str("isom").u32(0x200).str("isomiso2").str(hevc ? "hvc1" : "avc1").str("mp41").done());
 
   const build = (base: number): Uint8Array => {
-    const n = video.sizes.length;
-    const vStbl: Uint8Array[] = [
-      fullBox("stsd", 0, new Bytes().u32(1).done(), video.entry),
-      fullBox("stts", 0, new Bytes().u32(1).u32(n).u32(video.sampleDelta).done()),
-    ];
-    let shift = 0;
-    if (video.reorder) {
-      for (const r of video.reorder) if (-r > shift) shift = -r;
-      const runs: number[] = [];
-      for (let i = 0; i < n; i++) {
-        const off = (video.reorder[i] + shift) * video.sampleDelta;
-        if (runs.length && runs[runs.length - 1] === off) runs[runs.length - 2]++;
-        else runs.push(1, off);
-      }
-      vStbl.push(fullBox("ctts", 0, new Bytes().u32(runs.length / 2).done(), u32Table(runs)));
-    }
-    const keys: number[] = [];
-    video.keys.forEach((k, i) => k && keys.push(i + 1));
-    vStbl.push(fullBox("stss", 0, new Bytes().u32(keys.length).done(), u32Table(keys)));
-    vStbl.push(...sampleTables(video.offsets, video.sizes, base));
-
-    const vDuration = n * video.sampleDelta;
-    const traks = [
-      trak(1, "vide", video.timescale, vDuration, video.matrix ?? IDENTITY_MATRIX, video.width, video.height, shift * video.sampleDelta, box("stbl", ...vStbl)),
-    ];
-    let seconds = vDuration / video.timescale;
-    if (audio && audio.sizes.length) {
-      const aDuration = audio.sizes.length * audio.sampleDelta;
-      seconds = Math.max(seconds, aDuration / audio.timescale);
-      const aStbl = box(
-        "stbl",
-        fullBox("stsd", 0, new Bytes().u32(1).done(), buildMp4aEntry(audio)),
-        fullBox("stts", 0, new Bytes().u32(1).u32(audio.sizes.length).u32(audio.sampleDelta).done()),
-        ...sampleTables(audio.offsets, audio.sizes, base),
-      );
-      traks.push(trak(2, "soun", audio.timescale, aDuration, IDENTITY_MATRIX, 0, 0, 0, aStbl));
-    }
+    const traks = tracks.map((t, i) => trackBox(i + 1, t, base));
+    const seconds = Math.max(0, ...traks.map((t) => t.seconds));
     const mvhd = fullBox(
       "mvhd",
       0,
@@ -534,13 +544,13 @@ export function buildHeader(video: MuxVideo, audio: MuxAudio | null, dataSize: n
         .u32(traks.length + 1)
         .done(),
     );
-    return box("moov", mvhd, ...traks);
+    return box("moov", mvhd, ...traks.map((t) => t.box));
   };
 
   // The chunk offsets depend on the size of the moov that contains them; its size does not
   // depend on the offsets, so build once to measure and once for real.
   const mdatHeader = 16;
-  const base = ftyp.length + build(0).length + mdatHeader;
+  const base = head.length + build(0).length + mdatHeader;
   const moov = build(base);
   const total = dataSize + mdatHeader;
   const mdat = new Bytes()
@@ -549,5 +559,212 @@ export function buildHeader(video: MuxVideo, audio: MuxAudio | null, dataSize: n
     .u32(Math.floor(total / 2 ** 32))
     .u32(total >>> 0)
     .done();
-  return new Bytes().raw(ftyp).raw(moov).raw(mdat).done();
+  return new Bytes().raw(head).raw(moov).raw(mdat).done();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading a complete index (for files whose moov survived)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Look for a moov box anywhere in the file. A damaged file header stops the normal box walk,
+ * but the index itself is often intact further on (cameras write it at the very end).
+ */
+export async function findMoov(blob: Blob, boxes: TopBox[]): Promise<Uint8Array | null> {
+  const top = boxes.find((b) => b.type === "moov");
+  if (top && top.size <= MAX_MOOV && top.start + top.size <= blob.size) {
+    return readBytes(blob, top.start, top.start + top.size);
+  }
+  // Signature search: "moov" followed by an mvhd child. Search the tail first, then the rest.
+  const CHUNK = 4 * 1024 * 1024;
+  const order: number[] = [];
+  for (let pos = Math.max(0, blob.size - CHUNK); ; pos -= CHUNK - 16) {
+    order.push(Math.max(0, pos));
+    if (pos <= 0) break;
+  }
+  for (const pos of order) {
+    const buf = await readBytes(blob, pos, pos + CHUNK);
+    for (let i = 4; i + 16 <= buf.length; i++) {
+      if (buf[i] !== 0x6d || buf[i + 1] !== 0x6f || buf[i + 2] !== 0x6f || buf[i + 3] !== 0x76) continue;
+      if (fourcc(buf, i + 8) !== "mvhd") continue;
+      const size = u32(buf, i - 4);
+      const start = pos + i - 4;
+      if (size < 100 || size > MAX_MOOV) continue;
+      // A moov cut off by the end of the file is still worth reading: whole tracks may survive.
+      return readBytes(blob, start, start + size);
+    }
+  }
+  return null;
+}
+
+export interface InTrack {
+  kind: "vide" | "soun";
+  format: string;
+  entry: Uint8Array;
+  timescale: number;
+  matrix: Uint8Array;
+  width: number;
+  height: number;
+  offsets: Float64Array;
+  sizes: Uint32Array;
+  durations: Uint32Array;
+  cts: Int32Array | null;
+  sync: Uint8Array | null;
+  mediaTime: number;
+  /** Empty time before the first sample, in `timescale` units. */
+  startDelay: number;
+}
+
+function readTrack(buf: Uint8Array, trak: Box, movieTimescale: number): InTrack | null {
+  const tkhd = find(buf, trak.body, trak.end, "tkhd");
+  const mdia = find(buf, trak.body, trak.end, "mdia");
+  if (!tkhd || !mdia) return null;
+  const mdhd = find(buf, mdia.body, mdia.end, "mdhd");
+  const hdlr = find(buf, mdia.body, mdia.end, "hdlr");
+  const minf = find(buf, mdia.body, mdia.end, "minf");
+  const stbl = minf && find(buf, minf.body, minf.end, "stbl");
+  if (!mdhd || !hdlr || !stbl) return null;
+  const kind = fourcc(buf, hdlr.body + 8);
+  if (kind !== "vide" && kind !== "soun") return null;
+  const get = (type: string) => find(buf, stbl.body, stbl.end, type);
+  const stsd = get("stsd");
+  const stts = get("stts");
+  const stsc = get("stsc");
+  const stsz = get("stsz");
+  const stco = get("stco");
+  const co64 = get("co64");
+  if (!stsd || !stts || !stsc || !stsz || !(stco || co64)) return null;
+
+  const entryStart = stsd.body + 8;
+  if (entryStart + 16 > stsd.end) return null;
+  const entry = buf.slice(entryStart, Math.min(stsd.end, entryStart + u32(buf, entryStart)));
+  const timescale = u32(buf, mdhd.body + (buf[mdhd.body] === 1 ? 20 : 12));
+  if (!timescale) return null;
+
+  const fixedSize = u32(buf, stsz.body + 4);
+  const count = u32(buf, stsz.body + 8);
+  if (count === 0 || count > 20_000_000) return null;
+  if (!fixedSize && stsz.body + 12 + count * 4 > stsz.end) return null;
+  const sizes = new Uint32Array(count);
+  for (let i = 0; i < count; i++) sizes[i] = fixedSize || u32(buf, stsz.body + 12 + i * 4);
+
+  // Sample offsets: chunk offsets + sample-to-chunk runs.
+  const co = (stco ?? co64)!;
+  const chunks = u32(buf, co.body + 4);
+  if (co.body + 8 + chunks * (stco ? 4 : 8) > co.end) return null;
+  const chunkOffset = (i: number) =>
+    stco ? u32(buf, co.body + 8 + i * 4) : u32(buf, co.body + 8 + i * 8) * 2 ** 32 + u32(buf, co.body + 12 + i * 8);
+  const runs = u32(buf, stsc.body + 4);
+  if (stsc.body + 8 + runs * 12 > stsc.end || runs === 0) return null;
+  const offsets = new Float64Array(count);
+  let sample = 0;
+  for (let r = 0; r < runs && sample < count; r++) {
+    const first = u32(buf, stsc.body + 8 + r * 12) - 1;
+    const perChunk = u32(buf, stsc.body + 12 + r * 12);
+    const next = r + 1 < runs ? u32(buf, stsc.body + 8 + (r + 1) * 12) - 1 : chunks;
+    if (perChunk === 0 || first < 0 || next > chunks) return null;
+    for (let c = first; c < next && sample < count; c++) {
+      let pos = chunkOffset(c);
+      for (let k = 0; k < perChunk && sample < count; k++) {
+        offsets[sample] = pos;
+        pos += sizes[sample++];
+      }
+    }
+  }
+  if (sample < count) return null;
+
+  const durations = new Uint32Array(count);
+  const sttsCount = u32(buf, stts.body + 4);
+  if (stts.body + 8 + sttsCount * 8 > stts.end) return null;
+  sample = 0;
+  for (let i = 0; i < sttsCount; i++) {
+    const n = u32(buf, stts.body + 8 + i * 8);
+    const delta = u32(buf, stts.body + 12 + i * 8);
+    for (let k = 0; k < n && sample < count; k++) durations[sample++] = delta;
+  }
+  for (; sample < count; sample++) durations[sample] = sample ? durations[sample - 1] : 0;
+
+  let cts: Int32Array | null = null;
+  const ctts = get("ctts");
+  if (ctts) {
+    const n = u32(buf, ctts.body + 4);
+    if (ctts.body + 8 + n * 8 > ctts.end) return null;
+    cts = new Int32Array(count);
+    sample = 0;
+    for (let i = 0; i < n; i++) {
+      const run = u32(buf, ctts.body + 8 + i * 8);
+      const off = u32(buf, ctts.body + 12 + i * 8) | 0;
+      for (let k = 0; k < run && sample < count; k++) cts[sample++] = off;
+    }
+  }
+
+  let sync: Uint8Array | null = null;
+  const stss = get("stss");
+  if (stss) {
+    const n = u32(buf, stss.body + 4);
+    if (stss.body + 8 + n * 4 > stss.end) return null;
+    sync = new Uint8Array(count);
+    for (let i = 0; i < n; i++) {
+      const k = u32(buf, stss.body + 8 + i * 4) - 1;
+      if (k >= 0 && k < count) sync[k] = 1;
+    }
+  }
+
+  // Edit list: an optional empty edit (start delay) followed by the media segment.
+  let mediaTime = 0;
+  let startDelay = 0;
+  const edts = find(buf, trak.body, trak.end, "edts");
+  const elst = edts && find(buf, edts.body, edts.end, "elst");
+  if (elst) {
+    const v1 = buf[elst.body] === 1;
+    const n = u32(buf, elst.body + 4);
+    let o = elst.body + 8;
+    for (let i = 0; i < n && o + (v1 ? 20 : 12) <= elst.end; i++, o += v1 ? 20 : 12) {
+      const duration = v1 ? u32(buf, o) * 2 ** 32 + u32(buf, o + 4) : u32(buf, o);
+      const time = v1 ? (u32(buf, o + 8) | 0) * 2 ** 32 + u32(buf, o + 12) : u32(buf, o + 4) | 0;
+      if (time < 0) {
+        if (movieTimescale) startDelay += Math.round((duration / movieTimescale) * timescale);
+      } else {
+        mediaTime = time;
+        break;
+      }
+    }
+  }
+
+  const v1 = buf[tkhd.body] === 1;
+  const matrixAt = tkhd.body + (v1 ? 52 : 40);
+  return {
+    kind,
+    format: fourcc(entry, 4),
+    entry,
+    timescale,
+    matrix: buf.slice(matrixAt, matrixAt + 36),
+    width: u32(buf, matrixAt + 36),
+    height: u32(buf, matrixAt + 40),
+    offsets,
+    sizes,
+    durations,
+    cts,
+    sync,
+    mediaTime,
+    startDelay,
+  };
+}
+
+/** Read every video and audio track with its complete sample tables. Damaged tracks are skipped. */
+export function readTracks(moov: Uint8Array): InTrack[] {
+  const tracks: InTrack[] = [];
+  const start = moovHeaderSize(moov);
+  const mvhd = find(moov, start, moov.length, "mvhd");
+  const movieTimescale = mvhd ? u32(moov, mvhd.body + (moov[mvhd.body] === 1 ? 20 : 12)) : 0;
+  for (const trak of children(moov, start, moov.length)) {
+    if (trak.type !== "trak") continue;
+    try {
+      const t = readTrack(moov, trak, movieTimescale);
+      if (t) tracks.push(t);
+    } catch {
+      // unreadable track
+    }
+  }
+  return tracks;
 }
