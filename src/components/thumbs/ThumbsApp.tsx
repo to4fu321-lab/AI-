@@ -24,6 +24,8 @@ interface Job {
   truncated?: boolean;
   /** 取れなかった理由などの補足 */
   note?: string;
+  /** 確認を求められて読めなかったページ（サイトを本人のブラウザで開いてもらう） */
+  gated?: { url: string; thumb?: string }[];
   settings?: CrawlSettings;
   /** 最後に受け取った途中経過。止まったときは「続きから」でここから再開する */
   resume?: CrawlState;
@@ -35,6 +37,8 @@ const STORAGE_KEY = "thumbs:v1";
 /** 履歴と登録サイトは「すべて消す」をしても残すので、別の場所に保存する */
 const LIBRARY_KEY = "thumbs:library:v1";
 const MAX_ITEMS = 5000;
+/** 「サイトで開く」に並べるページの数の上限（1 つの取得あたり） */
+const MAX_GATED = 60;
 /** 一覧の見た目（サムネイルの大きさ・形）の保存場所 */
 const VIEW_KEY = "thumbs:view:v1";
 /** サムネイルの大きさ（1 枚の最小の幅 px）。画面の幅に合わせて、入るだけ並べる */
@@ -320,6 +324,13 @@ export function ThumbsApp() {
                   updateJob(id, { resume: event.state });
                 }
                 else if (event.type === "note") updateJob(id, { note: event.message });
+                else if (event.type === "gated") {
+                  updateJob(id, (j) =>
+                    (j.gated ?? []).some((g) => g.url === event.url)
+                      ? {}
+                      : { gated: [...(j.gated ?? []), { url: event.url, thumb: event.thumb }].slice(0, MAX_GATED) },
+                  );
+                }
                 else if (event.type === "media") {
                   foundCount += event.items.length;
                   setItems((prev) => {
@@ -858,12 +869,13 @@ function JobRow({
   const trouble = [job.errors ? `読めず ${job.errors}` : "", job.skips ? `飛ばした ${job.skips}` : ""].filter(Boolean).join("・");
   return (
     <li
-      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs transition ${
+      className={`rounded-xl border px-3 py-2 text-xs transition ${
         active
           ? "border-fuchsia-400 bg-fuchsia-50 dark:bg-fuchsia-950/30"
           : "border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900"
       }`}
     >
+      <div className="flex items-center gap-2">
       <span
         className={`h-2 w-2 shrink-0 rounded-full ${
           job.status === "running" ? "animate-pulse bg-fuchsia-500" : job.status === "error" ? "bg-red-500" : "bg-emerald-500"
@@ -914,7 +926,53 @@ function JobRow({
           ×
         </button>
       )}
+      </div>
+      {job.gated && job.gated.length > 0 && <GatedPages pages={job.gated} />}
     </li>
+  );
+}
+
+/**
+ * 「人間かどうかの確認」を求められた・自動アクセスを断られたので、このアプリでは読めなかったページ。
+ * 本人のブラウザでサイトを直接開いてもらう（確認は本人がふつうに通れる）
+ */
+function GatedPages({ pages }: { pages: { url: string; thumb?: string }[] }) {
+  const [open, setOpen] = useState(false);
+  const shown = open ? pages : pages.slice(0, 6);
+  return (
+    <div className="mt-2 border-t border-neutral-100 pt-2 dark:border-neutral-800">
+      <p className="mb-1.5 text-[11px] text-neutral-500">
+        🔐 確認が必要で読めなかったページ {pages.length} 件。タップするとサイトを直接開きます
+      </p>
+      <ul className="grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+        {shown.map((g) => (
+          <li key={g.url}>
+            <a
+              href={g.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="relative block aspect-video overflow-hidden rounded-md bg-neutral-200 dark:bg-neutral-800"
+              title={g.url}
+            >
+              {g.thumb ? (
+                // eslint-disable-next-line @next/next/no-img-element -- 外部サイトのサムネイル
+                <img src={g.thumb} alt="" referrerPolicy="no-referrer" loading="lazy" className="h-full w-full object-cover" />
+              ) : (
+                <span className="flex h-full w-full items-center justify-center px-1 text-center text-[9px] leading-tight text-neutral-500 break-all">
+                  {g.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 40)}
+                </span>
+              )}
+              <span className="absolute bottom-0.5 right-0.5 rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-white">↗ サイトで開く</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+      {pages.length > shown.length && (
+        <button type="button" onClick={() => setOpen(true)} className="mt-1.5 text-[11px] font-semibold text-fuchsia-500">
+          ほか {pages.length - shown.length} 件を表示
+        </button>
+      )}
+    </div>
   );
 }
 

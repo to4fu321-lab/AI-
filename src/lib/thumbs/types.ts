@@ -58,6 +58,11 @@ export type CrawlEvent =
   | { type: "media"; items: MediaItem[] }
   | { type: "skip"; url: string; reason: string }
   | { type: "note"; url: string; message: string }
+  /**
+   * サイトが「人間かどうかの確認」を求める・自動アクセスを断るので、読めなかったページ。
+   * 画面は、そのページを本人のブラウザで開くボタンを出す（サイト自体にアクセスしてもらう）
+   */
+  | { type: "gated"; url: string; thumb?: string; title?: string }
   | { type: "error"; url: string; message: string }
   | { type: "continue"; state: CrawlState }
   /** 途中経過の記録（数秒おき）。止まったときに画面がここから再開できる */
