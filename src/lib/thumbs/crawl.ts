@@ -7,7 +7,7 @@ import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { tweetIdOf, tweetVideos } from "./twitter";
-import { gofileFiles, gofileId } from "./gofile";
+import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { mediaMime, readHead } from "./sniff";
@@ -607,15 +607,17 @@ export async function* crawl(
   /** 中身を聞いた Gofile のフォルダ */
   const seenGofile = new Set<string>();
   /** Gofile のフォルダの中身を、画像・動画の一覧にする（1 ページあたり 10 フォルダまで） */
-  const gofileMedia = async (ids: string[]): Promise<{ media: MediaItem[]; error?: string }> => {
+  const gofileMedia = async (ids: string[]): Promise<{ media: MediaItem[]; error?: string; detail?: string }> => {
     const todo = ids.filter((id) => !seenGofile.has(id)).slice(0, 10);
     const media: MediaItem[] = [];
     let error: string | undefined;
+    let detail: string | undefined;
     for (const id of todo) {
       if (Date.now() > deadline || signal.aborted) break;
       seenGofile.add(id);
-      const r = await gofileFiles(id, signal).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
+      const r: GofileResult = await gofileFiles(id, signal).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
       error ??= r.error;
+      detail ??= r.detail;
       for (const f of r.files) {
         media.push({
           id: f.src,
@@ -630,7 +632,7 @@ export async function* crawl(
         });
       }
     }
-    return { media, error };
+    return { media, error, detail };
   };
 
   const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
@@ -737,7 +739,10 @@ export async function* crawl(
         events.push({
           type: "note",
           url,
-          message: g.error ?? (g.media.length ? "Gofile のファイルは見つかりましたが、読めませんでした（有料会員限定・期限切れの可能性があります）" : "この Gofile フォルダに画像・動画はありませんでした"),
+          message:
+            (g.error ?? "") && g.detail
+              ? `${g.error}\n［診断］${g.detail}`
+              : g.error ?? (g.media.length ? "Gofile のファイルは見つかりましたが、読めませんでした（有料会員限定・期限切れの可能性があります）" : "この Gofile フォルダに画像・動画はありませんでした"),
         });
       }
       return events;

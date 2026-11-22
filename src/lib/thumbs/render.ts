@@ -93,8 +93,8 @@ export interface Rendered {
    * 「もっと見る」・下までスクロールで一覧を足すサイトは、投稿のリンクがここにしかない
    */
   tweets: string[];
-  /** captureJson に合った返事の中身 */
-  json: { url: string; data: unknown }[];
+  /** captureJson に合った返事の中身（auth: その問い合わせでページが送った認証ヘッダー） */
+  json: { url: string; data: unknown; auth?: string }[];
   /** 表示中にサイトから渡された Cookie（年齢確認の結果など）。以降の普通の読み込みでも使う */
   cookies: { name: string; value: string; domain: string }[];
 }
@@ -428,7 +428,7 @@ export async function renderPage(
     /** 中身を確かめている途中の返事（拡張子のない配信の目次など）。結果を返す前に待つ */
     const peeks = new Set<Promise<void>>();
     const tweets = new Set<string>();
-    const captured: { url: string; data: unknown }[] = [];
+    const captured: { url: string; data: unknown; auth?: string }[] = [];
     /** ページが読み込んだデータ（JSON・HTML の断片）の中の、動画の URL と X の投稿の番号を拾う */
     const scan = (res: HTTPResponse, referer: string | undefined) => {
       const job = (async () => {
@@ -470,7 +470,7 @@ export async function renderPage(
       }
       if (options.captureJson?.test(resUrl) && req.method() !== "OPTIONS" && captured.length < 20) {
         const job = Promise.race([res.json(), sleep(5000).then(() => undefined)])
-          .then((data) => void (data !== undefined && captured.push({ url: resUrl, data })))
+          .then((data) => void (data !== undefined && captured.push({ url: resUrl, data, auth: req.headers().authorization })))
           .catch(() => {});
         peeks.add(job);
         void job.finally(() => peeks.delete(job));
@@ -542,6 +542,15 @@ export async function renderPage(
     await page.waitForNetworkIdle({ idleTime: 600, timeout: 5000 }).catch(() => {});
     loaded = true;
 
+    // ページ自身のスクリプトが、あとから問い合わせを出すことがある（ゲスト登録 → 一覧、の順など）。
+    // 取っておきたい返事が届くまで、最大 10 秒待つ
+    if (options.captureJson) {
+      const until = Date.now() + 10000;
+      while (!captured.length && Date.now() < until && !signal.aborted) {
+        await sleep(300);
+        if (peeks.size) await Promise.race([Promise.all([...peeks]), sleep(500)]);
+      }
+    }
     // 再生ボタンを押して、動画の読み込みを始めさせる（読み込まれた動画の URL は通信の記録に残る）。
     // 1 回目のタップは広告の板に取られることが多いので、動画が読み込まれるまで最大 3 回押し直す
     if (options.play && !signal.aborted) {
