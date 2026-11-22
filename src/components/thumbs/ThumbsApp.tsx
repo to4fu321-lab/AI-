@@ -857,7 +857,13 @@ function JobRow({
         {job.errors > 0 && job.status !== "error" && job.message && found === 0 && !job.note && (
           <span className="line-clamp-2 text-amber-600 dark:text-amber-400">⚠ {job.message}</span>
         )}
-        {job.note && <span className="line-clamp-3 text-amber-600 dark:text-amber-400">⚠ {job.note}</span>}
+        {job.note && (
+          <span
+            className={`text-amber-600 dark:text-amber-400 ${job.note.includes("［診断］") ? "block whitespace-pre-line break-all" : "line-clamp-3"}`}
+          >
+            ⚠ {job.note}
+          </span>
+        )}
       </button>
       <button
         type="button"
