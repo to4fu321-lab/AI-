@@ -17,6 +17,11 @@ export interface MediaItem {
   /** HTML に書かれていたサイズ（あれば） */
   width?: number;
   height?: number;
+  /**
+   * URL の見た目だけで動画と判断したもの（リンクやスクリプト内の文字列）。
+   * 本当に動画ファイルか、サーバーが一覧に出す前に確かめる。画面には送らない
+   */
+  unverified?: boolean;
 }
 
 /** /api/thumbs/crawl が 1 行ずつ返すイベント（NDJSON）。 */

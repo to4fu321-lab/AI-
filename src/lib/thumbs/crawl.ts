@@ -106,6 +106,82 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
   }
 }
 
+async function readHead(res: Response, n: number): Promise<Uint8Array> {
+  if (!res.body) return new Uint8Array();
+  const reader = res.body.getReader();
+  const out = new Uint8Array(n);
+  let got = 0;
+  while (got < n) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const part = value.subarray(0, n - got);
+    out.set(part, got);
+    got += part.byteLength;
+  }
+  await reader.cancel().catch(() => {});
+  return out.subarray(0, got);
+}
+
+/** 先頭のバイトが動画の形式に見えるか（MP4/MOV・WebM・MPEG-TS・HLS） */
+function looksLikeVideo(b: Uint8Array): boolean {
+  if (b.length < 4) return false;
+  const text = new TextDecoder("latin1").decode(b);
+  if (text.slice(4, 8) === "ftyp" || /^....(moov|mdat|wide|free|skip)/.test(text)) return true; // MP4 / MOV
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return true; // WebM / MKV
+  if (b[0] === 0x47 && (b.length < 189 || b[188] === 0x47)) return true; // MPEG-TS
+  if (text.startsWith("#EXTM3U")) return true; // HLS
+  if (text.startsWith("OggS")) return true;
+  return false;
+}
+
+/** 動画ファイルかどうかの確認結果（同じ実行中は使い回す） */
+const videoCheckCache = new Map<string, Promise<boolean>>();
+
+/** 先頭 2 バイトだけ取りに行き、本当に動画ファイルが返ってくるか確かめる */
+function isRealVideo(url: string, signal: AbortSignal): Promise<boolean> {
+  let check = videoCheckCache.get(url);
+  if (!check) {
+    check = safeFetch(url, { headers: { range: "bytes=0-63" }, timeoutMs: 6000, signal })
+      .then(async ({ res, url: finalUrl }) => {
+        if (res.status !== 200 && res.status !== 206) {
+          await res.body?.cancel().catch(() => {});
+          return false;
+        }
+        const type = res.headers.get("content-type");
+        const labeled =
+          kindFromContentType(type) === "video" || ((!type || type.includes("octet-stream")) && kindFromUrl(finalUrl) === "video");
+        if (!labeled) {
+          await res.body?.cancel().catch(() => {});
+          return false;
+        }
+        // 「動画」と名乗っていても中身が HTML のサーバーがあるので、先頭のバイトも確かめる
+        const head = await readHead(res, 64);
+        return looksLikeVideo(head);
+      })
+      .catch(() => false);
+    videoCheckCache.set(url, check);
+    if (videoCheckCache.size > 5000) videoCheckCache.delete(videoCheckCache.keys().next().value!);
+  }
+  return check;
+}
+
+/**
+ * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
+ * 一度に確かめる数は 8 件まで。
+ */
+async function verifyVideos(items: MediaItem[], signal: AbortSignal): Promise<MediaItem[]> {
+  const ok = new Map<MediaItem, boolean>();
+  const pending = items.filter((m) => m.unverified);
+  for (let i = 0; i < pending.length; i += 8) {
+    const batch = pending.slice(i, i + 8);
+    const results = await Promise.all(batch.map((m) => isRealVideo(m.src, signal)));
+    batch.forEach((m, j) => ok.set(m, results[j]));
+  }
+  return items
+    .filter((m) => !m.unverified || ok.get(m))
+    .map((m) => (m.unverified ? { ...m, unverified: undefined } : m));
+}
+
 /** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
 export const MAX_QUEUE = 5000;
 export const MAX_SEEN = 20000;
@@ -217,12 +293,13 @@ export async function* crawl(
         ...extracted.media,
         ...network.map((n) => ({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, format: formatOf(n.url, n.kind) })),
       ];
-      const fresh: MediaItem[] = [];
+      const candidates: MediaItem[] = [];
       for (const m of media) {
         if (seenMedia.has(m.id)) continue;
         seenMedia.add(m.id);
-        fresh.push(m);
+        candidates.push(m);
       }
+      const fresh = await verifyVideos(candidates, signal);
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
       if (depth === 0) {

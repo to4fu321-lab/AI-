@@ -222,6 +222,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       // 既にあるなら、足りない情報（サムネ・タイトル）だけ補う
       existing.thumb ??= item.thumb;
       existing.title ??= item.title;
+      // どこか 1 か所でも確かな出どころ（<video> など）があれば確認済み扱い
+      if (!item.unverified) existing.unverified = undefined;
       return;
     }
     found.set(id, { ...item, id, pageUrl });
@@ -365,7 +367,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (addEmbed(url, t.attrs.title)) continue;
     const kind = kindFromUrl(url);
     if (kind) {
-      add({ kind, src: url, format: formatOf(url, kind), title: t.attrs.title });
+      add({ kind, src: url, format: formatOf(url, kind), title: t.attrs.title, unverified: kind === "video" });
     } else {
       links.push(url);
     }
@@ -384,7 +386,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const unescaped = html.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/");
   for (const m of unescaped.matchAll(/https?:\/\/[^\s"'<>\\()]+?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),])/gi)) {
     const url = resolveUrl(m[0], base);
-    if (url) add({ kind: "video", src: url, format: formatOf(url, "video") });
+    if (url) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
   }
 
   // --- 7. CSS の背景画像（style="background-image:url(...)" や <style> 内） ---
@@ -403,7 +405,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const url = resolveUrl(raw, base);
     if (!url) continue;
     const kind = kindFromUrl(url);
-    if (kind) add({ kind, src: url, format: formatOf(url, kind) });
+    if (kind) add({ kind, src: url, format: formatOf(url, kind), unverified: kind === "video" });
   }
 
   // --- 9. JavaScript のデータ（Next.js / Nuxt などが埋め込む JSON）の中の画像 URL ---
@@ -424,11 +426,11 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     }
   }
 
-  // 動画にポスターがない場合、ページの OGP 画像を代わりに使う
-  if (ogImage) {
-    for (const item of found.values()) {
-      if (item.kind !== "image" && !item.thumb) item.thumb = ogImage;
-    }
+  // ページの代表動画（og:video）にポスターがない場合だけ、OGP 画像を代わりに使う。
+  // 他の動画に使うと、全部同じサイトのロゴ画像になってしまうため
+  if (ogImage && ogVideo) {
+    const main = found.get(ogVideo);
+    if (main && !main.thumb) main.thumb = ogImage;
   }
 
   const pagination = findPagination(markup, tags, base, pageUrl);
