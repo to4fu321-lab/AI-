@@ -1,7 +1,7 @@
 import { guardApi } from "@/lib/access/locks";
 import { extensionOf, kindFromContentType } from "@/lib/thumbs/extract";
 import { checkMedia } from "@/lib/thumbs/probe";
-import { FetchBlockedError, safeFetch } from "@/lib/thumbs/safeFetch";
+import { CookieJar, FetchBlockedError, safeFetch } from "@/lib/thumbs/safeFetch";
 import { isVagueType, looksLikePlaylist, mediaMime, readHead } from "@/lib/thumbs/sniff";
 
 export const runtime = "nodejs";
@@ -34,6 +34,9 @@ export async function GET(request: Request) {
   /** HLS の目次から呼ばれた断片・鍵・下位の目次 */
   const part = params.get("part") === "1";
   const referer = ref && /^https?:\/\//.test(ref) ? ref : undefined;
+  // ck：ファイルを読むときに送る Cookie（Gofile のゲスト用の合言葉など）。書かれたドメイン宛てにだけ送る
+  const ck = params.get("ck") ?? undefined;
+  const jar = CookieJar.withItemCookie(undefined, ck);
 
   // check=1：中継せず、リンクが生きているかだけ答える（画面が、保存済みの一覧のリンク切れを外すために使う）
   if (params.get("check") === "1") {
@@ -41,7 +44,7 @@ export async function GET(request: Request) {
     const kind = k === "embed" || k === "image" ? k : "video";
     let alive: string;
     try {
-      alive = (await checkMedia({ kind, src: target, referer, pageUrl: referer ?? target }, request.signal)).result;
+      alive = (await checkMedia({ kind, src: target, referer, pageUrl: referer ?? target, cookie: ck }, request.signal)).result;
     } catch {
       alive = "unknown";
     }
@@ -55,10 +58,10 @@ export async function GET(request: Request) {
   let upstream: Response;
   let finalUrl: string;
   try {
-    ({ res: upstream, url: finalUrl } = await fetchUpstream(target, referer, forwardRange, request.signal));
+    ({ res: upstream, url: finalUrl } = await fetchUpstream(target, referer, forwardRange, request.signal, jar));
     if (upstream.status === 206 && /mpegurl/i.test(upstream.headers.get("content-type") ?? "")) {
       await upstream.body?.cancel();
-      ({ res: upstream, url: finalUrl } = await fetchUpstream(target, referer, null, request.signal));
+      ({ res: upstream, url: finalUrl } = await fetchUpstream(target, referer, null, request.signal, jar));
     }
   } catch (err) {
     const message = err instanceof FetchBlockedError ? err.message : "取得できませんでした";
@@ -82,21 +85,21 @@ export async function GET(request: Request) {
     if (!looksLikePlaylist(bytes)) return new Response("配信の目次ファイルではありませんでした", { status: 415 });
     out.set("content-type", "application/vnd.apple.mpegurl");
     out.set("cache-control", "no-store");
-    return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer), { status: 200, headers: out });
+    return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer, ck), { status: 200, headers: out });
   }
 
   // サーバーが中身をはっきり名乗っていれば、それを使う。
   // 「ダウンロード用」（force-download・octet-stream など）や名乗りがないときは、ファイルの先頭の中身で決める
   let kind = isVagueType(type) ? null : kindFromContentType(type);
   if (!kind && !part) {
-    const sniffed = await sniffMime(target, referer, request.signal);
+    const sniffed = await sniffMime(target, referer, request.signal, jar);
     if (sniffed && /mpegurl/i.test(sniffed) && upstream.status === 200) {
       // 拡張子も種類の名乗りもない配信の目次（.txt・.jpg などに見せかけたもの）。中の URL を中継経由に書き換える
       const bytes = await readHead(upstream, MAX_PLAYLIST_BYTES);
       if (looksLikePlaylist(bytes)) {
         out.set("content-type", "application/vnd.apple.mpegurl");
         out.set("cache-control", "no-store");
-        return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer), { status: 200, headers: out });
+        return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer, ck), { status: 200, headers: out });
       }
     }
     if (sniffed) {
@@ -119,7 +122,7 @@ export async function GET(request: Request) {
       const playlist = looksLikePlaylist(bytes);
       out.set("content-type", playlist ? "application/vnd.apple.mpegurl" : "application/octet-stream");
       out.set("cache-control", "no-store");
-      const data = playlist ? rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer) : (bytes as Uint8Array<ArrayBuffer>);
+      const data = playlist ? rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer, ck) : (bytes as Uint8Array<ArrayBuffer>);
       return new Response(data, { status: 200, headers: out });
     }
     kind = "video";
@@ -151,7 +154,7 @@ export async function GET(request: Request) {
     let total = encoded ? NaN : Number(upstream.headers.get("content-length"));
     if (!(total > 0) && !download && kind === "video") {
       // 全体の大きさを名乗らないサーバー。Safari は大きさがわからないと再生しないので、一度最後まで読んで数える（覚えておく）
-      total = (await measureLength(target, referer, request.signal)) ?? NaN;
+      total = (await measureLength(target, referer, request.signal, jar)) ?? NaN;
     }
     if (Number.isFinite(total) && total > 0 && body) {
       const start = wanted.suffix !== undefined ? Math.max(0, total - wanted.suffix) : wanted.start;
@@ -193,7 +196,7 @@ const okStatus = (s: number) => (s >= 200 && s < 300) || s === 206;
  * - 部分取得（Range）：ダウンロード用の仕組み（download.php など）には、部分取得を頼むとエラーを返すものがある。
  *   その場合は部分取得を頼まずに読み直す（必要な部分は呼ぶ側で切り出す）
  */
-async function fetchUpstream(target: string, referer: string | undefined, range: string | null, signal: AbortSignal) {
+async function fetchUpstream(target: string, referer: string | undefined, range: string | null, signal: AbortSignal, jar?: CookieJar) {
   let own: string | undefined;
   try {
     own = `${new URL(target).origin}/`;
@@ -210,7 +213,7 @@ async function fetchUpstream(target: string, referer: string | undefined, range:
       if (rangeToTry) headers.range = rangeToTry;
       if (refererToTry) headers.referer = refererToTry;
       // 時間切れは「返事が届くまで」だけ。中身は時間をかけて流してよい（大きな動画が途中で切れないように）
-      last = await safeFetch(target, { headers, timeoutMs: 30000, signal, streamBody: true });
+      last = await safeFetch(target, { headers, timeoutMs: 30000, signal, streamBody: true, jar });
       if (okStatus(last.res.status)) return last;
       // ファイルがない（404・410）なら、やり方を変えても同じ
       if (last.res.status === 404 || last.res.status === 410) return last;
@@ -224,13 +227,13 @@ const lengthCache = new Map<string, Promise<number | null>>();
 /** 数えるのは 1 GB まで・2 分まで */
 const MAX_MEASURE_BYTES = 1024 * 1024 * 1024;
 
-function measureLength(target: string, referer: string | undefined, signal: AbortSignal): Promise<number | null> {
+function measureLength(target: string, referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<number | null> {
   let job = lengthCache.get(target);
   if (!job) {
     job = (async () => {
       try {
         const limit = AbortSignal.any([signal, AbortSignal.timeout(120000)]);
-        const { res } = await fetchUpstream(target, referer, null, limit);
+        const { res } = await fetchUpstream(target, referer, null, limit, jar);
         if (!okStatus(res.status) || !res.body) return null;
         const reader = res.body.getReader();
         let size = 0;
@@ -257,12 +260,12 @@ function measureLength(target: string, referer: string | undefined, signal: Abor
 /** 先頭の中身から決めた種類（同じサーバーが動いている間は覚えておく） */
 const sniffCache = new Map<string, string | null>();
 
-async function sniffMime(target: string, referer: string | undefined, signal: AbortSignal): Promise<string | null> {
+async function sniffMime(target: string, referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<string | null> {
   const known = sniffCache.get(target);
   if (known !== undefined) return known;
   let mime: string | null = null;
   try {
-    const { res } = await fetchUpstream(target, referer, "bytes=0-511", signal);
+    const { res } = await fetchUpstream(target, referer, "bytes=0-511", signal, jar);
     if (okStatus(res.status)) mime = mediaMime(await readHead(res, 512));
     else await res.body?.cancel().catch(() => {});
   } catch {
@@ -277,13 +280,14 @@ async function sniffMime(target: string, referer: string | undefined, signal: Ab
  * HLS の目次に書かれた URL（断片・下位の目次・暗号の鍵）を、この中継経由の URL に書き換える。
  * こうしておくと、プレーヤーが目次の先を読みに行くときも、同じ Referer で中継される
  */
-function rewritePlaylist(text: string, baseUrl: string, referer: string | undefined): string {
+function rewritePlaylist(text: string, baseUrl: string, referer: string | undefined, ck?: string): string {
   const via = (raw: string): string => {
     try {
       const abs = new URL(raw.trim(), baseUrl);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") return raw;
       const p = new URLSearchParams({ url: abs.toString() });
       if (referer) p.set("ref", referer);
+      if (ck) p.set("ck", ck);
       p.set("part", "1");
       return `/api/thumbs/media?${p}`;
     } catch {

@@ -2,6 +2,17 @@ import type { MediaItem } from "./types";
 import { parseClock, parseIsoDuration } from "./duration";
 import { hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
+import { findTweetIds, gifVideoFromThumb, isTwitterVideoThumb, tweetIdOf } from "./twitter";
+
+/** Gofile の共有フォルダの番号（gofile.io/d/番号。違えば null）。gofile.ts はサーバー専用なので、ここにも小さく持つ */
+export function gofileLinkId(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    return /(?:^|\.)gofile\.io$/i.test(u.hostname) ? (/^\/d\/([\w-]{4,40})/.exec(u.pathname)?.[1] ?? null) : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * HTML からメディア（画像・動画）と、辿る候補のリンクを取り出す。
@@ -238,6 +249,19 @@ export interface Extracted {
   redirect?: string;
   /** 年齢確認などの「入口ページ」に見えるか（ブラウザで開いて「はい」を押す目安） */
   gate: boolean;
+  /**
+   * リンクなどで見つけた X（旧 Twitter）の投稿。投稿ページはログインが必要で読めないので、
+   * 辿らずに、投稿の番号から動画を直接もらう（twitter.ts）。カードのサムネイル・再生時間も一緒に持つ
+   */
+  tweets: TweetRef[];
+  /** リンクなどで見つけた Gofile の共有フォルダの番号（gofile.io/d/番号）。ページは読まず、API で中身をもらう */
+  gofile: string[];
+}
+
+export interface TweetRef {
+  id: string;
+  thumb?: string;
+  duration?: number;
 }
 
 /** 年齢確認・入口ページらしい文言 */
@@ -432,7 +456,10 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const pageTitle = titleMatch ? decodeEntities(titleMatch[1]).trim().slice(0, 200) : undefined;
 
   const found = new Map<string, MediaItem>();
-  const add = (item: Omit<MediaItem, "id" | "pageUrl">): MediaItem => {
+  const add = (raw: Omit<MediaItem, "id" | "pageUrl">): MediaItem => {
+    // ファイル保存サービスのプレビュー画面の URL（Dropbox の …/名前.mp4?dl=0 など）は、ファイルそのものの URL に直す
+    const hosted = raw.kind !== "embed" ? hostedFile(raw.src) : null;
+    const item = hosted && hosted.src !== raw.src ? { ...raw, src: hosted.src, format: hosted.service, thumb: raw.thumb ?? hosted.thumb } : raw;
     const id = item.src;
     const existing = found.get(id);
     if (existing) {
@@ -484,6 +511,13 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     new Set(["meta", "img", "source", "video", "a", "iframe", "frame", "embed", "object", "link", "image"]),
   );
   const frames = new Set<string>();
+  const tweets = new Map<string, TweetRef>();
+  const gofile = new Set<string>();
+  const addTweet = (id: string, thumb?: string, duration?: number) => {
+    if (tweets.size >= 150 && !tweets.has(id)) return;
+    const prev = tweets.get(id);
+    tweets.set(id, { id, thumb: prev?.thumb ?? thumb, duration: prev?.duration ?? duration });
+  };
 
   // --- 1. OGP / Twitter カード（ページの代表サムネイル） ---
   let ogImage: string | undefined;
@@ -585,7 +619,13 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       add({ kind, src: url, format: formatOf(url, kind) });
     } else if (t.name === "iframe" || t.name === "frame" || t.name === "embed" || t.name === "object") {
       const url = resolveUrl(t.attrs.src || t.attrs["data-src"] || t.attrs["data-lazy-src"] || t.attrs.data, base);
-      if (!url || addEmbed(url, t.attrs.title)) continue;
+      if (!url) continue;
+      const tweet = tweetIdOf(url) ?? /platform\.twitter\.com\/embed\/Tweet\.html\?(?:.*&)?id=(\d{8,20})/.exec(url)?.[1];
+      if (tweet) {
+        addTweet(tweet);
+        continue;
+      }
+      if (addEmbed(url, t.attrs.title)) continue;
       const kind = kindFromUrl(url);
       if (kind === "video") add({ kind, src: url, format: formatOf(url, kind), unverified: true });
       else if (!kind && isPageLikeUrl(url) && url !== pageUrl && !AD_FRAME_RE.test(url) && !isAdUrl(url)) frames.add(url);
@@ -617,6 +657,19 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (t.name !== "a") continue;
     const url = resolveUrl(t.attrs.href, base);
     if (!url) continue;
+    // Gofile の共有フォルダへのリンク：辿らずに、番号として集める
+    const share = gofileLinkId(url);
+    if (share) {
+      gofile.add(share);
+      continue;
+    }
+    // X の投稿へのリンク：辿らずに、投稿の番号として集める（カードのサムネイル・再生時間も）
+    const tweet = tweetIdOf(url);
+    if (tweet) {
+      const info = anchors.get(url);
+      addTweet(tweet, info?.thumb, info?.duration);
+      continue;
+    }
     const added = addEmbed(url, t.attrs.title);
     if (added) {
       // 一覧のカードのサムネイル・再生時間を、埋め込み動画・共有ファイルにも付ける
@@ -821,6 +874,17 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     }
   }
 
+  // スクリプト・data 属性の中の投稿の番号（JavaScript で一覧を描くサイト・埋め込み投稿）
+  for (const id of findTweetIds(html, 150)) addTweet(id);
+  for (const m of html.replace(/\\\//g, "/").matchAll(/gofile\.io\/d\/([\w-]{4,40})/g)) if (gofile.size < 30) gofile.add(m[1]);
+  // X の動画のサムネイルは画像としては出さない（動画の表紙なので）。GIF アニメは表紙の名前から動画がわかる
+  for (const m of [...found.values()]) {
+    if (m.kind !== "image" || !isTwitterVideoThumb(m.src)) continue;
+    found.delete(m.id);
+    const gif = gifVideoFromThumb(m.src);
+    if (gif && !found.has(gif)) add({ kind: "video", src: gif, thumb: m.src, format: "GIF→MP4", title: m.title });
+  }
+
   const pagination = findPagination(markup, tags, base, pageUrl);
   const clientRendered =
     /__NEXT_DATA__|self\.__next_f|window\.__NUXT__|id=["']__nuxt["']|data-reactroot|id=["'](?:root|app)["']\s*>\s*<\/div>|ng-version=/i.test(html) ||
@@ -843,6 +907,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     title: pageTitle,
     redirect,
     gate,
+    tweets: [...tweets.values()],
+    gofile: [...gofile],
   };
 }
 

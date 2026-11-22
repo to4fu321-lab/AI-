@@ -3,6 +3,7 @@ import type { Browser, Frame, HTTPRequest, HTTPResponse, Page } from "puppeteer-
 import { isAdUrl } from "./adblock";
 import { extensionOf, kindFromContentType, kindFromUrl } from "./extract";
 import { assertPublicUrl } from "./safeFetch";
+import { findTweetIds } from "./twitter";
 
 /**
  * 本物のブラウザ（Chromium）でページを開いて、JavaScript が描き終わった後の HTML を得る。
@@ -87,6 +88,11 @@ export interface Rendered {
   frames: { url: string; html: string }[];
   /** ページ本体の HTTP ステータス（403 などなら、ブラウザでも断られている） */
   status: number;
+  /**
+   * 表示中にページが読み込んだデータ（JSON・HTML の断片）の中にあった X の投稿の番号。
+   * 「もっと見る」・下までスクロールで一覧を足すサイトは、投稿のリンクがここにしかない
+   */
+  tweets: string[];
   /** 表示中にサイトから渡された Cookie（年齢確認の結果など）。以降の普通の読み込みでも使う */
   cookies: { name: string; value: string; domain: string }[];
 }
@@ -414,6 +420,27 @@ export async function renderPage(
     });
     /** 中身を確かめている途中の返事（拡張子のない配信の目次など）。結果を返す前に待つ */
     const peeks = new Set<Promise<void>>();
+    const tweets = new Set<string>();
+    /** ページが読み込んだデータ（JSON・HTML の断片）の中の、動画の URL と X の投稿の番号を拾う */
+    const scan = (res: HTTPResponse, referer: string | undefined) => {
+      const job = (async () => {
+        const body = await Promise.race([res.text(), sleep(3000).then(() => null)]).catch(() => null);
+        if (!body) return;
+        // 中身が配信の目次（拡張子のない HLS・DASH）なら、それ自体が動画
+        const head = body.slice(0, 512).replace(/^\uFEFF/, "").trimStart();
+        if (head.startsWith("#EXTM3U")) return record({ url: res.url(), kind: "video", format: "M3U8", referer });
+        if (/<MPD[\s>]/.test(head)) return record({ url: res.url(), kind: "video", format: "MPD", referer });
+        const text = body.slice(0, 2 * 1024 * 1024).replace(/\\\//g, "/");
+        for (const id of findTweetIds(text, 200)) if (tweets.size < 300) tweets.add(id);
+        let n = 0;
+        for (const m of text.matchAll(/https?:\/\/[^\s"'<>\\()]+?\.(?:mp4|m3u8|webm|mov)(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),]|$)/gi)) {
+          if (n++ > 100) break;
+          if (!isSegment(m[0], undefined)) record({ url: m[0], kind: "video", referer });
+        }
+      })();
+      peeks.add(job);
+      void job.finally(() => peeks.delete(job));
+    };
     const peek = (res: HTTPResponse, resUrl: string, referer: string | undefined) => {
       const job = (async () => {
         const body = await Promise.race([res.buffer(), sleep(3000).then(() => null)]).catch(() => null);
@@ -445,14 +472,9 @@ export async function renderPage(
       if (!kind) {
         // 拡張子も種類の名乗りもない、配信の目次（HLS・DASH）を、中身の先頭で見分ける
         const size = Number(headers["content-length"]);
-        if (
-          fetched &&
-          res.status() === 200 &&
-          !/json|javascript|css|html|image|font|woff|svg|protobuf|grpc/i.test(type ?? "") &&
-          !(size > 2 * 1024 * 1024) &&
-          peeks.size < 40
-        ) {
-          peek(res, resUrl, referer);
+        if (fetched && res.status() === 200 && !(size > 2 * 1024 * 1024) && peeks.size < 40) {
+          if (/json|html|text\/plain/i.test(type ?? "")) scan(res, referer);
+          else if (!/javascript|css|image|font|woff|svg|protobuf|grpc/i.test(type ?? "")) peek(res, resUrl, referer);
         }
         return;
       }
@@ -533,7 +555,7 @@ export async function renderPage(
       .cookies()
       .then((list) => list.slice(0, 100).map((c) => ({ name: c.name, value: c.value, domain: c.domain.replace(/^\./, "") })))
       .catch(() => []);
-    return { html, finalUrl: page.url(), network: [...network.values()], frames, status, cookies };
+    return { html, finalUrl: page.url(), network: [...network.values()], frames, status, cookies, tweets: [...tweets] };
   } finally {
     signal.removeEventListener("abort", onAbort);
     try {
