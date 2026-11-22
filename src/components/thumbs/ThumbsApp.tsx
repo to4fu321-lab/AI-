@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CrawlEvent, MediaItem } from "@/lib/thumbs/types";
+import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
+import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
 type Item = MediaItem & { jobId: string };
@@ -15,12 +16,15 @@ interface Job {
   errors: number;
   message?: string;
   truncated?: boolean;
+  settings?: CrawlSettings;
 }
 
 type Filter = "all" | "image" | "video";
 
 const STORAGE_KEY = "thumbs:v1";
-const MAX_ITEMS = 3000;
+/** 履歴と登録サイトは「すべて消す」をしても残すので、別の場所に保存する */
+const LIBRARY_KEY = "thumbs:library:v1";
+const MAX_ITEMS = 5000;
 
 export function proxyUrl(item: Pick<MediaItem, "src" | "pageUrl">, opts: { download?: boolean; name?: string } = {}) {
   const p = new URLSearchParams({ url: item.src, ref: item.pageUrl });
@@ -43,13 +47,18 @@ function hostOf(url: string) {
 export function ThumbsApp() {
   const [input, setInput] = useState("");
   const [depth, setDepth] = useState(1);
-  const [maxPages, setMaxPages] = useState(30);
+  const [maxPages, setMaxPages] = useState(100);
+  const [maxPagination, setMaxPagination] = useState(50);
+  const [crossSite, setCrossSite] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [jobFilter, setJobFilter] = useState<string | null>(null);
   const [viewer, setViewer] = useState<number | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [sites, setSites] = useState<SavedSite[]>([]);
+  const [now, setNow] = useState(0);
   const controllers = useRef(new Map<string, AbortController>());
   const loaded = useRef(false);
 
@@ -61,9 +70,13 @@ export function ThumbsApp() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       if (saved?.items) setItems(saved.items);
       if (saved?.jobs) setJobs(saved.jobs.map((j: Job) => (j.status === "running" ? { ...j, status: "stopped" } : j)));
+      const library = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "null");
+      if (Array.isArray(library?.history)) setHistory(library.history);
+      if (Array.isArray(library?.sites)) setSites(library.sites.slice(0, MAX_SITES));
     } catch {
       /* ignore */
     }
+    setNow(Date.now());
     loaded.current = true;
   }, []);
   useEffect(() => {
@@ -77,63 +90,92 @@ export function ThumbsApp() {
     }, 500);
     return () => clearTimeout(t);
   }, [items, jobs]);
+  useEffect(() => {
+    if (!loaded.current) return;
+    try {
+      localStorage.setItem(LIBRARY_KEY, JSON.stringify({ history, sites }));
+    } catch {
+      /* ignore */
+    }
+  }, [history, sites]);
+
+  /** 履歴の先頭に入れる（同じ URL があれば置き換え） */
+  const recordHistory = useCallback((entry: HistoryEntry) => {
+    setHistory((list) => [entry, ...list.filter((h) => h.url !== entry.url)].slice(0, MAX_HISTORY));
+  }, []);
 
   const updateJob = useCallback((id: string, patch: Partial<Job> | ((j: Job) => Partial<Job>)) => {
     setJobs((list) => list.map((j) => (j.id === id ? { ...j, ...(typeof patch === "function" ? patch(j) : patch) } : j)));
   }, []);
 
   const startJob = useCallback(
-    async (url: string) => {
+    async (url: string, override?: CrawlSettings) => {
+      const settings: CrawlSettings = override ?? { depth, maxPages, maxPagination, crossSite };
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const controller = new AbortController();
       controllers.current.set(id, controller);
-      setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0 }, ...list]);
+      setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
+      let pageCount = 0;
+      let foundCount = 0;
+      const startedAt = Date.now();
+      recordHistory({ url, at: startedAt, pages: 0, found: 0, settings });
 
       try {
-        const res = await fetch("/api/thumbs/crawl", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ url, depth, maxPages }),
-          signal: controller.signal,
-        });
-        if (!res.ok || !res.body) {
-          const data = await res.json().catch(() => ({}));
-          updateJob(id, { status: "error", message: data.error ?? `エラー（HTTP ${res.status}）` });
-          return;
-        }
-        // ストリームを 1 行ずつ読み、届いたものからすぐ画面に追加する
-        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-        let buffer = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += value;
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const event = JSON.parse(line) as CrawlEvent;
-            if (event.type === "page") updateJob(id, (j) => ({ pages: j.pages + 1 }));
-            else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
-            else if (event.type === "done") updateJob(id, { status: "done", truncated: event.truncated });
-            else if (event.type === "media") {
-              setItems((list) => {
-                const known = new Set(list.map((i) => i.id));
-                const fresh = event.items.filter((i) => !known.has(i.id)).map((i) => ({ ...i, jobId: id }));
-                return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
-              });
+        // サーバーは 1 回に約 40 秒までしか動けないので、「続き」が返ってきたら送り返して再開してもらう
+        let resume: CrawlState | undefined;
+        do {
+          const res = await fetch("/api/thumbs/crawl", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url, ...settings, resume }),
+            signal: controller.signal,
+          });
+          if (!res.ok || !res.body) {
+            const data = await res.json().catch(() => ({}));
+            updateJob(id, { status: "error", message: data.error ?? `エラー（HTTP ${res.status}）` });
+            return;
+          }
+          resume = undefined;
+          // ストリームを 1 行ずつ読み、届いたものからすぐ画面に追加する
+          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buffer = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += value;
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              const event = JSON.parse(line) as CrawlEvent;
+              if (event.type === "page") {
+                pageCount++;
+                updateJob(id, (j) => ({ pages: j.pages + 1 }));
+              }
+              else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
+              else if (event.type === "done") updateJob(id, { status: "done", truncated: event.truncated });
+              else if (event.type === "continue") resume = event.state;
+              else if (event.type === "media") {
+                foundCount += event.items.length;
+                setItems((list) => {
+                  const known = new Set(list.map((i) => i.id));
+                  const fresh = event.items.filter((i) => !known.has(i.id)).map((i) => ({ ...i, jobId: id }));
+                  return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
+                });
+              }
             }
           }
-        }
+        } while (resume && !controller.signal.aborted);
         updateJob(id, (j) => (j.status === "running" ? { status: "done" } : {}));
       } catch (err) {
         if (controller.signal.aborted) updateJob(id, { status: "stopped" });
         else updateJob(id, { status: "error", message: err instanceof Error ? err.message : String(err) });
       } finally {
         controllers.current.delete(id);
+        recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, updateJob],
+    [depth, maxPages, maxPagination, crossSite, updateJob, recordHistory],
   );
 
   const onSubmit = (e: React.FormEvent) => {
@@ -160,6 +202,11 @@ export function ThumbsApp() {
     setInput("");
     for (const u of valid) void startJob(u);
   };
+
+  const saveSite = (url: string, settings: CrawlSettings) => {
+    setSites((list) => (list.some((s) => s.url === url) || list.length >= MAX_SITES ? list : [...list, { url, settings }]));
+  };
+  const removeSite = (url: string) => setSites((list) => list.filter((s) => s.url !== url));
 
   const stopJob = (id: string) => controllers.current.get(id)?.abort();
   const removeJob = (id: string) => {
@@ -241,30 +288,42 @@ export function ThumbsApp() {
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               下の階層
-              <select
-                value={depth}
-                onChange={(e) => setDepth(Number(e.target.value))}
-                className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900"
-              >
-                <option value={0}>辿らない</option>
-                <option value={1}>1階層</option>
-                <option value={2}>2階層</option>
-                <option value={3}>3階層</option>
+              <select value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+                {[0, 1, 2, 3, 5, 10, 15, 20].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "辿らない" : `${n}階層`}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="flex items-center gap-1.5">
-              最大
-              <select
-                value={maxPages}
-                onChange={(e) => setMaxPages(Number(e.target.value))}
-                className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900"
-              >
-                {[10, 30, 60, 100].map((n) => (
+              ページ送り
+              <select value={maxPagination} onChange={(e) => setMaxPagination(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+                {[0, 10, 30, 50].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "しない" : `${n}ページまで`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5">
+              全体で最大
+              <select value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+                {[30, 100, 300, 1000].map((n) => (
                   <option key={n} value={n}>
                     {n}ページ
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={crossSite}
+                onChange={(e) => setCrossSite(e.target.checked)}
+                className="h-4 w-4 accent-fuchsia-500"
+              />
+              別のサイトへのリンクも辿る
             </label>
             {running && <span className="animate-pulse font-semibold text-fuchsia-500">取得中…</span>}
           </div>
@@ -272,6 +331,16 @@ export function ThumbsApp() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4">
+        <Library
+          sites={sites}
+          history={history}
+          now={now}
+          onRun={(url, settings) => void startJob(url, settings)}
+          onSave={saveSite}
+          onRemoveSite={removeSite}
+          onRemoveHistory={(url) => setHistory((list) => list.filter((h) => h.url !== url))}
+          onClearHistory={() => confirm("履歴をすべて消しますか？") && setHistory([])}
+        />
         {jobs.length > 0 && (
           <ul className="mt-3 flex flex-col gap-1.5">
             {jobs.map((job) => (
@@ -282,6 +351,9 @@ export function ThumbsApp() {
                 active={jobFilter === job.id}
                 onSelect={() => setJobFilter(jobFilter === job.id ? null : job.id)}
                 onStop={() => stopJob(job.id)}
+                saved={sites.some((s) => s.url === job.url)}
+                canSave={sites.length < MAX_SITES}
+                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite })}
                 onRemove={() => removeJob(job.id)}
               />
             ))}
@@ -346,7 +418,10 @@ function EmptyState() {
       <p className="mt-3 font-semibold text-neutral-700 dark:text-neutral-300">URL を入れると、その先の画像・動画のサムネイルを集めます</p>
       <ul className="mt-4 space-y-1.5 text-left text-xs">
         <li>・続けて別の URL を入れると、一覧にどんどん追加されます（改行区切りでまとめて入力も可）</li>
-        <li>・「下の階層」を選ぶと、入力したページより下のページもリンクを辿って集めます</li>
+        <li>・「下の階層」を選ぶと、入力したページより下のページもリンクを辿って集めます（最大20階層）</li>
+        <li>・「ページ送り」で、2ページ目・次へ などの続きのページも集めます（最大50ページ）</li>
+        <li>・「別のサイトへのリンクも辿る」にすると、リンク先の別サイトからも集めます</li>
+        <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
         <li>・🎬 は動画、🖼 は画像。タップで再生・拡大、ダウンロードもできます</li>
         <li>・一覧はこの端末のブラウザに保存されます</li>
       </ul>
@@ -357,6 +432,9 @@ function EmptyState() {
 function JobRow({
   job,
   found,
+  saved,
+  canSave,
+  onSave,
   active,
   onSelect,
   onStop,
@@ -364,6 +442,9 @@ function JobRow({
 }: {
   job: Job;
   found: number;
+  saved: boolean;
+  canSave: boolean;
+  onSave: () => void;
   active: boolean;
   onSelect: () => void;
   onStop: () => void;
@@ -395,6 +476,16 @@ function JobRow({
         <span className={`block truncate ${job.status === "error" ? "text-red-500" : "text-neutral-400"}`}>
           {status} ・ {found}件
         </span>
+      </button>
+      <button
+        type="button"
+        onClick={onSave}
+        disabled={saved || !canSave}
+        aria-label={saved ? "登録済み" : "このサイトを登録"}
+        title={saved ? "登録済み" : canSave ? "このサイトを登録" : "登録は5個までです"}
+        className={`shrink-0 px-1 text-base ${saved ? "text-amber-400" : "text-neutral-300 hover:text-amber-400 disabled:opacity-40"}`}
+      >
+        {saved ? "★" : "☆"}
       </button>
       {job.status === "running" ? (
         <button type="button" onClick={onStop} className="shrink-0 rounded-full bg-neutral-100 px-2.5 py-1 font-semibold dark:bg-neutral-800">

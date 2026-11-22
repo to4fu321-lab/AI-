@@ -157,7 +157,51 @@ function toInt(v: string | undefined): number | undefined {
 export interface Extracted {
   media: MediaItem[];
   links: string[];
+  /** ページ送り（次へ・2・3…）のリンク。階層を増やさずに辿る */
+  pagination: string[];
   title?: string;
+}
+
+/** URL がページ番号付きに見えるか（?page=2、/page/3、-p4 など） */
+const PAGE_URL_RE =
+  /[?&](?:page|p|paged|pg|pn|pagenum|pageno|offset|start)=\d+|\/page\/\d+|\/p\d+\/?$|[-_/]page[-_]?\d+/i;
+/** 「次へ」系のリンク文字 */
+const NEXT_TEXT_RE = /^(?:次へ|次のページ|次ページ|もっと見る|さらに表示|next|older|more|›|»|≫|>|→)/i;
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+function stripTags(html: string): string {
+  return decodeEntities(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+function findPagination(markup: string, tags: Tag[], base: string, pageUrl: string): string[] {
+  const out = new Set<string>();
+  const accept = (url: string | null) => {
+    if (url && url !== pageUrl && sameOrigin(url, pageUrl) && isPageLikeUrl(url)) out.add(url);
+  };
+  // <link rel="next"> / <a rel="next">
+  for (const t of tags) {
+    if ((t.name === "link" || t.name === "a") && /\bnext\b/i.test(t.attrs.rel ?? "")) accept(resolveUrl(t.attrs.href, base));
+  }
+  for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs: Record<string, string> = {};
+    for (const a of m[1].matchAll(ATTR_RE)) attrs[a[1].toLowerCase()] = decodeEntities(a[2] ?? a[3] ?? a[4] ?? "");
+    const url = resolveUrl(attrs.href, base);
+    if (!url) continue;
+    const text = (stripTags(m[2]) || attrs["aria-label"] || attrs.title || "").slice(0, 40);
+    const hint = `${attrs.class ?? ""} ${attrs["aria-label"] ?? ""} ${attrs.rel ?? ""}`;
+    const pageish = PAGE_URL_RE.test(url) || /pag(e|ination|er)|next/i.test(hint);
+    if (NEXT_TEXT_RE.test(text) && text.length <= 20) accept(url);
+    else if (/^\d{1,4}$/.test(text) && pageish) accept(url);
+    else if (PAGE_URL_RE.test(url)) accept(url);
+  }
+  return [...out];
 }
 
 export function extractFromHtml(html: string, pageUrl: string): Extracted {
@@ -348,7 +392,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     }
   }
 
-  return { media: [...found.values()], links: [...new Set(links)], title: pageTitle };
+  const pagination = findPagination(markup, tags, base, pageUrl);
+  return { media: [...found.values()], links: [...new Set(links)], pagination, title: pageTitle };
 }
 
 type AddFn = (item: Omit<MediaItem, "id" | "pageUrl">) => void;

@@ -25,11 +25,32 @@ export type CrawlEvent =
   | { type: "media"; items: MediaItem[] }
   | { type: "skip"; url: string; reason: string }
   | { type: "error"; url: string; message: string }
+  | { type: "continue"; state: CrawlState }
   | { type: "done"; pages: number; media: number; truncated: boolean };
 
 export interface CrawlOptions {
-  /** 入力ページから何階層下までリンクを辿るか（0 = 入力ページのみ） */
+  /** 入力ページから何階層下までリンクを辿るか（0 = 入力ページのみ、最大 20） */
   depth: number;
-  /** 読み込むページ数の上限 */
+  /** 読み込むページ数の上限（全体） */
   maxPages: number;
+  /** ページ送り（2ページ目・次へ）を何ページまで辿るか */
+  maxPagination: number;
+  /** true なら入力したサイト以外へのリンクも辿る */
+  crossSite: boolean;
+}
+
+export interface QueueItem {
+  url: string;
+  depth: number;
+}
+
+/**
+ * クロールの途中経過。サーバーの 1 回の実行時間には上限があるので、
+ * 時間切れの前にこれを画面へ返し、画面がそのまま送り返して続きをやってもらう。
+ */
+export interface CrawlState {
+  queue: QueueItem[];
+  seen: string[];
+  pages: number;
+  paginationUsed: number;
 }
