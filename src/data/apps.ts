@@ -41,6 +41,32 @@ export interface AppEntry {
 
 export const APPS: AppEntry[] = [
   {
+    slug: "autopost",
+    href: "/autopost",
+    name: "動画オート投稿",
+    emoji: "🚀",
+    description: "動画を選ぶだけで、YouTube・X・Instagram・会員サイトなど投稿先ごとの題名と本文を AI が作り、簡易編集から投稿まで進めます。",
+    tags: ["動画", "AI", "投稿", "ツール"],
+    addedAt: "2026-11-22",
+    color: "from-violet-500 to-fuchsia-400",
+    access: "private",
+    paths: ["/autopost", "/api/autopost"],
+    status: "beta",
+  },
+  {
+    slug: "members",
+    href: "/members",
+    name: "会員制動画サイト",
+    emoji: "🎟️",
+    description: "会員だけがログインして動画を見られるページ。動画オート投稿から「自分の会員サイト」へ投稿したものが並びます。",
+    tags: ["動画", "会員制"],
+    addedAt: "2026-11-22",
+    color: "from-neutral-700 to-neutral-500",
+    // 鍵は会員ごとのログイン（/members/login）で守る。共通パスワードの鍵はかけない
+    access: "public",
+    status: "beta",
+  },
+  {
     slug: "thumbs",
     href: "/thumbs",
     name: "サムネ収集",
