@@ -93,6 +93,8 @@ export interface Rendered {
    * 「もっと見る」・下までスクロールで一覧を足すサイトは、投稿のリンクがここにしかない
    */
   tweets: string[];
+  /** captureJson に合った返事の中身 */
+  json: { url: string; data: unknown }[];
   /** 表示中にサイトから渡された Cookie（年齢確認の結果など）。以降の普通の読み込みでも使う */
   cookies: { name: string; value: string; domain: string }[];
 }
@@ -100,6 +102,11 @@ export interface Rendered {
 export interface RenderOptions {
   /** 動画を探すときは、再生ボタンを押して動画の読み込みを始めさせる */
   play?: boolean;
+  /**
+   * この形の URL の返事（JSON）を中身ごと取っておく。
+   * ページ自身のスクリプトが受け取ったデータ（Gofile のファイル一覧など）を、そのまま使うため
+   */
+  captureJson?: RegExp;
 }
 
 const MAX_FRAMES = 5;
@@ -421,6 +428,7 @@ export async function renderPage(
     /** 中身を確かめている途中の返事（拡張子のない配信の目次など）。結果を返す前に待つ */
     const peeks = new Set<Promise<void>>();
     const tweets = new Set<string>();
+    const captured: { url: string; data: unknown }[] = [];
     /** ページが読み込んだデータ（JSON・HTML の断片）の中の、動画の URL と X の投稿の番号を拾う */
     const scan = (res: HTTPResponse, referer: string | undefined) => {
       const job = (async () => {
@@ -459,6 +467,13 @@ export async function renderPage(
       const req = res.request();
       if (req.isNavigationRequest() && req.frame() === page.mainFrame() && res.status() >= 200 && (res.status() < 300 || res.status() >= 400)) {
         status = res.status();
+      }
+      if (options.captureJson?.test(resUrl) && req.method() !== "OPTIONS" && captured.length < 20) {
+        const job = Promise.race([res.json(), sleep(5000).then(() => undefined)])
+          .then((data) => void (data !== undefined && captured.push({ url: resUrl, data })))
+          .catch(() => {});
+        peeks.add(job);
+        void job.finally(() => peeks.delete(job));
       }
       if (res.status() >= 400) return;
       const type = headers["content-type"];
@@ -555,7 +570,7 @@ export async function renderPage(
       .cookies()
       .then((list) => list.slice(0, 100).map((c) => ({ name: c.name, value: c.value, domain: c.domain.replace(/^\./, "") })))
       .catch(() => []);
-    return { html, finalUrl: page.url(), network: [...network.values()], frames, status, cookies, tweets: [...tweets] };
+    return { html, finalUrl: page.url(), network: [...network.values()], frames, status, cookies, tweets: [...tweets], json: captured };
   } finally {
     signal.removeEventListener("abort", onAbort);
     try {

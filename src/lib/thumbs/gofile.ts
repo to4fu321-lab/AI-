@@ -1,15 +1,24 @@
 import "server-only";
+import { createHash } from "node:crypto";
+import { renderPage } from "./render";
 import { assertPublicUrl, safeFetch } from "./safeFetch";
 
 /**
  * Gofile（gofile.io/d/ID）の共有フォルダから、ファイルの一覧と直リンクをもらう。
  *
  * Gofile のページは JavaScript で一覧を描き、ファイルのダウンロードには
- * 「ゲスト用の合言葉」（accountToken という Cookie）が必要。Gofile のページ自身がやっているのと同じ手順を踏む：
- *   1. ゲスト用のアカウントを作って合言葉をもらう（POST api.gofile.io/accounts）
- *   2. 合言葉を付けて、フォルダの中身を聞く（GET api.gofile.io/contents/ID）
- *   3. ファイルを読むときも、その合言葉を Cookie として送る（→ MediaItem.cookie で、確認・再生・保存まで持ち回る）
- * 「サイト用の合言葉」（wt）は Gofile のスクリプトに書いてあるので、そこから読む（読めなければ知られている値）。
+ * 「ゲスト用の合言葉」（accountToken という Cookie）が必要。
+ *
+ * フォルダの中身を聞く窓口（api.gofile.io/contents）は、Gofile のサイトからの問い合わせだと示す
+ * 「サイト用の合言葉」（X-Website-Token）がないと、だれにでも「有料会員でないと読めません（error-notPremium）」と答える。
+ * この合言葉は固定の値から「ブラウザの名前・言語・ゲストの合言葉・時刻（4 時間ごと）から毎回計算する値」に変わった。
+ *
+ * そこで、次の順に試す：
+ *   1. 新しい計算方式の合言葉で聞く（計算に使う秘密の言葉は、Gofile のスクリプトから読む）
+ *   2. 昔の固定の合言葉で聞く
+ *   3. それでも駄目なら、本物のブラウザで Gofile のページを開き、Gofile 自身のスクリプトが受け取った一覧と
+ *      ゲストの合言葉をそのまま使う（Gofile が仕組みをまた変えても、ページが開ける限り動く）
+ * もらったゲストの合言葉は MediaItem.cookie で、確認・再生・保存まで持ち回る。
  */
 
 export function gofileId(raw: string): string | null {
@@ -34,8 +43,23 @@ export interface GofileFile {
 
 export type GofileResult = { files: GofileFile[]; error?: string };
 
+/** 合言葉の計算に使う「ブラウザの名前」と「言語」。問い合わせのときも同じものを名乗る */
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const LANG = "en-US";
+const FALLBACK_SECRET = "5d4f7g8sd45fd";
 const FALLBACK_WT = "4fd6sg89d7s6";
-let session: Promise<{ token: string; wt: string } | null> | null = null;
+
+interface Session {
+  token: string;
+  /** 新しい計算方式の秘密の言葉 */
+  secret: string;
+  /** 昔の固定の合言葉 */
+  wt: string;
+  /** うまくいった方式（次からはそれを先に試す） */
+  mode?: "hash" | "static";
+}
+
+let session: Promise<Session | null> | null = null;
 let sessionAt = 0;
 
 async function readJson(res: Response): Promise<Record<string, unknown> | null> {
@@ -47,115 +71,216 @@ async function readJson(res: Response): Promise<Record<string, unknown> | null> 
   }
 }
 
-/** Gofile のスクリプトから「サイト用の合言葉」を読む */
-async function websiteToken(signal: AbortSignal): Promise<string> {
-  for (const path of ["/dist/js/global.js", "/dist/js/config.js", "/dist/js/alljs.js"]) {
+/** Gofile のスクリプトから、合言葉の作り方（秘密の言葉・昔の固定の合言葉）を読む */
+async function readScripts(signal: AbortSignal): Promise<{ secret: string; wt: string }> {
+  let secret = FALLBACK_SECRET;
+  let wt = FALLBACK_WT;
+  const paths = new Set(["/dist/js/global.js", "/dist/js/config.js", "/dist/js/alljs.js", "/dist/js/wt.obf.js"]);
+  try {
+    const { res } = await safeFetch("https://gofile.io/", { signal, timeoutMs: 6000, headers: { "user-agent": UA } });
+    if (res.ok) {
+      const html = (await res.text()).slice(0, 500_000);
+      for (const m of html.matchAll(/<script[^>]+src=["']([^"']+\.js)[^"']*["']/gi)) {
+        if (paths.size >= 10) break;
+        try {
+          const u = new URL(m[1], "https://gofile.io/");
+          if (u.hostname === "gofile.io") paths.add(u.pathname);
+        } catch {
+          /* ignore */
+        }
+      }
+    } else await res.body?.cancel().catch(() => {});
+  } catch {
+    /* 決まった場所だけ試す */
+  }
+  let foundSecret = false;
+  let foundWt = false;
+  for (const path of paths) {
+    if (foundSecret && foundWt) break;
     try {
-      const { res } = await safeFetch(`https://gofile.io${path}`, { signal, timeoutMs: 6000 });
+      const { res } = await safeFetch(`https://gofile.io${path}`, { signal, timeoutMs: 6000, headers: { "user-agent": UA } });
       if (!res.ok) {
         await res.body?.cancel().catch(() => {});
         continue;
       }
       const js = (await res.text()).slice(0, 3_000_000);
-      const m = /\bwt\s*[:=]\s*["']([A-Za-z0-9]{6,40})["']/.exec(js) ?? /websiteToken["']?\s*[:=]\s*["']([A-Za-z0-9]{6,40})["']/.exec(js);
-      if (m) return m[1];
+      // `${ブラウザ}::${言語}::${合言葉}::${時刻}::秘密の言葉` の最後の部分
+      const s = /::\$\{[^}]{1,80}\}::([A-Za-z0-9]{6,40})[`"']/.exec(js) ?? /["'`]::([A-Za-z0-9]{6,40})["'`]/.exec(js);
+      if (s && !foundSecret) {
+        secret = s[1];
+        foundSecret = true;
+      }
+      const w = /\bwt\s*[:=]\s*["']([A-Za-z0-9]{6,40})["']/.exec(js) ?? /websiteToken["']?\s*[:=]\s*["']([A-Za-z0-9]{6,40})["']/.exec(js);
+      if (w && !foundWt) {
+        wt = w[1];
+        foundWt = true;
+      }
     } catch {
       /* 次の場所を試す */
     }
   }
-  return FALLBACK_WT;
+  return { secret, wt };
 }
 
-/** ゲスト用の合言葉（同じサーバーが動いている間、1 時間使い回す） */
-function getSession(signal: AbortSignal): Promise<{ token: string; wt: string } | null> {
+/** アカウント作成の POST は、接続先を確かめたうえで直接送る（safeFetch は GET だけ） */
+async function createGuest(signal: AbortSignal): Promise<string | null> {
+  const url = "https://api.gofile.io/accounts";
+  await assertPublicUrl(url);
+  const res = await fetch(url, {
+    method: "POST",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
+    headers: { "content-type": "application/json", "user-agent": UA, origin: "https://gofile.io", referer: "https://gofile.io/" },
+    body: "{}",
+    redirect: "error",
+  });
+  const json = res.ok ? await readJson(res) : null;
+  const token = (json?.data as { token?: unknown } | undefined)?.token;
+  return typeof token === "string" && token ? token : null;
+}
+
+/** ゲスト用の合言葉と、サイト用の合言葉の作り方（同じサーバーが動いている間、1 時間使い回す） */
+function getSession(signal: AbortSignal): Promise<Session | null> {
   if (!session || Date.now() - sessionAt > 60 * 60 * 1000) {
     sessionAt = Date.now();
     session = (async () => {
-      const [wt, account] = await Promise.all([
-        websiteToken(signal),
-        (async () => {
-          const { res } = await fetchPost("https://api.gofile.io/accounts", signal);
-          return res.ok ? readJson(res) : null;
-        })().catch(() => null),
-      ]);
-      const token = (account?.data as { token?: unknown } | undefined)?.token;
-      return typeof token === "string" && token ? { token, wt } : null;
+      const [scripts, token] = await Promise.all([readScripts(signal), createGuest(signal).catch(() => null)]);
+      return token ? { token, ...scripts } : null;
     })();
     void session.then((s) => !s && (session = null));
   }
   return session;
 }
 
-/** safeFetch は GET だけなので、アカウント作成の POST は接続先を確かめたうえで直接送る */
-async function fetchPost(url: string, signal: AbortSignal): Promise<{ res: Response }> {
-  await assertPublicUrl(url);
-  const res = await fetch(url, {
-    method: "POST",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
-    headers: { "content-type": "application/json", "user-agent": "Mozilla/5.0", origin: "https://gofile.io", referer: "https://gofile.io/" },
-    body: "{}",
-    redirect: "error",
-  });
-  return { res };
+/** 新しい計算方式のサイト用の合言葉（4 時間ごとに変わる） */
+export function hashedWebsiteToken(token: string, secret: string, now = Date.now()): string {
+  const slot = Math.floor(now / 1000 / 14400);
+  return createHash("sha256").update(`${UA}::${LANG}::${token}::${slot}::${secret}`).digest("hex");
 }
 
 const VIDEO_NAME_RE = /\.(?:mp4|m4v|mov|webm|mkv|avi|wmv|flv|ts|3gp|mpg|mpeg|ogv)$/i;
 const IMAGE_NAME_RE = /\.(?:jpe?g|png|gif|webp|avif|heic|bmp)$/i;
 
-/** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
-export async function gofileFiles(id: string, signal: AbortSignal): Promise<GofileResult> {
-  const s = await getSession(signal);
-  if (!s) return { files: [], error: "Gofile のゲスト用の合言葉をもらえませんでした" };
-  const cookie = `gofile.io|accountToken=${s.token}`;
+/** 断られた理由を、わかる日本語にする */
+function describe(status: string): string {
+  return status === "error-passwordRequired"
+    ? "パスワード付きの Gofile フォルダは読めません"
+    : status === "error-notFound"
+      ? "Gofile のフォルダが見つかりません（削除された可能性があります）"
+      : status === "error-notPremium"
+        ? "Gofile がこのアプリからの読み込みを断りました（ブラウザで開き直しても読めませんでした）"
+        : `Gofile が答えませんでした（${status}）`;
+}
+
+/** フォルダの中身の返事から、画像・動画のファイルと、中のフォルダを取り出す */
+function parseContents(json: Record<string, unknown>, rootId: string, cookie: string): { files: GofileFile[]; nested: string[] } {
+  const data = (json.data ?? {}) as Record<string, unknown>;
+  const children = (data.children ?? data.contents ?? {}) as Record<string, Record<string, unknown>>;
   const files: GofileFile[] = [];
-  let error: string | undefined;
-  const visit = async (folder: string, level: number) => {
-    if (level > 2 || files.length >= 300 || signal.aborted) return;
-    const { res } = await safeFetch(`https://api.gofile.io/contents/${encodeURIComponent(folder)}?wt=${s.wt}&cache=true`, {
+  const nested: string[] = [];
+  // フォルダではなくファイル 1 つの共有リンクのときは、data 自体がファイル
+  const entries = data.type === "file" ? [data] : Object.values(children);
+  for (const c of entries) {
+    if (!c || typeof c !== "object") continue;
+    if (c.type === "folder" && typeof c.id === "string") {
+      nested.push(c.id);
+      continue;
+    }
+    const link = typeof c.link === "string" ? c.link : typeof c.directLink === "string" ? c.directLink : undefined;
+    const name = typeof c.name === "string" ? c.name : "";
+    const mime = typeof c.mimetype === "string" ? c.mimetype : "";
+    if (!link || !/^https:\/\//.test(link)) continue;
+    const kind = mime.startsWith("video/") || VIDEO_NAME_RE.test(name) ? "video" : mime.startsWith("image/") || IMAGE_NAME_RE.test(name) ? "image" : null;
+    if (!kind) continue;
+    files.push({
+      src: link,
+      name,
+      kind,
+      thumb: typeof c.thumbnail === "string" && /^https:\/\//.test(c.thumbnail) ? c.thumbnail : undefined,
+      cookie,
+      pageUrl: `https://gofile.io/d/${rootId}`,
+    });
+  }
+  return { files, nested };
+}
+
+/** API に聞く（合言葉の方式を順に試す）。返事の status が ok でなければ、その status を返す */
+async function askApi(folder: string, s: Session, signal: AbortSignal): Promise<{ json?: Record<string, unknown>; status: string }> {
+  const modes: ("hash" | "static")[] = s.mode === "static" ? ["static", "hash"] : ["hash", "static"];
+  let last = "error";
+  for (const mode of modes) {
+    const wt = mode === "hash" ? hashedWebsiteToken(s.token, s.secret) : s.wt;
+    const query = mode === "static" ? `?wt=${encodeURIComponent(s.wt)}&cache=true` : "?cache=true";
+    const { res } = await safeFetch(`https://api.gofile.io/contents/${encodeURIComponent(folder)}${query}`, {
       signal,
       timeoutMs: 10000,
-      headers: { authorization: `Bearer ${s.token}`, "x-website-token": s.wt, accept: "application/json", origin: "https://gofile.io", referer: "https://gofile.io/" },
+      headers: {
+        "user-agent": UA,
+        authorization: `Bearer ${s.token}`,
+        "x-website-token": wt,
+        "x-bl": LANG,
+        accept: "application/json",
+        origin: "https://gofile.io",
+        referer: "https://gofile.io/",
+      },
     });
     const json = await readJson(res);
-    if (!json || json.status !== "ok") {
-      const status = typeof json?.status === "string" ? json.status : `HTTP ${res.status}`;
-      error ??=
-        status === "error-passwordRequired"
-          ? "パスワード付きの Gofile フォルダは読めません"
-          : status === "error-notFound"
-            ? "Gofile のフォルダが見つかりません（削除された可能性があります）"
-            : status === "error-notPremium"
-              ? "この Gofile のファイルは有料会員でないと読めません"
-              : `Gofile が答えませんでした（${status}）`;
+    const status = typeof json?.status === "string" ? json.status : `HTTP ${res.status}`;
+    if (json && status === "ok") {
+      s.mode = mode;
+      return { json, status };
+    }
+    last = status;
+    // パスワード付き・見つからないは、方式を変えても同じ
+    if (status === "error-passwordRequired" || status === "error-notFound") break;
+  }
+  return { status: last };
+}
+
+/**
+ * 本物のブラウザで Gofile のページを開き、Gofile 自身のスクリプトが受け取ったフォルダの中身と、
+ * ゲストの合言葉（accountToken の Cookie）をそのまま使う
+ */
+async function viaBrowser(folder: string, rootId: string, signal: AbortSignal): Promise<{ files: GofileFile[]; nested: string[]; status: string }> {
+  const r = await renderPage(`https://gofile.io/d/${folder}`, signal, Number.POSITIVE_INFINITY, { captureJson: /^https:\/\/api\.gofile\.io\/contents\// }, 20000);
+  const token = r.cookies.find((c) => c.name === "accountToken" && /(?:^|\.)gofile\.io$/.test(c.domain))?.value;
+  const hit = r.json.map((j) => j.data as Record<string, unknown>).find((d) => d && typeof d === "object" && d.status === "ok");
+  if (!hit || !token) {
+    const status = r.json.map((j) => (j.data as { status?: unknown })?.status).find((x): x is string => typeof x === "string") ?? "error-browser";
+    return { files: [], nested: [], status };
+  }
+  return { ...parseContents(hit, rootId, `gofile.io|accountToken=${token}`), status: "ok" };
+}
+
+/** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
+export async function gofileFiles(id: string, signal: AbortSignal): Promise<GofileResult> {
+  const s = await getSession(signal).catch(() => null);
+  const files: GofileFile[] = [];
+  let error: string | undefined;
+  /** API が断るので、ブラウザで開く（一度断られたら、中のフォルダもブラウザで開く。3 回まで） */
+  let useBrowser = !s;
+  let browserOpens = 0;
+  const visit = async (folder: string, level: number) => {
+    if (level > 2 || files.length >= 300 || signal.aborted) return;
+    let found: { files: GofileFile[]; nested: string[] } | null = null;
+    let status = "error";
+    if (!useBrowser && s) {
+      const api = await askApi(folder, s, signal).catch(() => ({ status: "error-network" }) as { json?: Record<string, unknown>; status: string });
+      status = api.status;
+      if (api.json) found = parseContents(api.json, id, `gofile.io|accountToken=${s.token}`);
+      else if (status !== "error-passwordRequired" && status !== "error-notFound") useBrowser = true;
+    }
+    if (!found && useBrowser && browserOpens < 3) {
+      browserOpens++;
+      const b = await viaBrowser(folder, id, signal).catch(() => ({ files: [], nested: [], status: "error-browser" }));
+      status = b.status === "error-browser" ? status : b.status;
+      if (b.status === "ok") found = b;
+    }
+    if (!found) {
+      error ??= describe(status);
       return;
     }
-    const data = json.data as Record<string, unknown>;
-    const children = (data.children ?? data.contents ?? {}) as Record<string, Record<string, unknown>>;
-    const nested: string[] = [];
-    // フォルダではなくファイル 1 つの共有リンクのときは、data 自体がファイル
-    const entries = data.type === "file" ? [data] : Object.values(children);
-    for (const c of entries) {
-      if (c.type === "folder" && typeof c.id === "string") {
-        nested.push(c.id);
-        continue;
-      }
-      const link = typeof c.link === "string" ? c.link : typeof c.directLink === "string" ? c.directLink : undefined;
-      const name = typeof c.name === "string" ? c.name : "";
-      const mime = typeof c.mimetype === "string" ? c.mimetype : "";
-      if (!link || !/^https:\/\//.test(link)) continue;
-      const kind = mime.startsWith("video/") || VIDEO_NAME_RE.test(name) ? "video" : mime.startsWith("image/") || IMAGE_NAME_RE.test(name) ? "image" : null;
-      if (!kind) continue;
-      files.push({
-        src: link,
-        name,
-        kind,
-        thumb: typeof c.thumbnail === "string" && /^https:\/\//.test(c.thumbnail) ? c.thumbnail : undefined,
-        cookie,
-        pageUrl: `https://gofile.io/d/${id}`,
-      });
-      if (files.length >= 300) return;
-    }
-    for (const n of nested) await visit(n, level + 1);
+    files.push(...found.files.slice(0, 300 - files.length));
+    for (const n of found.nested) await visit(n, level + 1);
   };
   try {
     await visit(id, 0);
