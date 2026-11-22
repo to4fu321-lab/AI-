@@ -411,6 +411,8 @@ function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
     const videoish =
       DURATION_RE.test(text) ||
       VIDEO_URL_RE.test(url) ||
+      // Gofile を紹介しているページへのリンク（まとめ・掲示板のスレッドなど）は、先に読む
+      /gofile/i.test(text) ||
       (!!thumb && VIDEO_CLASS_RE.test(`${attrs.class ?? ""} ${inner.slice(0, 2000)}`));
     // カードに出ている再生時間（12:34）。日時（2024/01/02 12:34）と取り違えないよう、日付らしい文字があれば使わない
     const clock = /\d{4}[/.\-年]\d{1,2}/.test(text) ? undefined : parseClock(text);
@@ -953,7 +955,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
 
   // スクリプト・data 属性の中の投稿の番号（JavaScript で一覧を描くサイト・埋め込み投稿）
   for (const id of findTweetIds(html, 150)) addTweet(id);
-  for (const m of html.replace(/\\\//g, "/").matchAll(/gofile\.io\/d\/([\w-]{4,40})/g)) if (gofile.size < 30) gofile.add(m[1]);
+  for (const m of html.replace(/\\\//g, "/").matchAll(/gofile\.io(?:\/|%2F)d(?:\/|%2F)([\w-]{4,40})/gi)) if (gofile.size < 300) gofile.add(m[1]);
   // X の動画のサムネイルは画像としては出さない（動画の表紙なので）。GIF アニメは表紙の名前から動画がわかる
   for (const m of [...found.values()]) {
     if (m.kind !== "image" || !isTwitterVideoThumb(m.src)) continue;

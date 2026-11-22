@@ -7,7 +7,7 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
+import { gifVideoFromThumb, tweetGofileIds, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { isTwihubList, isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
@@ -608,7 +608,7 @@ export async function* crawl(
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
-  /** まとめサイトに載っていたが、Gofile では消されていた・空だったフォルダの数 */
+  /** リンクはあったが、Gofile では消されていた・空だったフォルダの数 */
   let goneGofile = 0;
   /** アプリでしか再生できない動画（Linkex）として並べた数 */
   let appOnly = 0;
@@ -725,6 +725,13 @@ export async function* crawl(
    * X の投稿の番号から動画を取り出す（1 ページあたり 80 件まで、同時に 8 件ずつ）。
    * 元ページは X の投稿（「元ページ」で投稿を開ける）。一覧のカードのサムネイル・再生時間は、もらえなかったときの代わり
    */
+  /** 見つけた Gofile の共有フォルダを、読む列に入れる（1 ページに何十個あっても、全部読めるように） */
+  const queueGofile = (ids: string[], from?: string) => {
+    for (const id of ids) {
+      if (seenGofile.has(id)) continue;
+      enqueue(`https://gofile.io/d/${id}`, 0, lastRank + 1, 5, undefined, 0, false, from);
+    }
+  };
   const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
     if (xBroken()) return [];
     const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
@@ -735,6 +742,8 @@ export async function* crawl(
       while (next < todo.length && Date.now() < deadline && !signal.aborted) {
         const ref = todo[next++];
         const videos = await tweetVideos(ref.id, signal, getJson).catch(() => []);
+        // 投稿の文に Gofile のリンクがあれば、そのフォルダも読む（Gofile を紹介している投稿）
+        queueGofile(tweetGofileIds(ref.id), `https://x.com/i/status/${ref.id}`);
         for (const v of videos) {
           out.push({
             id: v.src,
@@ -988,7 +997,7 @@ export async function* crawl(
       if (ok.length) events.push({ type: "media", items: ok });
       // まとめサイトのカードから来た Gofile のフォルダが、消されていた・空だった：サムネイルだけ並べる（タップでまとめサイトのページ）
       if (!ok.length && !verified.rest.length && !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "")) {
-        if (item.thumb && !item.root) goneGofile++;
+        goneGofile++;
         thumbOnly(item.from ?? url, /見つかりません/.test(g.error ?? "") ? "Gofile で削除済み" : "Gofile に中身なし");
       }
       if (!ok.length && !verified.rest.length && item.root) {
@@ -1026,7 +1035,7 @@ export async function* crawl(
         videos += ok.length;
         events.push({ type: "page", url, depth, found: ok.length });
         if (ok.length) events.push({ type: "media", items: ok });
-        else if (item.root) {
+        else if (item.root && !tweetGofileIds(tweetId).length) {
           noted = true;
           events.push({ type: "note", url, message: "この投稿から動画を取り出せませんでした（動画のない投稿・削除・非公開・鍵アカウントの可能性があります）" });
         }
@@ -1194,7 +1203,11 @@ export async function* crawl(
       // 「動画を再生」のリンク（twihub の /r/v/番号 など）：行き先が動画ファイルならそれを使い、駄目なら投稿の番号で X に聞く
       if (wantsVideo && extracted.playLinks.length) media.push(...(await playLinkMedia(extracted.playLinks, finalUrl)));
       // Gofile の共有フォルダへのリンクは、API で中身をもらう
-      if (extracted.gofile.length) media.push(...(await gofileMedia(extracted.gofile, !lite)).media);
+      if (extracted.gofile.length) {
+        media.push(...(await gofileMedia(extracted.gofile, !lite)).media);
+        // 1 ページで聞くのは 10 フォルダまで。残りは列に入れて、順に読む
+        queueGofile(extracted.gofile, finalUrl);
+      }
       let frameHint = false;
       if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
@@ -1243,7 +1256,10 @@ export async function* crawl(
           for (const p of again.pagination) pagination.add(p);
           ogImage ??= again.ogImage;
           if (wantsVideo) media.push(...(await tweetMedia([...again.tweets, ...r.tweets.map((id) => ({ id }))])));
-          if (again.gofile.length) media.push(...(await gofileMedia(again.gofile)).media);
+          if (again.gofile.length) {
+            media.push(...(await gofileMedia(again.gofile)).media);
+            queueGofile(again.gofile, r.finalUrl);
+          }
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
@@ -1604,12 +1620,12 @@ export async function* crawl(
       ? `Linkex の動画 ${appOnly} 本を並べました。Linkex は Web では再生できない仕組み（アプリでのみ再生）のため、タップで Linkex を開きます`
       : null;
     const thumbNote = goneGofile
-      ? "Gofile で削除済み・中身なしのフォルダは、サムネイルだけ並べています（Gofile は消されるのが早いため、新しいリンクでも見られないことがあります）"
+      ? `Gofile のリンクのうち ${goneGofile} 件は、Gofile で削除済み・中身なしでした（サムネイルがわかるものは、サムネイルだけ並べています。Gofile は消されるのが早いため、新しいリンクでも見られないことがあります）`
       : thumbOnlyPages
       ? `動画を取り出せなかったページ ${thumbOnlyPages} 件は、サムネイルだけ並べました。タップするとそのページを開きます`
       : null;
     const finalNote =
-      appNote ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;
