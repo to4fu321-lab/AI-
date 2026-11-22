@@ -1,7 +1,7 @@
 import "server-only";
-import { extractFromHtml, formatOf, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
 import { isExcluded, isItemExcluded } from "./exclude";
-import { RenderDeferred, renderPage, type NetworkMedia } from "./render";
+import { RenderDeferred, renderPage } from "./render";
 import { safeFetch } from "./safeFetch";
 import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
@@ -138,11 +138,14 @@ function looksLikeVideo(b: Uint8Array): boolean {
 /** 動画ファイルかどうかの確認結果（同じ実行中は使い回す） */
 const videoCheckCache = new Map<string, Promise<boolean>>();
 
-/** 先頭 2 バイトだけ取りに行き、本当に動画ファイルが返ってくるか確かめる */
-function isRealVideo(url: string, signal: AbortSignal): Promise<boolean> {
+/**
+ * 先頭 64 バイトだけ取りに行き、本当に動画ファイルが返ってくるか確かめる。
+ * 直リンク禁止のサーバーもあるので、見つけたページ（プレーヤー）を Referer として名乗る
+ */
+function isRealVideo(url: string, referer: string, signal: AbortSignal): Promise<boolean> {
   let check = videoCheckCache.get(url);
   if (!check) {
-    check = safeFetch(url, { headers: { range: "bytes=0-63" }, timeoutMs: 4000, signal })
+    check = safeFetch(url, { headers: { range: "bytes=0-63", referer }, timeoutMs: 4000, signal })
       .then(async ({ res, url: finalUrl }) => {
         if (res.status !== 200 && res.status !== 206) {
           await res.body?.cancel().catch(() => {});
@@ -166,14 +169,14 @@ function isRealVideo(url: string, signal: AbortSignal): Promise<boolean> {
   return check;
 }
 
-/**
- * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
- * 一度に確かめる数は 8 件まで。
- */
 /** 1 ページで確かめる動画候補の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
 const MAX_VERIFY_PER_PAGE = 40;
 const VERIFY_BUDGET_MS = 15000;
 
+/**
+ * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
+ * 一度に 16 件ずつ確かめる。
+ */
 async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: number): Promise<MediaItem[]> {
   const ok = new Map<MediaItem, boolean>();
   const pending = items.filter((m) => m.unverified).slice(0, MAX_VERIFY_PER_PAGE);
@@ -182,7 +185,7 @@ async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: n
     // 時間が足りなくなったら、残りは確認せずに外す（確かめられないものは出さない）
     if (Date.now() > stopAt || signal.aborted) break;
     const batch = pending.slice(i, i + 16);
-    const results = await Promise.all(batch.map((m) => isRealVideo(m.src, signal)));
+    const results = await Promise.all(batch.map((m) => isRealVideo(m.src, m.referer ?? m.pageUrl, signal)));
     batch.forEach((m, j) => ok.set(m, results[j]));
   }
   return items
@@ -190,12 +193,39 @@ async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: n
     .map((m) => (m.unverified ? { ...m, unverified: undefined } : m));
 }
 
+/**
+ * サムネイルのない動画に、代わりのサムネイルを付ける。
+ * 1. このページへのリンクに付いていたサムネイル（一覧ページの画像）… 動画が 3 本以下のとき
+ * 2. ページの代表画像（og:image）… 動画が 2 本以下のとき（多いと全部同じ画像になるため）
+ *    ただしサイト共通のロゴらしい画像は渡さない（呼ぶ側で判定）。
+ * どちらもなければ、画面側で動画から 1 コマ取り出してサムネイルを作る。
+ */
+function fillThumbs(media: MediaItem[], linkThumb: string | undefined, ogImage: string | undefined) {
+  const videos = media.filter((m) => m.kind !== "image");
+  if (videos.length === 0) return;
+  for (const v of videos) {
+    if (v.thumb) continue;
+    if (linkThumb && videos.length <= 3) v.thumb = linkThumb;
+    else if (ogImage && videos.length <= 2) v.thumb = ogImage;
+  }
+}
+
+/** iframe の中を読みに行く数・深さ・大きさの上限 */
+const MAX_FRAMES_PER_PAGE = 3;
+const MAX_FRAME_LEVEL = 2;
+const MAX_FRAME_BYTES = 1.5 * 1024 * 1024;
+
 /** 途中経過の記録を送る間隔 */
 const CHECKPOINT_MS = 8000;
 
 /** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
 export const MAX_QUEUE = 5000;
 export const MAX_SEEN = 20000;
+
+/** 読む順番：段（rank）の小さい順、同じ段なら優先度（prio）の大きい順 */
+function byOrder(a: QueueItem, b: QueueItem) {
+  return (a.rank ?? a.depth) - (b.rank ?? b.depth) || (b.prio ?? 0) - (a.prio ?? 0);
+}
 
 export async function* crawl(
   startUrl: string,
@@ -208,6 +238,7 @@ export async function* crawl(
   const origin = start.origin;
   const scope = scopeOf(start);
   const startPath = start.pathname;
+  const wantsVideo = options.kinds !== "image";
 
   // robots.txt はサイトごとに 1 回だけ読む
   const robots = new Map<string, Promise<(path: string) => boolean>>();
@@ -223,28 +254,89 @@ export async function* crawl(
 
   const seenPages = new Set<string>(resume?.seen ?? [normalizePageUrl(startUrl)]);
   const seenMedia = new Set<string>();
-  const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0 }];
+  const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0, rank: 0 }];
   let pages = resume?.pages ?? 0;
   let paginationUsed = resume?.paginationUsed ?? 0;
   let mediaCount = 0;
 
-  const enqueue = (url: string, depth: number) => {
-    if (!isPageLikeUrl(url) || seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return false;
-    // 除外リストのサイトは辿らない
-    if (isExcluded(url, options.exclude)) return false;
+  /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
+  const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
+
+  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string) => {
+    if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
     const key = normalizePageUrl(url);
-    if (seenPages.has(key)) return false;
+    if (seenPages.has(key)) {
+      // すでに列にあるページなら、サムネイルと優先度だけ補う
+      if (thumb || prio > 0) {
+        const queued = queuedByUrl.get(url);
+        if (queued) {
+          queued.thumb ??= thumb;
+          queued.prio = Math.max(queued.prio ?? 0, prio);
+        }
+      }
+      return false;
+    }
+    if (seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return false;
     seenPages.add(key);
-    queue.push({ url, depth });
+    const entry: QueueItem = { url, depth, rank, prio, thumb };
+    queue.push(entry);
+    queuedByUrl.set(url, entry);
     return true;
   };
 
+  /** og:image ごとの、それを使っていたページ数（サイト共通のロゴを見分ける） */
+  const ogPages = new Map<string, number>();
   /** 時間切れで次の回に回すページ */
   const deferred: QueueItem[] = [];
   let renderStarts = 0;
   let lastCheckpoint = Date.now();
 
-  const visit = async (url: string, depth: number): Promise<CrawlEvent[]> => {
+  /**
+   * iframe で埋め込まれたページ（外部の動画プレーヤーなど）を読み、中の動画を集める。
+   * 動画が見つからなければ、その中の iframe をもう 1 段だけ読む。
+   * 見つけた動画の「元ページ」は外側のページ、Referer はそのプレーヤーのページにする。
+   */
+  const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
+    const media: MediaItem[] = [];
+    let playerHint = false;
+    const targets = frameUrls.filter((u) => !isExcluded(u, options.exclude)).slice(0, MAX_FRAMES_PER_PAGE);
+    await Promise.all(
+      targets.map(async (frameUrl) => {
+        if (Date.now() > deadline || signal.aborted) return;
+        try {
+          if (!(await allowed(frameUrl))) return;
+          const { res, url: frameFinal } = await safeFetch(frameUrl, {
+            signal,
+            timeoutMs: 10000,
+            headers: { accept: "text/html,*/*;q=0.5", referer: parent },
+          });
+          if (!res.ok || !/html/i.test(res.headers.get("content-type") ?? "")) {
+            await res.body?.cancel().catch(() => {});
+            return;
+          }
+          const ex = extractFromHtml(await readLimited(res, MAX_FRAME_BYTES), frameFinal);
+          playerHint ||= ex.playerHint;
+          let found: MediaItem[] = ex.media
+            .filter((m) => m.kind !== "image")
+            .map((m) => ({ ...m, pageUrl: topPage, referer: m.referer ?? frameFinal }));
+          fillThumbs(found, undefined, ex.ogImage);
+          if (found.length === 0 && level < MAX_FRAME_LEVEL && ex.frames.length) {
+            const nested = await readFrames(ex.frames, topPage, frameFinal, level + 1);
+            found = nested.media;
+            playerHint ||= nested.playerHint;
+          }
+          media.push(...found);
+        } catch {
+          /* 読めない iframe は飛ばす */
+        }
+      }),
+    );
+    return { media, playerHint };
+  };
+
+  const visit = async (item: QueueItem): Promise<CrawlEvent[]> => {
+    const { url, depth } = item;
+    const rank = item.rank ?? depth;
     const events: CrawlEvent[] = [];
     if (isExcluded(url, options.exclude)) {
       events.push({ type: "skip", url, reason: "除外リストのサイトです" });
@@ -275,14 +367,15 @@ export async function* crawl(
       const directKind = kindFromContentType(type) ?? (type?.includes("html") ? null : kindFromUrl(finalUrl));
       if (directKind) {
         await res.body?.cancel();
-        const item: MediaItem = {
+        const direct: MediaItem = {
           id: finalUrl,
           kind: directKind,
           src: finalUrl,
           pageUrl: finalUrl,
+          thumb: directKind === "video" ? item.thumb : undefined,
           format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
         };
-        events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [item] });
+        events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
         return events;
       }
       if (type && !/html|xml|text\/plain/i.test(type)) {
@@ -291,77 +384,121 @@ export async function* crawl(
         return events;
       }
       const html = await readLimited(res, MAX_HTML_BYTES);
-      let extracted = extractFromHtml(html, finalUrl);
-      let network: NetworkMedia[] = [];
-      let rendered = false;
-      let renderError: string | null = null;
-      // JavaScript で描くページで、画像やリンクがほとんど取れなかったときは、ブラウザで開き直す
+      const extracted = extractFromHtml(html, finalUrl);
+      const media: MediaItem[] = [...extracted.media];
+      const links: LinkCandidate[] = [...extracted.links];
+      const pagination = new Set(extracted.pagination);
+      let ogImage = extracted.ogImage;
+
+      // iframe の中の動画プレーヤー（動画を探すときだけ）
+      let frameHint = false;
+      if (wantsVideo && extracted.frames.length) {
+        const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
+        media.push(...fr.media);
+        frameHint = fr.playerHint;
+      }
+
+      // ブラウザで開き直すか
+      // - JavaScript で描くページで、画像やリンクがほとんど取れなかったとき
+      // - 動画プレーヤーがありそうなのに、確かな動画が 1 本も見つからないとき（再生ボタンを押して探す）
+      const trustedVideos = media.filter((m) => m.kind !== "image" && !m.unverified).length;
       const looksEmpty = extracted.media.length <= 2 || extracted.links.length < 3;
       const wantRender =
-        options.render === "always" || (options.render === "auto" && extracted.clientRendered && looksEmpty);
+        options.render === "always" ||
+        (options.render === "auto" &&
+          ((extracted.clientRendered && looksEmpty) || (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0)));
+      let rendered = false;
+      let renderError: string | null = null;
       if (wantRender) {
         try {
           // 1 回の実行で最初のブラウザ表示は必ず行う（次の回へ回し続けて進まなくなるのを防ぐ）
           const startBy = renderStarts++ === 0 ? Number.POSITIVE_INFINITY : deadline;
-          const r = await renderPage(finalUrl, signal, startBy);
+          const r = await renderPage(finalUrl, signal, startBy, { play: wantsVideo });
           const again = extractFromHtml(r.html, r.finalUrl);
-          extracted = {
-            ...again,
-            media: [...extracted.media, ...again.media],
-            links: [...new Set([...again.links, ...extracted.links])],
-            pagination: [...new Set([...again.pagination, ...extracted.pagination])],
-          };
-          network = r.network;
+          media.push(...again.media);
+          links.push(...again.links);
+          for (const p of again.pagination) pagination.add(p);
+          ogImage ??= again.ogImage;
+          // ブラウザの中で開いていた iframe の中身
+          for (const f of r.frames) {
+            const fx = extractFromHtml(f.html, f.url);
+            const found = fx.media
+              .filter((m) => m.kind !== "image")
+              .map((m) => ({ ...m, pageUrl: finalUrl, referer: m.referer ?? f.url }));
+            fillThumbs(found, undefined, fx.ogImage);
+            media.push(...found);
+          }
+          // 表示・再生の間にブラウザが受け取った画像・動画
+          for (const n of r.network) {
+            media.push({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, referer: n.referer, format: formatOf(n.url, n.kind) });
+          }
           rendered = true;
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
             // 区切りまでに始められなかった。数えずに、続きの回で開き直す
-            deferred.push({ url, depth });
+            deferred.push(item);
             return events;
           }
           renderError = err instanceof Error ? err.message : String(err);
         }
       }
-      const { links, pagination, clientRendered } = extracted;
-      const media: MediaItem[] = [
-        ...extracted.media,
-        ...network.map((n) => ({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, format: formatOf(n.url, n.kind) })),
-      ];
-      const candidates: MediaItem[] = [];
+
+      // 同じページ内の重複をまとめる（サムネイルなどの情報は補い合う）
+      const merged = new Map<string, MediaItem>();
       for (const m of media) {
+        const prev = merged.get(m.id);
+        if (!prev) merged.set(m.id, { ...m });
+        else {
+          prev.thumb ??= m.thumb;
+          prev.title ??= m.title;
+          prev.referer ??= m.referer;
+          if (!m.unverified) prev.unverified = undefined;
+        }
+      }
+      const pageMedia = [...merged.values()];
+      // og:image が複数のページで同じなら、サイト共通のロゴ。最初のページ（一覧ページのことが多い）の og:image も使わない
+      // （ロゴを付けるより、画面側で動画から本物のコマを取り出すほうがよい）
+      if (ogImage) ogPages.set(ogImage, (ogPages.get(ogImage) ?? 0) + 1);
+      const usableOg = ogImage && depth > 0 && (ogPages.get(ogImage) ?? 0) < 2 ? ogImage : undefined;
+      fillThumbs(pageMedia, item.thumb, usableOg);
+
+      const candidates: MediaItem[] = [];
+      for (const m of pageMedia) {
         if (seenMedia.has(m.id)) continue;
         seenMedia.add(m.id);
         candidates.push(m);
       }
       // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める
-      const wanted = candidates.filter((m) => !isItemExcluded(m, options.exclude)).filter((m) =>
-        options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true,
-      );
+      const wanted = candidates
+        .filter((m) => !isItemExcluded(m, options.exclude))
+        .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       const fresh = await verifyVideos(wanted, signal, deadline);
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
       if (depth === 0) {
         const message = renderError
           ? `ブラウザで開けませんでした（${renderError.slice(0, 80)}）`
-          : rendered && media.length <= 2
+          : rendered && pageMedia.length <= 2
             ? "ブラウザで開いても画像が見つかりませんでした（ログインや年齢確認が必要なページかもしれません）"
-            : !rendered && media.length <= 2 && clientRendered
+            : !rendered && pageMedia.length <= 2 && extracted.clientRendered
               ? "このページは画像を JavaScript で後から読み込むため、取れない画像があります（「ブラウザで開く」を試してください）"
               : null;
         if (message) events.push({ type: "note", url: finalUrl, message });
       }
 
-      // ページ送り（2ページ目・次へ）は同じ階層として辿る
+      // ページ送り（2ページ目・次へ）は同じ階層として辿る。読む順番は 1 段後ろ
+      // → 「このページの詳細ページ」と「次の一覧ページ」が同じ段に並び、詳細ページが先に読まれる
       for (const link of pagination) {
         if (paginationUsed >= options.maxPagination) break;
-        if (enqueue(link, depth)) paginationUsed++;
+        if (enqueue(link, depth, rank + 1, 1)) paginationUsed++;
       }
-      // 普通のリンクは 1 階層下として辿る
+      // 普通のリンクは 1 階層下として辿る（サムネイル付き・動画らしいリンクが先）
       if (depth < options.depth) {
         for (const link of links) {
-          if (!options.crossSite && !inScope(link, origin, scope, startPath)) continue;
-          enqueue(link, depth + 1);
+          if (pagination.has(link.url)) continue;
+          if (!options.crossSite && !inScope(link.url, origin, scope, startPath)) continue;
+          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb);
         }
       }
     } catch (err) {
@@ -377,17 +514,18 @@ export async function* crawl(
     return events;
   };
 
-  // 幅優先：浅い階層から順に、最大 CONCURRENCY 件ずつ並列に読む
+  // 段の小さい順・優先度の高い順に、最大 CONCURRENCY 件ずつ並列に読む
   while (queue.length && !signal.aborted && pages < options.maxPages) {
     if (Date.now() > deadline) {
       // 時間切れ。続きを画面に預けて、もう一度呼んでもらう
       yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
       return;
     }
-    queue.sort((a, b) => a.depth - b.depth);
+    queue.sort(byOrder);
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
+    for (const b of batch) queuedByUrl.delete(b.url);
     pages += batch.length;
-    const results = await Promise.all(batch.map((p) => visit(p.url, p.depth)));
+    const results = await Promise.all(batch.map((p) => visit(p)));
     for (const events of results) {
       for (const e of events) {
         if (e.type === "media") mediaCount += e.items.length;
@@ -402,6 +540,7 @@ export async function* crawl(
     if (deferred.length) {
       // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
       pages -= deferred.length;
+      for (const d of deferred) queuedByUrl.set(d.url, d);
       queue.unshift(...deferred.splice(0));
       yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
       return;

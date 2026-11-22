@@ -106,7 +106,17 @@ function parseResume(value: unknown): CrawlState | undefined {
       (q): q is { url: string; depth: number } =>
         !!q && typeof q === "object" && typeof (q as { url: unknown }).url === "string" && typeof (q as { depth: unknown }).depth === "number",
     )
-    .map((q) => ({ url: q.url, depth: Math.min(20, Math.max(0, Math.round(q.depth))) }));
+    .map((q) => {
+      const extra = q as { rank?: unknown; prio?: unknown; thumb?: unknown };
+      const thumb = typeof extra.thumb === "string" && /^https?:\/\//.test(extra.thumb) && extra.thumb.length < 2000 ? extra.thumb : undefined;
+      return {
+        url: q.url,
+        depth: Math.min(20, Math.max(0, Math.round(q.depth))),
+        rank: clamp(extra.rank, 0, 1000, Math.round(q.depth)),
+        prio: clamp(extra.prio, 0, 10, 0),
+        thumb,
+      };
+    });
   const seen = v.seen.slice(0, MAX_SEEN).filter((s): s is string => typeof s === "string");
   return {
     queue,

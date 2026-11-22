@@ -68,18 +68,21 @@ interface Tag {
 const TAG_RE = /<([a-zA-Z][a-zA-Z0-9-]*)(\s[^<>]*?)?\/?>/g;
 const ATTR_RE = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
+function parseAttrs(raw: string | undefined): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  if (!raw) return attrs;
+  for (const a of raw.matchAll(ATTR_RE)) {
+    attrs[a[1].toLowerCase()] = decodeEntities(a[2] ?? a[3] ?? a[4] ?? "");
+  }
+  return attrs;
+}
+
 function parseTags(html: string, names: Set<string>): Tag[] {
   const tags: Tag[] = [];
   for (const m of html.matchAll(TAG_RE)) {
     const name = m[1].toLowerCase();
     if (!names.has(name)) continue;
-    const attrs: Record<string, string> = {};
-    if (m[2]) {
-      for (const a of m[2].matchAll(ATTR_RE)) {
-        attrs[a[1].toLowerCase()] = decodeEntities(a[2] ?? a[3] ?? a[4] ?? "");
-      }
-    }
-    tags.push({ name, attrs, index: m.index ?? 0 });
+    tags.push({ name, attrs: parseAttrs(m[2]), index: m.index ?? 0 });
   }
   return tags;
 }
@@ -154,14 +157,91 @@ function toInt(v: string | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** 辿る候補のリンク */
+export interface LinkCandidate {
+  url: string;
+  /** リンクの中にあったサムネイル画像（一覧ページのサムネイル → 詳細ページの動画に引き継ぐ） */
+  thumb?: string;
+  /**
+   * 優先度。4: サムネイル付きで動画らしい / 3: サムネイル付き / 2: 動画らしい（再生時間・URL など）/
+   * 1: タップで移動する仕掛け（onclick・data-href）/ 0: 普通のリンク
+   */
+  prio: number;
+}
+
 export interface Extracted {
   /** 画面を JavaScript で後から描くサイトに見えるか（取れた件数が少ないときの説明用） */
   clientRendered: boolean;
+  /** 動画プレーヤーが置かれていそうなページか（動画が見つからなければブラウザで開いて再生を試す目安） */
+  playerHint: boolean;
   media: MediaItem[];
-  links: string[];
+  links: LinkCandidate[];
   /** ページ送り（次へ・2・3…）のリンク。階層を増やさずに辿る */
   pagination: string[];
+  /** iframe などで埋め込まれた別ページ（外部の動画プレーヤーなど）。中も読みに行く */
+  frames: string[];
+  /** ページの代表画像（og:image）。動画が少ないページでは、その動画のサムネイルに使う */
+  ogImage?: string;
   title?: string;
+}
+
+/** 「動画の詳細ページらしい」URL */
+const VIDEO_URL_RE =
+  /\/(?:video|videos|movie|movies|watch|v|vod|play|player|embed|douga|clip|clips|stream|episode)(?:[/_\-.?]|$)|[?&](?:v|vid|video_?id|viewkey|movie_?id)=/i;
+/** リンクの中の再生時間（12:34 / 1:02:03） */
+const DURATION_RE = /(?:^|[^\d:])\d{1,2}:\d{2}(?::\d{2})?(?:$|[^\d:])/;
+/** リンクの中の、動画のサムネイルらしい部品のクラス名 */
+const VIDEO_CLASS_RE = /\b[\w-]*(?:play|duration|video|movie|vid|time|length)[\w-]*\b/i;
+
+/** リンクの中身（innerHTML）からサムネイル画像を探す */
+function thumbInside(inner: string, base: string): string | undefined {
+  for (const m of inner.matchAll(/<(img|source|video)\b([^>]*)>/gi)) {
+    const a = parseAttrs(m[2]);
+    const raw =
+      m[1].toLowerCase() === "video"
+        ? a.poster || a["data-poster"]
+        : pickFromSrcset(a["data-srcset"]) ||
+          a["data-src"] ||
+          a["data-original"] ||
+          a["data-lazy-src"] ||
+          a["data-thumb"] ||
+          a["data-lazy"] ||
+          pickFromSrcset(a.srcset) ||
+          a.src;
+    const url = resolveUrl(raw, base);
+    if (!url || /\.svg(?:$|\?)/i.test(url)) continue;
+    const w = toInt(a.width);
+    if (w !== undefined && w < 40) continue;
+    return url;
+  }
+  const bg =
+    /url\(\s*(?:&quot;|["'])?([^"')]+?)(?:&quot;|["'])?\s*\)/i.exec(inner) ??
+    /\sdata-(?:bg|background|thumb|thumbnail|poster|image|src)\s*=\s*["']([^"']+)["']/i.exec(inner);
+  if (bg) {
+    const url = resolveUrl(decodeEntities(bg[1]), base);
+    if (url && kindFromUrl(url) !== "video") return url;
+  }
+  return undefined;
+}
+
+/** <a> ごとに、中のサムネイルと「動画らしさ」を調べる */
+function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean }> {
+  const out = new Map<string, { thumb?: string; videoish: boolean }>();
+  for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = parseAttrs(m[1]);
+    const url = resolveUrl(attrs.href, base);
+    if (!url) continue;
+    const inner = m[2];
+    const thumb = thumbInside(inner, base);
+    const text = stripTags(inner);
+    const videoish =
+      DURATION_RE.test(text) ||
+      VIDEO_URL_RE.test(url) ||
+      (!!thumb && VIDEO_CLASS_RE.test(`${attrs.class ?? ""} ${inner.slice(0, 2000)}`));
+    const prev = out.get(url);
+    out.set(url, { thumb: prev?.thumb ?? thumb, videoish: (prev?.videoish ?? false) || videoish });
+  }
+  return out;
 }
 
 /** URL がページ番号付きに見えるか（?page=2、/page/3、-p4 など） */
@@ -258,8 +338,9 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
 
   const tags = parseTags(
     markup,
-    new Set(["meta", "img", "source", "video", "a", "iframe", "link", "image"]),
+    new Set(["meta", "img", "source", "video", "a", "iframe", "embed", "object", "link", "image"]),
   );
+  const frames = new Set<string>();
 
   // --- 1. OGP / Twitter カード（ページの代表サムネイル） ---
   let ogImage: string | undefined;
@@ -346,9 +427,12 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       if (!url) continue;
       const kind = kindFromUrl(url) ?? (t.attrs.type?.startsWith("video") ? "video" : "image");
       add({ kind, src: url, format: formatOf(url, kind) });
-    } else if (t.name === "iframe") {
-      const url = resolveUrl(t.attrs.src || t.attrs["data-src"], base);
-      if (url) addEmbed(url, t.attrs.title);
+    } else if (t.name === "iframe" || t.name === "embed" || t.name === "object") {
+      const url = resolveUrl(t.attrs.src || t.attrs["data-src"] || t.attrs["data-lazy-src"] || t.attrs.data, base);
+      if (!url || addEmbed(url, t.attrs.title)) continue;
+      const kind = kindFromUrl(url);
+      if (kind === "video") add({ kind, src: url, format: formatOf(url, kind), unverified: true });
+      else if (!kind && isPageLikeUrl(url) && url !== pageUrl) frames.add(url);
     } else if (t.name === "link") {
       const rel = (t.attrs.rel || "").toLowerCase();
       if (rel === "image_src") {
@@ -359,7 +443,14 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   }
 
   // --- 4. <a href> : メディアへの直リンク、YouTube へのリンク、辿る候補のページ ---
-  const links: string[] = [];
+  const anchors = analyzeAnchors(markup, base);
+  const links = new Map<string, LinkCandidate>();
+  const addLink = (url: string, prio: number, thumb?: string) => {
+    const prev = links.get(url);
+    if (!prev || prio > prev.prio || (!prev.thumb && thumb)) {
+      links.set(url, { url, prio: Math.max(prio, prev?.prio ?? 0), thumb: prev?.thumb ?? thumb });
+    }
+  };
   for (const t of tags) {
     if (t.name !== "a") continue;
     const url = resolveUrl(t.attrs.href, base);
@@ -367,10 +458,50 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (addEmbed(url, t.attrs.title)) continue;
     const kind = kindFromUrl(url);
     if (kind) {
-      add({ kind, src: url, format: formatOf(url, kind), title: t.attrs.title, unverified: kind === "video" });
+      const info = anchors.get(url);
+      add({
+        kind,
+        src: url,
+        thumb: kind === "video" ? info?.thumb : undefined,
+        format: formatOf(url, kind),
+        title: t.attrs.title,
+        unverified: kind === "video",
+      });
     } else {
-      links.push(url);
+      const info = anchors.get(url);
+      const thumb = info?.thumb;
+      const videoish = info?.videoish || VIDEO_URL_RE.test(url);
+      addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb);
     }
+  }
+
+  // --- 4b. タップで移動する仕掛け（onclick="location.href='…'"、data-href など） ---
+  const clickTarget = (attrs: Record<string, string>): string | null => {
+    const direct = attrs["data-href"] ?? attrs["data-link"] ?? attrs["data-permalink"] ?? attrs["data-detail-url"] ?? attrs["data-url"];
+    if (direct) return resolveUrl(direct, base);
+    const code = attrs.onclick;
+    const target = code ? /(?:location(?:\.href)?\s*=|location\.(?:assign|replace)\(|window\.open\()\s*['"]([^'"]+)['"]/.exec(code) : null;
+    return target ? resolveUrl(target[1], base) : null;
+  };
+  // カード型（<div onclick=…><img …></div>）なら、中の画像をサムネイルとして引き継ぐ
+  for (const m of markup.matchAll(
+    /<(div|li|article|section|span|figure|td|button|p)\b([^>]*\b(?:onclick|data-href|data-link|data-permalink|data-detail-url|data-url)\s*=[^>]*)>([\s\S]{0,4000}?)<\/\1>/gi,
+  )) {
+    const url = clickTarget(parseAttrs(m[2]));
+    if (!url || kindFromUrl(url) || !isPageLikeUrl(url)) continue;
+    const thumb = thumbInside(m[3], base);
+    const videoish = VIDEO_URL_RE.test(url) || DURATION_RE.test(stripTags(m[3]));
+    addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb);
+  }
+  for (const m of markup.matchAll(/\sdata-(?:href|link|permalink|detail-url|url)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) {
+    const url = resolveUrl(decodeEntities(m[1] ?? m[2]), base);
+    if (url && !kindFromUrl(url) && isPageLikeUrl(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
+  }
+  for (const m of markup.matchAll(/\sonclick\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const code = decodeEntities(m[1] ?? m[2]);
+    const target = /(?:location(?:\.href)?\s*=|location\.(?:assign|replace)\(|window\.open\()\s*['"]([^'"]+)['"]/.exec(code);
+    const url = target ? resolveUrl(target[1], base) : null;
+    if (url && !kindFromUrl(url) && isPageLikeUrl(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
   }
 
   // --- 5. JSON-LD（構造化データ）の VideoObject / ImageObject ---
@@ -386,6 +517,11 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const unescaped = html.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/");
   for (const m of unescaped.matchAll(/https?:\/\/[^\s"'<>\\()]+?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),])/gi)) {
     const url = resolveUrl(m[0], base);
+    if (url) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
+  }
+  // 引用符で囲まれた相対パス・プロトコル省略の動画 URL（"/media/123.mp4"、'//cdn.example.com/a.m3u8' など）
+  for (const m of unescaped.matchAll(/["'`]((?:https?:)?\/[^"'`\s<>\\]*?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^"'`\s<>\\]*)?)["'`]/gi)) {
+    const url = resolveUrl(m[1], base);
     if (url) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
   }
 
@@ -437,7 +573,22 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const clientRendered =
     /__NEXT_DATA__|self\.__next_f|window\.__NUXT__|id=["']__nuxt["']|data-reactroot|id=["'](?:root|app)["']\s*>\s*<\/div>|ng-version=/i.test(html) ||
     (tags.filter((t) => t.name === "img").length < 3 && (html.match(/<script\b/gi)?.length ?? 0) > 10);
-  return { clientRendered, media: [...found.values()], links: [...new Set(links)], pagination, title: pageTitle };
+  const playerHint =
+    /video-js|videojs|jwplayer|jw-player|plyr|flowplayer|mediaelement|dplayer|artplayer|clappr|fluidplayer|shaka-player|<video\b|hls(?:\.min)?\.js|dash(?:\.all)?(?:\.min)?\.js|\.m3u8/i.test(
+      html,
+    ) || frames.size > 0;
+  // プレーヤーらしい iframe（URL に embed / player / video などを含む）を先に読む
+  const frameList = [...frames].sort((a, b) => Number(VIDEO_URL_RE.test(b)) - Number(VIDEO_URL_RE.test(a)));
+  return {
+    clientRendered,
+    playerHint,
+    media: [...found.values()],
+    links: [...links.values()],
+    pagination,
+    frames: frameList.slice(0, 6),
+    ogImage,
+    title: pageTitle,
+  };
 }
 
 type AddFn = (item: Omit<MediaItem, "id" | "pageUrl">) => void;

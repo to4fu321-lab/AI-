@@ -64,6 +64,8 @@ function releaseTab() {
 export interface NetworkMedia {
   url: string;
   kind: "image" | "video";
+  /** その通信を出したページ（iframe の中のプレーヤーなら、そのプレーヤーのページ） */
+  referer?: string;
 }
 
 export interface Rendered {
@@ -71,14 +73,66 @@ export interface Rendered {
   finalUrl: string;
   /** 表示中にブラウザが受け取った画像・動画 */
   network: NetworkMedia[];
+  /** ページの中の iframe（外部の動画プレーヤーなど）の、表示後の HTML */
+  frames: { url: string; html: string }[];
 }
+
+export interface RenderOptions {
+  /** 動画を探すときは、再生ボタンを押して動画の読み込みを始めさせる */
+  play?: boolean;
+}
+
+const MAX_FRAMES = 5;
+const MAX_FRAME_HTML = 1.5 * 1024 * 1024;
+
+/**
+ * ページ（と iframe の中）で、動画を再生させる。
+ * - <video> は音を消して play()
+ * - よくある動画プレーヤーの再生ボタンを、最大 3 個まで押す
+ * 別のページへ移動するリンクは押さない（移動自体も止めてある）
+ * ビルド時の変換の影響を受けないよう、ブラウザに渡すコードは文字列で持つ
+ */
+const PRESS_PLAY = `(() => {
+  for (const v of Array.from(document.querySelectorAll("video"))) {
+    v.muted = true;
+    const p = v.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+  const selectors = [
+    ".vjs-big-play-button", ".jw-display-icon-container", ".jw-icon-display", ".plyr__control--overlaid",
+    ".fp-play", ".mejs__overlay-button", ".dplayer-mobile-play", ".art-control-play",
+    "[class*='play-button']", "[class*='playbutton']", "[class*='btn-play']", "[class*='play-btn']",
+    "button[aria-label*='play' i]", "button[aria-label*='再生']", "button[title*='play' i]", "[class*='play']",
+  ];
+  let clicked = 0;
+  for (const sel of selectors) {
+    let els = [];
+    try { els = Array.from(document.querySelectorAll(sel)); } catch (e) { continue; }
+    for (const el of els) {
+      if (clicked >= 3) return clicked;
+      const r = el.getBoundingClientRect();
+      if (r.width < 10 || r.height < 10) continue;
+      const a = el.closest("a[href]");
+      if (a && !/^(#|javascript:)/i.test(a.getAttribute("href") || "")) continue;
+      el.click();
+      clicked++;
+    }
+  }
+  return clicked;
+})()`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** タブの空き待ちの間に区切りの時刻を過ぎたときに投げる（ページは次の回に回す） */
 export class RenderDeferred extends Error {}
 
-export async function renderPage(url: string, signal: AbortSignal, startBy: number, timeoutMs = 25000): Promise<Rendered> {
+export async function renderPage(
+  url: string,
+  signal: AbortSignal,
+  startBy: number,
+  options: RenderOptions = {},
+  timeoutMs = 25000,
+): Promise<Rendered> {
   await assertPublicUrl(url);
   await acquireTab();
   if (Date.now() > startBy) {
@@ -125,15 +179,30 @@ export async function renderPage(url: string, signal: AbortSignal, startBy: numb
       return ok;
     };
 
+    /** 最初の表示が終わったら true。その後のページ移動（再生ボタンのつもりがリンクだった等）は止める */
+    let loaded = false;
+    const frameUrlOf = (req: HTTPRequest) => {
+      const f = req.frame();
+      const u = f?.url();
+      return u && /^https?:/.test(u) ? u : undefined;
+    };
+    // 広告などで新しいウィンドウが開いたらすぐ閉じる
+    page.on("popup", (p) => void p?.close().catch(() => {}));
+
     await page.setRequestInterception(true);
     page.on("request", (req: HTTPRequest) => {
       void (async () => {
         const reqUrl = req.url();
         if (!(await isAllowed(reqUrl))) return req.abort("blockedbyclient").catch(() => {});
+        if (loaded && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+          return req.abort("aborted").catch(() => {});
+        }
         const type = req.resourceType();
         // 動画本体やフォントは読まない（URL だけ記録する）。通信量と時間の節約
         if (type === "media") {
-          if (!reqUrl.startsWith("blob:")) network.set(reqUrl, { url: reqUrl, kind: kindFromUrl(reqUrl) === "image" ? "image" : "video" });
+          if (!reqUrl.startsWith("blob:")) {
+            network.set(reqUrl, { url: reqUrl, kind: kindFromUrl(reqUrl) === "image" ? "image" : "video", referer: frameUrlOf(req) });
+          }
           return req.abort("aborted").catch(() => {});
         }
         if (type === "font") return req.abort("aborted").catch(() => {});
@@ -149,7 +218,7 @@ export async function renderPage(url: string, signal: AbortSignal, startBy: numb
       // アイコンなどの小さな画像（1.5KB 未満）は除く
       const size = Number(headers["content-length"]);
       if (kind === "image" && Number.isFinite(size) && size > 0 && size < 1500) return;
-      network.set(resUrl, { url: resUrl, kind });
+      network.set(resUrl, { url: resUrl, kind, referer: frameUrlOf(res.request()) });
     });
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs }).catch(async (err) => {
@@ -166,8 +235,29 @@ export async function renderPage(url: string, signal: AbortSignal, startBy: numb
       if (atBottom) break;
     }
     await page.waitForNetworkIdle({ idleTime: 600, timeout: 5000 }).catch(() => {});
+    loaded = true;
+
+    // 再生ボタンを押して、動画の読み込みを始めさせる（読み込まれた動画の URL は通信の記録に残る）
+    if (options.play && !signal.aborted) {
+      let pressed = 0;
+      for (const frame of page.frames()) {
+        pressed += Number(await frame.evaluate(PRESS_PLAY).catch(() => 0)) || 0;
+      }
+      if (pressed > 0 || network.size === 0) {
+        await page.waitForNetworkIdle({ idleTime: 800, timeout: 6000 }).catch(() => {});
+      }
+    }
+
     const html = await page.content();
-    return { html, finalUrl: page.url(), network: [...network.values()] };
+    const frames: { url: string; html: string }[] = [];
+    for (const f of page.frames()) {
+      if (f === page.mainFrame() || frames.length >= MAX_FRAMES) continue;
+      const frameUrl = f.url();
+      if (!/^https?:/.test(frameUrl)) continue;
+      const frameHtml = await f.content().catch(() => "");
+      if (frameHtml) frames.push({ url: frameUrl, html: frameHtml.slice(0, MAX_FRAME_HTML) });
+    }
+    return { html, finalUrl: page.url(), network: [...network.values()], frames };
   } finally {
     signal.removeEventListener("abort", onAbort);
     try {

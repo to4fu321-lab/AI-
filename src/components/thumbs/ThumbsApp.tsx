@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
+import { getVideoThumb, peekVideoThumb } from "./videoThumb";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
@@ -51,8 +52,12 @@ function describeError(err: unknown): string {
   return message;
 }
 
-export function proxyUrl(item: Pick<MediaItem, "src" | "pageUrl">, opts: { download?: boolean; name?: string } = {}) {
-  const p = new URLSearchParams({ url: item.src, ref: item.pageUrl });
+export function proxyUrl(
+  item: Pick<MediaItem, "src" | "pageUrl" | "referer">,
+  opts: { download?: boolean; name?: string } = {},
+) {
+  // iframe の中のプレーヤーで見つけた動画は、そのプレーヤーのページを Referer にしないと断られることがある
+  const p = new URLSearchParams({ url: item.src, ref: item.referer ?? item.pageUrl });
   if (opts.download) p.set("dl", "1");
   if (opts.name) p.set("name", opts.name);
   return `/api/thumbs/media?${p}`;
@@ -113,20 +118,39 @@ export function ThumbsApp() {
     setNow(Date.now());
     loaded.current = true;
   }, []);
+  // 一覧の保存。変化が続く間は 0.5 秒待ってまとめて保存し、画面が隠れる（アプリ切り替え・閉じる）ときはすぐ保存する
+  const latest = useRef({ items, jobs });
+  const dirty = useRef(false);
+  const saveNow = useCallback(() => {
+    if (!loaded.current || !dirty.current) return;
+    dirty.current = false;
+    try {
+      // 途中経過は大きいので、新しい 5 件のジョブ分だけ保存する
+      let kept = 0;
+      const slimJobs = latest.current.jobs.map((j) => (j.resume && kept++ < 5 ? j : { ...j, resume: undefined }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: latest.current.items.slice(0, MAX_ITEMS), jobs: slimJobs }));
+    } catch {
+      /* 容量オーバーなどは無視 */
+    }
+  }, []);
   useEffect(() => {
     if (!loaded.current) return;
-    const t = setTimeout(() => {
-      try {
-        // 途中経過は大きいので、新しい 5 件のジョブ分だけ保存する
-        let kept = 0;
-        const slimJobs = jobs.map((j) => (j.resume && kept++ < 5 ? j : { ...j, resume: undefined }));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: items.slice(0, MAX_ITEMS), jobs: slimJobs }));
-      } catch {
-        /* 容量オーバーなどは無視 */
-      }
-    }, 500);
+    latest.current = { items, jobs };
+    dirty.current = true;
+    const t = setTimeout(saveNow, 500);
     return () => clearTimeout(t);
-  }, [items, jobs]);
+  }, [items, jobs, saveNow]);
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") saveNow();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", saveNow);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", saveNow);
+    };
+  }, [saveNow]);
   useEffect(() => {
     if (!loaded.current) return;
     try {
@@ -542,6 +566,7 @@ function EmptyState() {
         <li>・JavaScript で画像を後から出すサイトは、自動でブラウザで開いて集めます（少し時間がかかります）</li>
         <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
         <li>・🎬 は動画、🖼 は画像。タップで再生・拡大、ダウンロードもできます</li>
+        <li>・サムネイルのない動画は、動画から 1 コマ取り出してサムネイルを作ります（この端末に保存）</li>
         <li>・一覧はこの端末のブラウザに保存されます</li>
       </ul>
     </div>
@@ -634,23 +659,58 @@ function JobRow({
 
 /**
  * サムネイル 1 枚。
- * まず元サイトから直接読み込み（referrerPolicy=no-referrer で直リンク制限を避ける）、
- * 失敗したらサーバー中継で再挑戦、それもダメなら一覧から外す。
+ * - 画像・サムネイルは、まず元サイトから直接読み込み（referrerPolicy=no-referrer で直リンク制限を避ける）、
+ *   失敗したらサーバー中継で再挑戦。画像がそれでも駄目なら一覧から外す
+ * - サムネイルのない動画（または読み込めなかった動画）は、画面に見えたら動画から 1 コマ取り出して作る
  */
 function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onBroken: (id: string) => void }) {
   const imageSrc = item.kind === "image" ? item.src : item.thumb;
   const [attempt, setAttempt] = useState(0);
-  const [failed, setFailed] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
+  const [captured, setCaptured] = useState<string | null | undefined>(() => peekVideoThumb(item.src));
+  const [visible, setVisible] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
   const video = isVideoLike(item);
+  const needCapture = item.kind === "video" && !isHls(item) && (!imageSrc || imgFailed) && captured === undefined;
+  const proxied = proxyUrl(item);
+
+  // 画面に入ったら（少し手前から）作り始める。一度見えたら覚えておく
+  useEffect(() => {
+    if (!needCapture || visible) return;
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [needCapture, visible]);
+
+  useEffect(() => {
+    if (!needCapture || !visible) return;
+    let alive = true;
+    void getVideoThumb(item.src, proxied).then((result) => {
+      if (alive) setCaptured(result);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [needCapture, visible, item.src, proxied]);
 
   const onError = () => {
     if (attempt === 0) setAttempt(1);
     else if (item.kind === "image") onBroken(item.id);
-    else setFailed(true);
+    else setImgFailed(true);
   };
 
   let media: React.ReactNode;
-  if (imageSrc && !failed) {
+  if (imageSrc && !imgFailed) {
     const src = attempt === 0 ? imageSrc : proxyUrl({ src: imageSrc, pageUrl: item.pageUrl });
     media = (
       // eslint-disable-next-line @next/next/no-img-element -- 外部サイトの任意の画像を出すため next/image は使わない
@@ -669,29 +729,21 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
         className="h-full w-full object-cover"
       />
     );
-  } else if (item.kind === "video" && !isHls(item) && !failed) {
-    // ポスター画像がない動画は、動画の冒頭フレームをサムネイル代わりにする
-    const src = attempt === 0 ? item.src : proxyUrl(item);
-    media = (
-      <video
-        src={`${src}#t=0.5`}
-        preload="metadata"
-        muted
-        playsInline
-        onError={onError}
-        className="pointer-events-none h-full w-full object-cover"
-      />
-    );
+  } else if (captured) {
+    // eslint-disable-next-line @next/next/no-img-element -- 端末の中で作った画像（data URL）
+    media = <img src={captured} alt={item.title ?? ""} className="h-full w-full object-cover" />;
   } else {
     media = (
       <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-gradient-to-br from-neutral-700 to-neutral-900 text-white">
-        <span className="text-2xl">🎬</span>
+        <span className={`text-2xl ${needCapture ? "animate-pulse" : ""}`}>🎬</span>
+        {needCapture && <span className="text-[9px] opacity-60">サムネ作成中</span>}
       </div>
     );
   }
 
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onOpen}
       className="group relative block aspect-square w-full overflow-hidden rounded-lg bg-neutral-200 active:scale-[0.97] dark:bg-neutral-800"
@@ -783,7 +835,7 @@ function Viewer({
       <video
         key={`${item.id}-${useProxy}`}
         src={src}
-        poster={item.thumb}
+        poster={item.thumb ?? peekVideoThumb(item.src) ?? undefined}
         controls
         autoPlay
         playsInline
