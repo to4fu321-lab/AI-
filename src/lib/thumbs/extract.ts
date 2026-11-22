@@ -4,6 +4,16 @@ import { hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { findTweetIds, gifVideoFromThumb, isTwitterVideoThumb, tweetIdOf } from "./twitter";
 
+/** Gofile の共有フォルダの番号（gofile.io/d/番号。違えば null）。gofile.ts はサーバー専用なので、ここにも小さく持つ */
+export function gofileLinkId(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    return /(?:^|\.)gofile\.io$/i.test(u.hostname) ? (/^\/d\/([\w-]{4,40})/.exec(u.pathname)?.[1] ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * HTML からメディア（画像・動画）と、辿る候補のリンクを取り出す。
  *
@@ -244,6 +254,8 @@ export interface Extracted {
    * 辿らずに、投稿の番号から動画を直接もらう（twitter.ts）。カードのサムネイル・再生時間も一緒に持つ
    */
   tweets: TweetRef[];
+  /** リンクなどで見つけた Gofile の共有フォルダの番号（gofile.io/d/番号）。ページは読まず、API で中身をもらう */
+  gofile: string[];
 }
 
 export interface TweetRef {
@@ -444,7 +456,10 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const pageTitle = titleMatch ? decodeEntities(titleMatch[1]).trim().slice(0, 200) : undefined;
 
   const found = new Map<string, MediaItem>();
-  const add = (item: Omit<MediaItem, "id" | "pageUrl">): MediaItem => {
+  const add = (raw: Omit<MediaItem, "id" | "pageUrl">): MediaItem => {
+    // ファイル保存サービスのプレビュー画面の URL（Dropbox の …/名前.mp4?dl=0 など）は、ファイルそのものの URL に直す
+    const hosted = raw.kind !== "embed" ? hostedFile(raw.src) : null;
+    const item = hosted && hosted.src !== raw.src ? { ...raw, src: hosted.src, format: hosted.service, thumb: raw.thumb ?? hosted.thumb } : raw;
     const id = item.src;
     const existing = found.get(id);
     if (existing) {
@@ -497,6 +512,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   );
   const frames = new Set<string>();
   const tweets = new Map<string, TweetRef>();
+  const gofile = new Set<string>();
   const addTweet = (id: string, thumb?: string, duration?: number) => {
     if (tweets.size >= 150 && !tweets.has(id)) return;
     const prev = tweets.get(id);
@@ -641,6 +657,12 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (t.name !== "a") continue;
     const url = resolveUrl(t.attrs.href, base);
     if (!url) continue;
+    // Gofile の共有フォルダへのリンク：辿らずに、番号として集める
+    const share = gofileLinkId(url);
+    if (share) {
+      gofile.add(share);
+      continue;
+    }
     // X の投稿へのリンク：辿らずに、投稿の番号として集める（カードのサムネイル・再生時間も）
     const tweet = tweetIdOf(url);
     if (tweet) {
@@ -854,6 +876,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
 
   // スクリプト・data 属性の中の投稿の番号（JavaScript で一覧を描くサイト・埋め込み投稿）
   for (const id of findTweetIds(html, 150)) addTweet(id);
+  for (const m of html.replace(/\\\//g, "/").matchAll(/gofile\.io\/d\/([\w-]{4,40})/g)) if (gofile.size < 30) gofile.add(m[1]);
   // X の動画のサムネイルは画像としては出さない（動画の表紙なので）。GIF アニメは表紙の名前から動画がわかる
   for (const m of [...found.values()]) {
     if (m.kind !== "image" || !isTwitterVideoThumb(m.src)) continue;
@@ -885,6 +908,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     redirect,
     gate,
     tweets: [...tweets.values()],
+    gofile: [...gofile],
   };
 }
 

@@ -147,6 +147,8 @@ function parsePending(value: unknown): MediaItem[] {
     if (duration) item.duration = duration;
     if (v.unverified === true) item.unverified = true;
     if (v.guess === true) item.guess = true;
+    const cookie = shortText(v.cookie, 600);
+    if (cookie && /^[a-z0-9.-]+\|[^=;|]+=[^;|]+$/i.test(cookie)) item.cookie = cookie;
     item.tries = clamp(v.tries, 0, 10, 0);
     out.push(item);
   }

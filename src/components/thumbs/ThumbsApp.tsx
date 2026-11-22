@@ -63,11 +63,13 @@ function describeError(err: unknown): string {
 }
 
 export function proxyUrl(
-  item: Pick<MediaItem, "src" | "pageUrl" | "referer">,
+  item: Pick<MediaItem, "src" | "pageUrl" | "referer" | "cookie">,
   opts: { download?: boolean; name?: string } = {},
 ) {
   // iframe の中のプレーヤーで見つけた動画は、そのプレーヤーのページを Referer にしないと断られることがある
   const p = new URLSearchParams({ url: item.src, ref: item.referer ?? item.pageUrl });
+  // Gofile などの合言葉（Cookie）が要るファイルは、それも中継に渡す
+  if (item.cookie) p.set("ck", item.cookie);
   if (opts.download) p.set("dl", "1");
   if (opts.name) p.set("name", opts.name);
   return `/api/thumbs/media?${p}`;
@@ -96,6 +98,7 @@ function checkLink(item: MediaItem): Promise<LinkState> {
       checking++;
       try {
         const p = new URLSearchParams({ url: item.src, ref: item.referer ?? item.pageUrl, check: "1", kind: item.kind });
+        if (item.cookie) p.set("ck", item.cookie);
         const res = await fetch(`/api/thumbs/media?${p}`);
         if (!res.ok) return "unknown";
         const alive = (await res.json()).alive;
@@ -791,7 +794,7 @@ function EmptyState() {
         <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
         <li>・🎬 は動画、🖼 は画像。右下の数字は動画の長さ。タップで再生・拡大、ダウンロードもできます</li>
         <li>・一覧の大きさは右上の − ＋ で変えられます（スマホは 2 本指でピンチ、パソコンは Ctrl + ホイールでも）</li>
-        <li>・Google ドライブ・Dropbox・OneDrive などの共有リンクも、そのまま入れれば動画を取り出します</li>
+        <li>・Google ドライブ・Dropbox（フォルダも）・OneDrive・Gofile などの共有リンクも、そのまま入れれば動画を取り出します</li>
         <li>・X（旧 Twitter）の投稿の URL や、X の動画保存・ランキング系サイトも、投稿の番号から動画を取り出します</li>
         <li>・広告は自動で止め、再生ボタンや「広告をスキップ」も自動で押して、奥にある動画を探します</li>
         <li>・サムネイルのない動画は、動画から 1 コマ取り出してサムネイルを作ります（この端末に保存）</li>
@@ -984,7 +987,9 @@ function Thumb({
 
   let media: React.ReactNode;
   if (imageSrc && !imgFailed) {
-    const src = attempt === 0 ? imageSrc : proxyUrl({ src: imageSrc, pageUrl: item.pageUrl });
+    // 合言葉（Cookie）が要るファイルは、直接では読めないので最初から中継で読む
+    const viaProxy = attempt > 0 || (!!item.cookie && imageSrc === item.src);
+    const src = viaProxy ? proxyUrl({ src: imageSrc, pageUrl: item.pageUrl, cookie: imageSrc === item.src ? item.cookie : undefined }) : imageSrc;
     media = (
       // eslint-disable-next-line @next/next/no-img-element -- 外部サイトの任意の画像を出すため next/image は使わない
       <img
@@ -1060,7 +1065,8 @@ function Thumb({
  */
 function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => void; onStage: (stage: "direct" | "proxy") => void }) {
   const ref = useRef<HTMLVideoElement>(null);
-  const [stage, setStage] = useState<"direct" | "proxy">("direct");
+  // 合言葉（Cookie）が要る動画（Gofile など）は、この端末から直接は読めないので最初からサーバー経由
+  const [stage, setStage] = useState<"direct" | "proxy">(item.cookie ? "proxy" : "direct");
   /** 切り替える前に再生していた位置（切り替え後に続きから再生する） */
   const resumeAt = useRef(0);
   const giveUp = useRef(onGiveUp);
@@ -1164,7 +1170,7 @@ function Viewer({
   const item = items[index];
   /** リンク切れを外したことのお知らせ（次の動画に切り替わったあとも少し出しておく） */
   const [removed, setRemoved] = useState<string | null>(null);
-  const [useProxy, setUseProxy] = useState(false);
+  const [useProxy, setUseProxy] = useState(!!item.cookie);
   /** 動画をどこから読んでいるか（直接 / サーバー経由） */
   const [stage, setStage] = useState<"direct" | "proxy">("direct");
   /** 再生・表示できなかった理由（サーバー経由でも駄目だったとき、調べて出す） */
@@ -1175,13 +1181,13 @@ function Viewer({
     (delta: number) => {
       const next = index + delta;
       if (next >= 0 && next < items.length) {
-        setUseProxy(false);
+        setUseProxy(!!items[next].cookie);
         setPlayError(null);
         setRemoved(null);
         onIndex(next);
       }
     },
-    [index, items.length, onIndex],
+    [index, items, onIndex],
   );
 
   useEffect(() => {

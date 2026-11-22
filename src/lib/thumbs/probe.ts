@@ -1,7 +1,7 @@
 import "server-only";
 import type { MediaItem } from "./types";
 import { kindFromContentType, youtubeId } from "./extract";
-import { type CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
+import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { looksLikeImage, looksLikePlaylist, looksLikeVideo, readHead } from "./sniff";
 import { durationFromHead, moovOffset, playlistDuration } from "./duration";
 
@@ -231,8 +231,12 @@ export function checkEmbed(src: string, signal: AbortSignal): Promise<Probe> {
 }
 
 /** 1 件の画像・動画・埋め込み動画を確かめる */
-export function checkMedia(item: Pick<MediaItem, "kind" | "src" | "referer" | "pageUrl">, signal: AbortSignal, jar?: CookieJar): Promise<Probe> {
+export function checkMedia(
+  item: Pick<MediaItem, "kind" | "src" | "referer" | "pageUrl" | "cookie">,
+  signal: AbortSignal,
+  jar?: CookieJar,
+): Promise<Probe> {
   const referer = item.referer ?? item.pageUrl;
   if (item.kind === "embed") return checkEmbed(item.src, signal);
-  return checkFile(item.src, item.kind, referer, signal, jar);
+  return checkFile(item.src, item.kind, referer, signal, CookieJar.withItemCookie(jar, item.cookie));
 }

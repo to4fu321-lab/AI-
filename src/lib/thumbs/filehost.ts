@@ -60,12 +60,17 @@ export function hostedFile(raw: string): HostedFile | null {
     return null;
   }
 
-  // --- Dropbox：/s/…・/scl/fi/…（dl=0 を dl=1 にすると、ファイルそのものが返る）---
-  if ((host === "dropbox.com" || host === "dl.dropbox.com") && /^\/(?:s|scl\/fi)\//.test(path)) {
+  // --- Dropbox ---
+  // ファイルの共有リンク：/s/ID/名前・/scl/fi/ID/名前
+  // フォルダの中のファイル：/scl/fo/フォルダ/…/名前.mp4・/sh/フォルダ/…/名前.mp4（最後に拡張子付きの名前があるもの）
+  // 「?」より後ろ（rlkey・st などの合言葉）はすべて残し、dl=0 を raw=1 にする（ファイルそのものが、再生できる形で返る）
+  // フォルダそのもの（名前のないもの）は書き換えず、ページとして読んで中のファイルのリンクを集める
+  if (host === "dropbox.com" || host === "dl.dropbox.com") {
+    const file = /^\/(?:s|scl\/fi)\//.test(path) || (/^\/(?:scl\/fo|sh)\//.test(path) && /\/[^/]+\.[a-z0-9]{2,5}$/i.test(path));
+    if (!file) return null;
     const out = new URL(`https://www.dropbox.com${path}`);
-    const rlkey = u.searchParams.get("rlkey");
-    if (rlkey) out.searchParams.set("rlkey", rlkey);
-    out.searchParams.set("dl", "1");
+    for (const [k, v] of u.searchParams) if (k !== "dl" && k !== "raw") out.searchParams.set(k, v);
+    out.searchParams.set("raw", "1");
     return { src: out.toString(), service: "Dropbox", sure };
   }
 

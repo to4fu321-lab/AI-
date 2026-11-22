@@ -7,6 +7,7 @@ import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { tweetIdOf, tweetVideos } from "./twitter";
+import { gofileFiles, gofileId } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { mediaMime, readHead } from "./sniff";
@@ -566,6 +567,35 @@ export async function* crawl(
     return out;
   };
 
+  /** 中身を聞いた Gofile のフォルダ */
+  const seenGofile = new Set<string>();
+  /** Gofile のフォルダの中身を、画像・動画の一覧にする（1 ページあたり 10 フォルダまで） */
+  const gofileMedia = async (ids: string[]): Promise<{ media: MediaItem[]; error?: string }> => {
+    const todo = ids.filter((id) => !seenGofile.has(id)).slice(0, 10);
+    const media: MediaItem[] = [];
+    let error: string | undefined;
+    for (const id of todo) {
+      if (Date.now() > deadline || signal.aborted) break;
+      seenGofile.add(id);
+      const r = await gofileFiles(id, signal).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
+      error ??= r.error;
+      for (const f of r.files) {
+        media.push({
+          id: f.src,
+          kind: f.kind,
+          src: f.src,
+          pageUrl: f.pageUrl,
+          referer: "https://gofile.io/",
+          thumb: f.thumb,
+          title: f.name,
+          format: "Gofile",
+          cookie: f.cookie,
+        });
+      }
+    }
+    return { media, error };
+  };
+
   const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
     const media: MediaItem[] = [];
     let playerHint = false;
@@ -649,6 +679,32 @@ export async function* crawl(
       return events;
     }
     // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
+    // Gofile の共有フォルダそのものなら、ページを開かず API で中身をもらう
+    const share = gofileId(url);
+    if (share) {
+      seenGofile.delete(share);
+      const g = await gofileMedia([share]);
+      const items = g.media
+        .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true))
+        .filter((m) => !seenMedia.has(m));
+      for (const m of items) seenMedia.add(m);
+      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 15000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(await settle(verified));
+      found += ok.length;
+      videos += ok.filter((m) => m.kind !== "image").length;
+      events.push({ type: "page", url, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      if (!ok.length && !verified.rest.length && item.root) {
+        noted = true;
+        events.push({
+          type: "note",
+          url,
+          message: g.error ?? (g.media.length ? "Gofile のファイルは見つかりましたが、読めませんでした（有料会員限定・期限切れの可能性があります）" : "この Gofile フォルダに画像・動画はありませんでした"),
+        });
+      }
+      return events;
+    }
     // X の投稿そのものなら、ページを開かず投稿の動画を出す
     const tweet = wantsVideo ? tweetIdOf(url) : null;
     if (tweet) {
@@ -798,6 +854,8 @@ export async function* crawl(
       // iframe の中の動画プレーヤー（動画を探すときだけ。ブラウザで開いたときは、ブラウザが開いた中身を後で使う）
       // X の投稿へのリンク（保存・ランキング系のサイト）は、投稿の番号から動画を直接もらう
       if (wantsVideo && extracted.tweets.length) media.push(...(await tweetMedia(extracted.tweets)));
+      // Gofile の共有フォルダへのリンクは、API で中身をもらう
+      if (extracted.gofile.length) media.push(...(await gofileMedia(extracted.gofile)).media);
       let frameHint = false;
       if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
@@ -842,6 +900,7 @@ export async function* crawl(
           for (const p of again.pagination) pagination.add(p);
           ogImage ??= again.ogImage;
           if (wantsVideo) media.push(...(await tweetMedia([...again.tweets, ...r.tweets.map((id) => ({ id }))])));
+          if (again.gofile.length) media.push(...(await gofileMedia(again.gofile)).media);
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
@@ -898,6 +957,7 @@ export async function* crawl(
           prev.thumb ??= m.thumb;
           prev.title ??= m.title;
           prev.referer ??= m.referer;
+          prev.cookie ??= m.cookie;
           if (!m.unverified) prev.unverified = undefined;
           if (!m.guess) prev.guess = undefined;
         }

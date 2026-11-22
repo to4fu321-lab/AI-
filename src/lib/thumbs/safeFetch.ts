@@ -161,6 +161,16 @@ export class CookieJar {
     return parts.length ? parts.join("; ") : undefined;
   }
 
+  /**
+   * MediaItem.cookie（"ドメイン|名前=値"）を足した入れ物を作る。元の入れ物は変えない。
+   * ドメインの形が正しくないものは無視する
+   */
+  static withItemCookie(base: CookieJar | undefined, cookie: string | undefined): CookieJar | undefined {
+    const m = cookie ? /^([a-z0-9.-]+\.[a-z]{2,})\|([^=;|]+=[^;|]{1,2000})$/i.exec(cookie) : null;
+    if (!m) return base;
+    return new CookieJar([...(base?.toJSON() ?? []), [m[1].toLowerCase(), m[2]]]);
+  }
+
   /** 続きの回へ渡せる形にする */
   toJSON(): [string, string][] {
     return [...this.store].map(([domain, map]) => [domain, [...map].map(([n, v]) => `${n}=${v}`).join("; ")] as [string, string]);
