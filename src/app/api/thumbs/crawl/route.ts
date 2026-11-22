@@ -1,11 +1,11 @@
 import { guardApi } from "@/lib/access/locks";
 import { crawl, MAX_QUEUE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
-import type { CrawlEvent, CrawlState } from "@/lib/thumbs/types";
+import type { CrawlEvent, CrawlOptions, CrawlState } from "@/lib/thumbs/types";
 
 export const runtime = "nodejs";
 /** Vercel の関数の最大実行時間（秒）。クロールはこの手前で打ち切る */
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const clamp = (n: unknown, min: number, max: number, fallback: number) => {
   const v = typeof n === "number" && Number.isFinite(n) ? Math.round(n) : fallback;
@@ -25,6 +25,7 @@ export async function POST(request: Request) {
     maxPages?: unknown;
     maxPagination?: unknown;
     crossSite?: unknown;
+    render?: unknown;
     resume?: unknown;
   };
   try {
@@ -46,11 +47,12 @@ export async function POST(request: Request) {
     maxPages: clamp(body.maxPages, 1, 1000, 100),
     maxPagination: clamp(body.maxPagination, 0, 50, 50),
     crossSite: body.crossSite === true,
+    render: (body.render === "always" || body.render === "off" ? body.render : "auto") as CrawlOptions["render"],
   };
   const resume = parseResume(body.resume);
-  // 1 ページの読み込みに最大 15 秒かかるので、上限の 20 秒前には区切って続きを画面に預ける
+  // ブラウザで開くと 1 ページに最大 35 秒ほどかかるので、上限の 40 秒前には区切って続きを画面に預ける
   // （THUMBS_CHUNK_MS はテストで区切りを短くするためのもの。本番では設定しない）
-  const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 20) * 1000;
+  const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 40) * 1000;
   const deadline = Date.now() + chunkMs;
   const encoder = new TextEncoder();
   const abort = new AbortController();

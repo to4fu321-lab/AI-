@@ -52,6 +52,7 @@ export function ThumbsApp() {
   const [maxPages, setMaxPages] = useState(100);
   const [maxPagination, setMaxPagination] = useState(50);
   const [crossSite, setCrossSite] = useState(false);
+  const [render, setRender] = useState<"auto" | "always" | "off">("auto");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -112,7 +113,7 @@ export function ThumbsApp() {
 
   const startJob = useCallback(
     async (url: string, override?: CrawlSettings) => {
-      const settings: CrawlSettings = override ?? { depth, maxPages, maxPagination, crossSite };
+      const settings: CrawlSettings = override ?? { depth, maxPages, maxPagination, crossSite, render };
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const controller = new AbortController();
       controllers.current.set(id, controller);
@@ -178,7 +179,7 @@ export function ThumbsApp() {
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, updateJob, recordHistory],
+    [depth, maxPages, maxPagination, crossSite, render, updateJob, recordHistory],
   );
 
   const onSubmit = (e: React.FormEvent) => {
@@ -320,6 +321,14 @@ export function ThumbsApp() {
               </select>
             </label>
             <label className="flex items-center gap-1.5">
+              ブラウザで開く
+              <select value={render} onChange={(e) => setRender(e.target.value as "auto" | "always" | "off")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+                <option value="auto">自動</option>
+                <option value="always">常に（遅い）</option>
+                <option value="off">使わない</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5">
               <input
                 type="checkbox"
                 checked={crossSite}
@@ -356,7 +365,7 @@ export function ThumbsApp() {
                 onStop={() => stopJob(job.id)}
                 saved={sites.some((s) => s.url === job.url)}
                 canSave={sites.length < MAX_SITES}
-                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite })}
+                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render })}
                 onRemove={() => removeJob(job.id)}
               />
             ))}
@@ -424,6 +433,7 @@ function EmptyState() {
         <li>・「下の階層」を選ぶと、入力したページより下のページもリンクを辿って集めます（最大20階層）</li>
         <li>・「ページ送り」で、2ページ目・次へ などの続きのページも集めます（最大50ページ）</li>
         <li>・「別のサイトへのリンクも辿る」にすると、リンク先の別サイトからも集めます</li>
+        <li>・JavaScript で画像を後から出すサイトは、自動でブラウザで開いて集めます（少し時間がかかります）</li>
         <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
         <li>・🎬 は動画、🖼 は画像。タップで再生・拡大、ダウンロードもできます</li>
         <li>・一覧はこの端末のブラウザに保存されます</li>

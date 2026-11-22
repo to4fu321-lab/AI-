@@ -1,5 +1,6 @@
 import "server-only";
-import { extractFromHtml, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { extractFromHtml, formatOf, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { renderPage, type NetworkMedia } from "./render";
 import { safeFetch } from "./safeFetch";
 import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
@@ -186,17 +187,53 @@ export async function* crawl(
         return events;
       }
       const html = await readLimited(res, MAX_HTML_BYTES);
-      const { media, links, pagination, clientRendered } = extractFromHtml(html, finalUrl);
-      const fresh = media.filter((m) => !seenMedia.has(m.id));
-      for (const m of fresh) seenMedia.add(m.id);
+      let extracted = extractFromHtml(html, finalUrl);
+      let network: NetworkMedia[] = [];
+      let rendered = false;
+      let renderError: string | null = null;
+      // JavaScript で描くページで、画像やリンクがほとんど取れなかったときは、ブラウザで開き直す
+      const looksEmpty = extracted.media.length <= 2 || extracted.links.length < 3;
+      const wantRender =
+        options.render === "always" || (options.render === "auto" && extracted.clientRendered && looksEmpty);
+      if (wantRender && Date.now() < deadline) {
+        try {
+          const r = await renderPage(finalUrl, signal);
+          const again = extractFromHtml(r.html, r.finalUrl);
+          extracted = {
+            ...again,
+            media: [...extracted.media, ...again.media],
+            links: [...new Set([...again.links, ...extracted.links])],
+            pagination: [...new Set([...again.pagination, ...extracted.pagination])],
+          };
+          network = r.network;
+          rendered = true;
+        } catch (err) {
+          if (signal.aborted) return events;
+          renderError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      const { links, pagination, clientRendered } = extracted;
+      const media: MediaItem[] = [
+        ...extracted.media,
+        ...network.map((n) => ({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, format: formatOf(n.url, n.kind) })),
+      ];
+      const fresh: MediaItem[] = [];
+      for (const m of media) {
+        if (seenMedia.has(m.id)) continue;
+        seenMedia.add(m.id);
+        fresh.push(m);
+      }
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
-      if (depth === 0 && media.length <= 2 && clientRendered) {
-        events.push({
-          type: "note",
-          url: finalUrl,
-          message: "このページは画像を JavaScript で後から読み込むため、取れない画像があります",
-        });
+      if (depth === 0) {
+        const message = renderError
+          ? `ブラウザで開けませんでした（${renderError.slice(0, 80)}）`
+          : rendered && media.length <= 2
+            ? "ブラウザで開いても画像が見つかりませんでした（ログインや年齢確認が必要なページかもしれません）"
+            : !rendered && media.length <= 2 && clientRendered
+              ? "このページは画像を JavaScript で後から読み込むため、取れない画像があります（「ブラウザで開く」を試してください）"
+              : null;
+        if (message) events.push({ type: "note", url: finalUrl, message });
       }
 
       // ページ送り（2ページ目・次へ）は同じ階層として辿る
