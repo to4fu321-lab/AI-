@@ -453,7 +453,12 @@ export function RepairApp() {
         <p>
           対応形式：MP4・MOV。録画の中断で索引が書き込まれなかったファイル、途中で切れたファイル、一部が上書きされたファイル、先頭が壊れたファイルなどを診断して修復します。索引が失われている場合は、H.264 / HEVC（H.265）の映像とAAC音声が対象です。
         </p>
-        <p className="mt-2">バージョン {APP_VERSION}</p>
+        <p className="mt-2">
+          バージョン {APP_VERSION} ・{" "}
+          <a href="/apps" className="underline">
+            ほかのアプリ
+          </a>
+        </p>
       </footer>
     </main>
     </div>

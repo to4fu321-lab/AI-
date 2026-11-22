@@ -9,6 +9,11 @@ export function Footer() {
           掲載動画の著作権は各権利者に帰属します。本サイトは公式の埋め込み機能（YouTube
           iframe / X blockquote）のみを使用し、動画ファイルを保存・配信していません。
         </p>
+        <p className="mt-4">
+          <a href="/apps" className="font-semibold text-fuchsia-500 hover:underline">
+            ほかのアプリを見る →
+          </a>
+        </p>
         <p className="mt-4">© 2026 BuzzTube. All rights reserved.</p>
       </div>
     </footer>

@@ -1,6 +1,7 @@
-import { crawl } from "@/lib/thumbs/crawl";
+import { guardApi } from "@/lib/access/locks";
+import { crawl, MAX_QUEUE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
-import type { CrawlEvent } from "@/lib/thumbs/types";
+import type { CrawlEvent, CrawlState } from "@/lib/thumbs/types";
 
 export const runtime = "nodejs";
 /** Vercel の関数の最大実行時間（秒）。クロールはこの手前で打ち切る */
@@ -16,7 +17,16 @@ const clamp = (n: unknown, min: number, max: number, fallback: number) => {
  * 全部終わるまで待たずに、ページを読むたびに画面へ流せる（ストリーミング）。
  */
 export async function POST(request: Request) {
-  let body: { url?: unknown; depth?: unknown; maxPages?: unknown };
+  const denied = await guardApi(request, "/api/thumbs/crawl");
+  if (denied) return denied;
+  let body: {
+    url?: unknown;
+    depth?: unknown;
+    maxPages?: unknown;
+    maxPagination?: unknown;
+    crossSite?: unknown;
+    resume?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -32,10 +42,16 @@ export async function POST(request: Request) {
   }
 
   const options = {
-    depth: clamp(body.depth, 0, 3, 1),
-    maxPages: clamp(body.maxPages, 1, 100, 30),
+    depth: clamp(body.depth, 0, 20, 1),
+    maxPages: clamp(body.maxPages, 1, 1000, 100),
+    maxPagination: clamp(body.maxPagination, 0, 50, 50),
+    crossSite: body.crossSite === true,
   };
-  const deadline = Date.now() + (maxDuration - 8) * 1000;
+  const resume = parseResume(body.resume);
+  // 1 ページの読み込みに最大 15 秒かかるので、上限の 20 秒前には区切って続きを画面に預ける
+  // （THUMBS_CHUNK_MS はテストで区切りを短くするためのもの。本番では設定しない）
+  const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 20) * 1000;
+  const deadline = Date.now() + chunkMs;
   const encoder = new TextEncoder();
   const abort = new AbortController();
   request.signal.addEventListener("abort", () => abort.abort());
@@ -44,7 +60,7 @@ export async function POST(request: Request) {
     async start(controller) {
       const send = (e: CrawlEvent) => controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
       try {
-        for await (const event of crawl(raw, options, abort.signal, deadline)) send(event);
+        for await (const event of crawl(raw, options, abort.signal, deadline, resume)) send(event);
       } catch (err) {
         send({ type: "error", url: raw, message: err instanceof Error ? err.message : String(err) });
         send({ type: "done", pages: 0, media: 0, truncated: false });
@@ -64,4 +80,25 @@ export async function POST(request: Request) {
       "x-accel-buffering": "no",
     },
   });
+}
+
+/** 画面から送り返された途中経過を検査する（形が崩れていれば最初からやり直す） */
+function parseResume(value: unknown): CrawlState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.queue) || !Array.isArray(v.seen)) return undefined;
+  const queue = v.queue
+    .slice(0, MAX_QUEUE)
+    .filter(
+      (q): q is { url: string; depth: number } =>
+        !!q && typeof q === "object" && typeof (q as { url: unknown }).url === "string" && typeof (q as { depth: unknown }).depth === "number",
+    )
+    .map((q) => ({ url: q.url, depth: Math.min(20, Math.max(0, Math.round(q.depth))) }));
+  const seen = v.seen.slice(0, MAX_SEEN).filter((s): s is string => typeof s === "string");
+  return {
+    queue,
+    seen,
+    pages: clamp(v.pages, 0, 1000, 0),
+    paginationUsed: clamp(v.paginationUsed, 0, 50, 0),
+  };
 }

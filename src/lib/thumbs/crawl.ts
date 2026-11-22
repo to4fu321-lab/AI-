@@ -1,7 +1,7 @@
 import "server-only";
 import { extractFromHtml, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
 import { safeFetch } from "./safeFetch";
-import type { CrawlEvent, CrawlOptions, MediaItem } from "./types";
+import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
  * 入力 URL から「同じサイトの、同じ階層より下」のページを幅優先で辿り、メディアを集める。
@@ -9,7 +9,7 @@ import type { CrawlEvent, CrawlOptions, MediaItem } from "./types";
  */
 
 const MAX_HTML_BYTES = 3 * 1024 * 1024;
-const CONCURRENCY = 4;
+const CONCURRENCY = 6;
 
 /** 入力 URL の「階層」。/gallery/page.html → /gallery/ 、/gallery → /gallery/ */
 export function scopeOf(url: URL): string {
@@ -105,28 +105,53 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
   }
 }
 
+/** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
+export const MAX_QUEUE = 5000;
+export const MAX_SEEN = 20000;
+
 export async function* crawl(
   startUrl: string,
   options: CrawlOptions,
   signal: AbortSignal,
   deadline: number,
+  resume?: CrawlState,
 ): AsyncGenerator<CrawlEvent> {
   const start = new URL(startUrl);
   const origin = start.origin;
   const scope = scopeOf(start);
   const startPath = start.pathname;
-  const allowed = await loadRobots(origin, signal);
 
-  const seenPages = new Set<string>([normalizePageUrl(startUrl)]);
+  // robots.txt はサイトごとに 1 回だけ読む
+  const robots = new Map<string, Promise<(path: string) => boolean>>();
+  const allowed = async (url: string) => {
+    const u = new URL(url);
+    let rule = robots.get(u.origin);
+    if (!rule) {
+      rule = loadRobots(u.origin, signal);
+      robots.set(u.origin, rule);
+    }
+    return (await rule)(u.pathname);
+  };
+
+  const seenPages = new Set<string>(resume?.seen ?? [normalizePageUrl(startUrl)]);
   const seenMedia = new Set<string>();
-  let queue: { url: string; depth: number }[] = [{ url: startUrl, depth: 0 }];
-  let pages = 0;
+  const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0 }];
+  let pages = resume?.pages ?? 0;
+  let paginationUsed = resume?.paginationUsed ?? 0;
   let mediaCount = 0;
-  let truncated = false;
+
+  const enqueue = (url: string, depth: number) => {
+    if (!isPageLikeUrl(url) || seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return false;
+    const key = normalizePageUrl(url);
+    if (seenPages.has(key)) return false;
+    seenPages.add(key);
+    queue.push({ url, depth });
+    return true;
+  };
 
   const visit = async (url: string, depth: number): Promise<CrawlEvent[]> => {
     const events: CrawlEvent[] = [];
-    if (!allowed(new URL(url).pathname)) {
+    if (!(await allowed(url))) {
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
       return events;
     }
@@ -161,19 +186,22 @@ export async function* crawl(
         return events;
       }
       const html = await readLimited(res, MAX_HTML_BYTES);
-      const { media, links } = extractFromHtml(html, finalUrl);
+      const { media, links, pagination } = extractFromHtml(html, finalUrl);
       const fresh = media.filter((m) => !seenMedia.has(m.id));
       for (const m of fresh) seenMedia.add(m.id);
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
 
+      // ページ送り（2ページ目・次へ）は同じ階層として辿る
+      for (const link of pagination) {
+        if (paginationUsed >= options.maxPagination) break;
+        if (enqueue(link, depth)) paginationUsed++;
+      }
+      // 普通のリンクは 1 階層下として辿る
       if (depth < options.depth) {
         for (const link of links) {
-          if (!isPageLikeUrl(link) || !inScope(link, origin, scope, startPath)) continue;
-          const key = normalizePageUrl(link);
-          if (seenPages.has(key)) continue;
-          seenPages.add(key);
-          queue.push({ url: link, depth: depth + 1 });
+          if (!options.crossSite && !inScope(link, origin, scope, startPath)) continue;
+          enqueue(link, depth + 1);
         }
       }
     } catch (err) {
@@ -189,12 +217,14 @@ export async function* crawl(
     return events;
   };
 
-  // 幅優先：同じ深さのページを最大 CONCURRENCY 件ずつ並列に読む
-  while (queue.length && !signal.aborted) {
-    if (pages >= options.maxPages || Date.now() > deadline) {
-      truncated = true;
-      break;
+  // 幅優先：浅い階層から順に、最大 CONCURRENCY 件ずつ並列に読む
+  while (queue.length && !signal.aborted && pages < options.maxPages) {
+    if (Date.now() > deadline) {
+      // 時間切れ。続きを画面に預けて、もう一度呼んでもらう
+      yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
+      return;
     }
+    queue.sort((a, b) => a.depth - b.depth);
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
     pages += batch.length;
     const results = await Promise.all(batch.map((p) => visit(p.url, p.depth)));
@@ -204,8 +234,6 @@ export async function* crawl(
         yield e;
       }
     }
-    queue = queue.sort((a, b) => a.depth - b.depth);
   }
-  if (queue.length) truncated = true;
-  yield { type: "done", pages, media: mediaCount, truncated };
+  yield { type: "done", pages, media: mediaCount, truncated: queue.length > 0 };
 }
