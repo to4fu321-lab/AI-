@@ -153,6 +153,8 @@ export function ThumbsApp() {
   const [render, setRender] = useState<"auto" | "always" | "off">("auto");
   const [kinds, setKinds] = useState<"all" | "video" | "image">("all");
   const [robots, setRobots] = useState(true);
+  /** 「Gofile をネット全体から探す」のキーワード（空でもよい） */
+  const [huntWord, setHuntWord] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -446,6 +448,25 @@ export function ThumbsApp() {
     for (const u of valid) void startJob(u);
   };
 
+  /**
+   * Gofile をネット全体から探す。検索（Yahoo! のリアルタイム検索＝X の投稿、Web 検索、Bing）の結果のページから出発して、
+   * 結果のサイト（X の投稿・掲示板・まとめ）を辿り、Gofile のリンクの中身を集める
+   */
+  const startHunt = () => {
+    const kw = huntWord.trim().slice(0, 60);
+    const q = (s: string) => encodeURIComponent(s.trim());
+    const urls = [
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile.io ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile ${kw || "配布"}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`gofile ${kw || "動画"} 掲示板`)}`,
+      `https://www.bing.com/search?q=${q(`"gofile.io/d/" ${kw}`)}`,
+    ];
+    const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true };
+    setFormError(null);
+    for (const u of urls) void startJob(u, settings);
+  };
+
   /** 除外リストに追加し、すでに一覧にある該当の画像・動画も消す */
   const addExclude = useCallback((input: string): boolean => {
     const rule = normalizeRule(input);
@@ -615,6 +636,25 @@ export function ThumbsApp() {
             </button>
           </form>
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
+          <div className="mt-2 flex gap-2">
+            <input
+              type="text"
+              value={huntWord}
+              onChange={(e) => setHuntWord(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && startHunt()}
+              placeholder="キーワード（空でも OK）"
+              aria-label="Gofile を探すキーワード"
+              className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-sky-400 focus:bg-white dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500"
+            />
+            <button
+              type="button"
+              onClick={startHunt}
+              title="X の投稿・掲示板・まとめサイトを検索して、Gofile のリンクの中身を集めます（数分かかります）"
+              className="shrink-0 rounded-full bg-sky-500 px-4 py-2 text-xs font-bold text-white shadow-sm active:scale-95"
+            >
+              🔎 Gofile をネット全体から探す
+            </button>
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類
@@ -872,6 +912,18 @@ function EmptyState() {
   );
 }
 
+/** Gofile 探しの取得の名前（検索の URL のままだと読みにくいので） */
+function huntLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? "").replace(/"/g, "");
+    const where = u.pathname.startsWith("/realtime") ? "X の投稿" : u.hostname.includes("bing") ? "Web（Bing）" : "Web（Yahoo!）";
+    return `🔎 Gofile 探し・${where}：${word}`;
+  } catch {
+    return url;
+  }
+}
+
 function JobRow({
   job,
   onResume,
@@ -921,7 +973,7 @@ function JobRow({
         }`}
       />
       <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left" title="この URL の結果だけ表示">
-        <span className="block truncate font-semibold">{job.url.replace(/^https?:\/\//, "")}</span>
+        <span className="block truncate font-semibold">{job.settings?.hunt ? huntLabel(job.url) : job.url.replace(/^https?:\/\//, "")}</span>
         <span className={`block truncate ${job.status === "error" ? "text-red-500" : "text-neutral-400"}`}>
           {status} ・ {found}件{trouble && job.status !== "error" ? ` ・ ${trouble}` : ""}
         </span>

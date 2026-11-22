@@ -14,6 +14,8 @@ export interface CrawlSettings {
   kinds?: "all" | "video" | "image";
   /** robots.txt を守るか。古い保存データにはないので省略可（なければ守る） */
   robots?: boolean;
+  /** Gofile 探し（ネット全体から探す）で始めたもの */
+  hunt?: boolean;
 }
 
 export interface HistoryEntry {

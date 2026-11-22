@@ -91,6 +91,11 @@ export interface CrawlOptions {
   exclude: string[];
   /** robots.txt（サイトが出している「自動で読まないでほしい場所」の指定）を守るか。入力したページ自体は常に読む */
   robots: boolean;
+  /**
+   * Gofile 探し（「ネット全体から探す」）。検索結果のページから出発して、結果のサイト（X の投稿・掲示板・まとめ）を辿り、
+   * Gofile のリンクの中身だけを集める（ほかの動画・読めなかったページのタイルは出さない）
+   */
+  hunt?: boolean;
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
 }

@@ -158,6 +158,11 @@ const MAX_GUESS_RENDERS = 3;
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
+/** Gofile 探しで、1 つのサイトから辿るページ数の上限 */
+const HUNT_PAGES_PER_SITE = 12;
+/** Gofile 探しで辿らないサイト（道具・解析・辞書・検索など。Gofile の動画を紹介する場所ではない） */
+const HUNT_SKIP_RE =
+  /(?:^|\.)(?:github\.com|gitlab\.com|pypi\.org|npmjs\.com|stackoverflow\.com|virustotal\.com|pulsedive\.com|criminalip\.io|urlscan\.io|hybrid-analysis\.com|scribd\.com|wikipedia\.org|facebook\.com|google\.com|microsoft\.com|bing\.com|yahoo\.co\.jp|yahoo\.com|gopeed\.com|chromewebstore\.google\.com|apple\.com|trustpilot\.com|scamadviser\.com|similarweb\.com)$/i;
 /** Linkex のサイト（入力したのがこれらのときだけ、Linkex の一覧を読む） */
 const LINKEX_SITE_RE = /(?:^|\.)(?:linkex-douga\.com|l2e\.click|linkex\.io)$/i;
 /**
@@ -605,6 +610,8 @@ export async function* crawl(
   let lastCheckpoint = Date.now();
   let robotsSkipped = 0;
   /** 確認を求められた・断られたので読めなかったページの数 */
+  /** Gofile 探し：サイトごとに、辿ることにしたページの数 */
+  const huntPerSite = new Map<string, number>();
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
@@ -852,6 +859,7 @@ export async function* crawl(
      */
     const thumbOnly = (open: string = url, label?: string) => {
       if (!wantsVideo || !item.thumb || item.root || events.some((e) => e.type === "gated")) return;
+      if (options.hunt && !label) return;
       const video = gifVideoFromThumb(item.thumb) || item.preview;
       const title = label ? (item.title ? `${item.title}（${label}）` : label) : item.title;
       events.push({ type: "gated", url: open, thumb: item.thumb, title, duration: item.duration, video: video || undefined });
@@ -869,6 +877,7 @@ export async function* crawl(
      */
     const gated = (message: string) => {
       // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
+      if (options.hunt) return fail(message);
       if (isTwihubListApi(url) || isTwihubList(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
@@ -1025,7 +1034,8 @@ export async function* crawl(
       // X 以外のサイトのリンクは、まず行き先を見る（動画ファイルへ転送されることが多い）。駄目なら X に聞く
       const ref = { id: tweetId, thumb: item.thumb, duration: item.duration };
       const got = embedded ? await playLinkMedia([{ ...ref, url }], item.from ?? url) : await tweetMedia([ref]);
-      const items = got.filter((m) => !seenMedia.has(m));
+      // Gofile 探しでは、投稿の動画は出さない（投稿の文にある Gofile のリンクだけを読む）
+      const items = got.filter((m) => !seenMedia.has(m) && !options.hunt);
       if (tweet || items.length) {
         for (const m of items) seenMedia.add(m);
         const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
@@ -1233,7 +1243,7 @@ export async function* crawl(
       // ブラウザの中から読んだページも対象外（1 枚 30 秒かかるので、速く読める利点がなくなる）
       const elsewhere = extracted.gofile.length > 0 || extracted.tweets.length > 0 || extracted.playLinks.length > 0;
       const guessRender =
-        wantsVideo && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
+        wantsVideo && !options.hunt && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
         !lite &&
@@ -1352,6 +1362,8 @@ export async function* crawl(
       const videoOnly = options.kinds === "video" || zone > 0;
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
+        // Gofile 探しでは、Gofile の中身だけを集める
+        .filter((m) => !options.hunt || m.format === "Gofile")
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
@@ -1444,6 +1456,30 @@ export async function* crawl(
       const listing = wantsVideo && (promising >= LISTING_MIN_LINKS || pageHasVideo);
       for (const link of links) {
         if (pagination.has(link.url)) continue;
+        // Gofile 探し：検索結果のページからは、結果のサイトへのリンクだけを辿る（検索サイト自身のメニューは辿らない）。
+        // 結果のサイトの中では、Gofile と書かれたリンク・サムネイル付きのリンクだけを辿る
+        if (options.hunt) {
+          let own = false;
+          try {
+            own = home.sites.includes(siteOf(new URL(link.url).hostname));
+          } catch {
+            continue;
+          }
+          // （結果のサイトの中では、動画・Gofile らしいリンクだけ。アイコン付きの利用者ページ・通報・削除依頼などは辿らない）
+          if (item.root ? own : link.prio !== 2 && link.prio !== 4) continue;
+          if (/\/(?:abuse|delete|report|user|users|login|signup)(?:\/|$)/i.test(link.url)) continue;
+          // 道具・解析・辞書などのサイトは、Gofile の動画を紹介する場所ではないので辿らない。1 つのサイトに深入りもしない
+          let site = "";
+          try {
+            site = siteOf(new URL(link.url).hostname);
+          } catch {
+            continue;
+          }
+          if (HUNT_SKIP_RE.test(site)) continue;
+          const used = huntPerSite.get(site) ?? 0;
+          if (used >= HUNT_PAGES_PER_SITE && !gofileId(link.url)) continue;
+          if (!seenPages.has(normalizePageUrl(link.url))) huntPerSite.set(site, used + 1);
+        }
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
         const key = normalizePageUrl(link.url);
         // ふつうのリンクで、一覧・詳細ページにあった（またはメニューとして一度後回しにした）ものはメニューとみなす
@@ -1511,6 +1547,7 @@ export async function* crawl(
       }
       queue.splice(i, 1);
       queuedByUrl.delete(q.url);
+      if (options.hunt) continue;
       const video = (q.thumb && gifVideoFromThumb(q.thumb)) || q.preview;
       gatedPages++;
       yield { type: "gated", url: q.url, thumb: q.thumb, title: q.title, duration: q.duration, video: video || undefined };
