@@ -785,6 +785,8 @@ function Viewer({
 }) {
   const item = items[index];
   const [useProxy, setUseProxy] = useState(false);
+  /** 再生・表示できなかった理由（サーバー経由でも駄目だったとき、調べて出す） */
+  const [playError, setPlayError] = useState<string | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
 
   const go = useCallback(
@@ -792,6 +794,7 @@ function Viewer({
       const next = index + delta;
       if (next >= 0 && next < items.length) {
         setUseProxy(false);
+        setPlayError(null);
         onIndex(next);
       }
     },
@@ -818,6 +821,26 @@ function Viewer({
   const canDownload = item.kind !== "embed" && !isHls(item);
   const fileName = decodeURIComponent(new URL(item.src).pathname.split("/").pop() || "") || undefined;
 
+  /** 直接もサーバー経由も駄目だったとき、サーバー経由で少しだけ取りに行って理由を調べる */
+  const diagnose = async () => {
+    try {
+      const res = await fetch(proxyUrl(item), { headers: { range: "bytes=0-1" } });
+      if (!res.ok) {
+        const text = (await res.text().catch(() => "")).slice(0, 120);
+        const expired = /HTTP (403|404|410)/.test(text);
+        setPlayError(
+          `再生できませんでした：${text || `HTTP ${res.status}`}` +
+            (expired ? "\n期限付きの URL だった可能性があります。もう一度取得し直すと再生できることがあります。" : ""),
+        );
+      } else {
+        const type = res.headers.get("content-type") ?? "不明";
+        setPlayError(`動画のデータは届いていますが、この端末では再生できない形式です（${type}）。「動画を直接開く」か「ダウンロード」を試してください。`);
+      }
+    } catch {
+      setPlayError("通信できませんでした。電波の状態を確認してください。");
+    }
+  };
+
   let body: React.ReactNode;
   if (item.kind === "embed") {
     body = (
@@ -839,7 +862,11 @@ function Viewer({
         controls
         autoPlay
         playsInline
-        onError={() => !useProxy && !isHls(item) && setUseProxy(true)}
+        onError={() => {
+          // まず元サイトから直接 → 駄目ならサーバー経由 → それも駄目なら理由を調べて表示
+          if (!useProxy && !isHls(item)) setUseProxy(true);
+          else void diagnose();
+        }}
         className="max-h-full max-w-full rounded-lg bg-black"
       />
     );
@@ -911,6 +938,14 @@ function Viewer({
       </div>
 
       <div className="space-y-2 px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
+        {playError && (
+          <div className="whitespace-pre-line rounded-lg bg-red-500/20 px-3 py-2 text-xs text-red-200">
+            ⚠ {playError}
+            <a href={item.src} target="_blank" rel="noopener noreferrer" className="mt-1 block font-semibold underline">
+              ▶ 動画を直接開く
+            </a>
+          </div>
+        )}
         {item.title && <p className="line-clamp-2 text-sm">{item.title}</p>}
         <p className="truncate text-[11px] opacity-50">{hostOf(item.pageUrl)}</p>
         <div className="flex gap-2">
