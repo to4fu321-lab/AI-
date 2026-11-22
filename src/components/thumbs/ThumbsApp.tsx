@@ -10,7 +10,8 @@ import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclud
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
-type Item = MediaItem & { jobId: string };
+/** addedAt：この一覧に加わった時刻（今回の取得で増えたものに NEW の印を付ける） */
+type Item = MediaItem & { jobId: string; addedAt?: number };
 
 interface Job {
   id: string;
@@ -41,7 +42,7 @@ const MAX_ITEMS = 5000;
 const MAX_GATED = 2000;
 
 /** 確認を求められて読めなかったページ。video があれば、タップでその動画ファイルを開く */
-type Gated = { url: string; thumb?: string; duration?: number; video?: string; title?: string; app?: string };
+type Gated = { url: string; thumb?: string; duration?: number; video?: string; title?: string; app?: string; at?: number };
 
 const clock = (sec: number) => {
   const s = Math.round(sec);
@@ -169,6 +170,9 @@ export function ThumbsApp() {
     gofileTokenRef.current = gofileToken;
   }, [gofileToken]);
   const [now, setNow] = useState(0);
+  /** 一番最近の取得（もっと読み込むを含む）を始めた時刻。これより後に加わったものに NEW の印を付ける */
+  const [newSince, setNewSince] = useState(0);
+  const newSinceRef = useRef(0);
   const [tile, setTile] = useState(DEFAULT_TILE);
   const [shape, setShape] = useState<Shape>("square");
   const controllers = useRef(new Map<string, AbortController>());
@@ -187,6 +191,10 @@ export function ThumbsApp() {
       // 以前の取得で同じ動画が 2 個入っていたら、ここで 1 個にまとめる
       // eslint-disable-next-line react-hooks/set-state-in-effect
       if (saved?.items) setItems(dedupeMedia(saved.items as Item[]));
+      if (typeof saved?.newSince === "number") {
+        setNewSince(saved.newSince);
+        newSinceRef.current = saved.newSince;
+      }
       if (saved?.jobs) setJobs(saved.jobs.map((j: Job) => (j.status === "running" ? { ...j, status: "stopped" } : j)));
       const library = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "null");
       if (Array.isArray(library?.history)) setHistory(library.history);
@@ -212,7 +220,7 @@ export function ThumbsApp() {
       // 途中経過は大きいので、新しい 5 件のジョブ分だけ保存する
       let kept = 0;
       const slimJobs = latest.current.jobs.map((j) => (j.resume && kept++ < 5 ? j : { ...j, resume: undefined }));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: latest.current.items.slice(0, MAX_ITEMS), jobs: slimJobs }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: latest.current.items.slice(0, MAX_ITEMS), jobs: slimJobs, newSince: newSinceRef.current }));
     } catch {
       /* 容量オーバーなどは無視 */
     }
@@ -279,6 +287,9 @@ export function ThumbsApp() {
       let pageCount = existing?.job.pages ?? 0;
       let foundCount = existing?.found ?? 0;
       const startedAt = Date.now();
+      // ここから後に加わったものが「今回の新着」
+      newSinceRef.current = startedAt;
+      setNewSince(startedAt);
       recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
 
       try {
@@ -342,7 +353,7 @@ export function ThumbsApp() {
                       ? {}
                       : {
                           // 新しく見つけたものを上に
-                          gated: [{ url: event.url, thumb: event.thumb, duration: event.duration, video: event.video, title: event.title, app: event.app }, ...(j.gated ?? [])].slice(
+                          gated: [{ url: event.url, thumb: event.thumb, duration: event.duration, video: event.video, title: event.title, app: event.app, at: Date.now() }, ...(j.gated ?? [])].slice(
                             0,
                             MAX_GATED,
                           ),
@@ -366,7 +377,7 @@ export function ThumbsApp() {
                       ids.add(i.id);
                       known.add(i);
                       // サーバーがリンク切れでないと確かめたもの。受け取った時刻を印にする
-                      fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined });
+                      fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined, addedAt: Date.now() });
                     }
                     // 新しく見つけたものを上に並べる
                     return fresh.length || list.length !== prev.length ? [...fresh, ...list].slice(0, MAX_ITEMS) : prev;
@@ -700,6 +711,7 @@ export function ThumbsApp() {
                 canSave={sites.length < MAX_SITES}
                 onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots })}
                 onRemove={() => removeJob(job.id)}
+                newSince={newSince}
               />
             ))}
           </ul>
@@ -787,6 +799,7 @@ export function ThumbsApp() {
             <li key={item.id}>
               <Thumb
                 item={item}
+                isNew={newSince > 0 && (item.addedAt ?? 0) >= newSince}
                 shape={shape}
                 large={TILE_SIZES[tile] >= 220}
                 small={tile <= 1}
@@ -870,7 +883,9 @@ function JobRow({
   onSelect,
   onStop,
   onRemove,
+  newSince,
 }: {
+  newSince: number;
   job: Job;
   onResume: () => void;
   found: number;
@@ -951,7 +966,7 @@ function JobRow({
         </button>
       )}
       </div>
-      {job.gated && job.gated.length > 0 && <GatedPages pages={job.gated} />}
+      {job.gated && job.gated.length > 0 && <GatedPages pages={job.gated} newSince={newSince} />}
     </li>
   );
 }
@@ -960,7 +975,7 @@ function JobRow({
  * 「人間かどうかの確認」を求められた・自動アクセスを断られたので、このアプリでは読めなかったページ。
  * 本人のブラウザでサイトを直接開いてもらう（確認は本人がふつうに通れる）
  */
-function GatedPages({ pages }: { pages: Gated[] }) {
+function GatedPages({ pages, newSince }: { pages: Gated[]; newSince: number }) {
   // 下までスクロールしたら、12 件ずつ足して表示する
   const [count, setCount] = useState(12);
   const end = useRef<HTMLDivElement>(null);
@@ -987,7 +1002,9 @@ function GatedPages({ pages }: { pages: Gated[] }) {
               target="_blank"
               rel="noopener noreferrer"
               referrerPolicy="no-referrer"
-              className="relative block aspect-[4/3] overflow-hidden rounded-lg bg-neutral-200 dark:bg-neutral-800"
+              className={`relative block aspect-[4/3] overflow-hidden rounded-lg bg-neutral-200 dark:bg-neutral-800 ${
+                newSince > 0 && (g.at ?? 0) >= newSince ? "ring-2 ring-amber-400" : ""
+              }`}
               title={g.video ?? g.url}
             >
               {g.thumb ? (
@@ -1000,6 +1017,9 @@ function GatedPages({ pages }: { pages: Gated[] }) {
               )}
               {g.title ? (
                 <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/70 to-transparent px-1.5 pb-7 pt-4 text-[10px] text-white">{g.title}</span>
+              ) : null}
+              {newSince > 0 && (g.at ?? 0) >= newSince ? (
+                <span className="absolute right-1 top-1 rounded-md bg-amber-400 px-1.5 py-0.5 text-[10px] font-extrabold text-black shadow">NEW</span>
               ) : null}
               {g.duration ? (
                 <span className="absolute left-1 top-1 rounded bg-black/65 px-1.5 py-0.5 text-[11px] font-semibold text-white">{clock(g.duration)}</span>
@@ -1074,6 +1094,7 @@ function LoadMore({ jobs, running, onMore }: { jobs: Job[]; running: boolean; on
  */
 function Thumb({
   item,
+  isNew,
   shape,
   large,
   small,
@@ -1081,6 +1102,8 @@ function Thumb({
   onBroken,
   onDuration,
 }: {
+  /** 今回の取得で増えたもの（NEW の印と枠を付ける） */
+  isNew: boolean;
   item: Item;
   shape: Shape;
   /** 大きく表示しているとき（題名も出す） */
@@ -1200,9 +1223,16 @@ function Thumb({
       onClick={onOpen}
       className={`group relative block w-full overflow-hidden rounded-lg bg-neutral-200 active:scale-[0.97] dark:bg-neutral-800 ${
         shape === "wide" ? "aspect-video" : "aspect-square"
-      }`}
+      } ${isNew ? "ring-2 ring-amber-400" : ""}`}
     >
       {media}
+      {isNew && (
+        <span
+          className={`absolute right-1 top-1 rounded-md bg-amber-400 font-extrabold text-black shadow ${small ? "px-1 text-[8px]" : "px-1.5 py-0.5 text-[10px]"}`}
+        >
+          NEW
+        </span>
+      )}
       <span
         className={`absolute left-1 top-1 rounded-md font-bold text-white shadow ${
           small ? "px-1 text-[8px]" : "px-1.5 py-0.5 text-[10px]"
