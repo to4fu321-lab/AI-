@@ -132,6 +132,50 @@ export function youtubeId(url: string): string | null {
   return null;
 }
 
+/**
+ * YouTube・Vimeo 以外の動画サービスの埋め込み（埋め込み用プレーヤーの URL・形式名・サムネイル）。
+ * 動画を表す URL でなければ null（チャンネルやプロフィールへのリンクは対象外）
+ */
+export function otherEmbed(url: string): { src: string; format: string; thumb?: string } | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^(?:www|m)\./, "");
+  const path = u.pathname;
+  let m: RegExpExecArray | null;
+  if (host === "dailymotion.com" && (m = /^\/(?:embed\/)?video\/([a-z0-9]+)/i.exec(path))) {
+    return { src: `https://www.dailymotion.com/embed/video/${m[1]}`, format: "Dailymotion", thumb: `https://www.dailymotion.com/thumbnail/video/${m[1]}` };
+  }
+  if (host === "dai.ly" && (m = /^\/([a-z0-9]+)/i.exec(path))) {
+    return { src: `https://www.dailymotion.com/embed/video/${m[1]}`, format: "Dailymotion", thumb: `https://www.dailymotion.com/thumbnail/video/${m[1]}` };
+  }
+  if (/(?:^|\.)nicovideo\.jp$|^nico\.ms$/.test(host) && (m = /\/((?:sm|so|nm)\d+)/.exec(path))) {
+    return { src: `https://embed.nicovideo.jp/watch/${m[1]}`, format: "ニコニコ" };
+  }
+  if (host === "tiktok.com" && (m = /\/(?:video|embed(?:\/v2)?)\/(\d{8,})/.exec(path))) {
+    return { src: `https://www.tiktok.com/embed/v2/${m[1]}`, format: "TikTok" };
+  }
+  if (host === "instagram.com" && (m = /^\/(?:reels?|tv)\/([\w-]+)/.exec(path))) {
+    return { src: `https://www.instagram.com/reel/${m[1]}/embed`, format: "Instagram" };
+  }
+  if (host === "streamable.com" && (m = /^\/(?:[eo]\/)?([a-z0-9]{4,})$/i.exec(path))) {
+    return { src: `https://streamable.com/e/${m[1]}`, format: "Streamable" };
+  }
+  if (host === "bilibili.com" && (m = /^\/video\/(BV[\w]+)/.exec(path))) {
+    return { src: `https://player.bilibili.com/player.html?bvid=${m[1]}`, format: "bilibili" };
+  }
+  if (host === "player.bilibili.com" && /bvid=|aid=/.test(u.search)) return { src: url, format: "bilibili" };
+  if (host === "facebook.com" && path.startsWith("/plugins/video.php")) return { src: url, format: "Facebook" };
+  if (host === "facebook.com" && /\/videos\/\d+/.test(path)) {
+    return { src: `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(url)}`, format: "Facebook" };
+  }
+  if (host === "x.com" || host === "twitter.com") return null;
+  return null;
+}
+
 function vimeoId(url: string): string | null {
   try {
     const u = new URL(url);
@@ -234,7 +278,7 @@ function decodeBase64(raw: string): string | null {
 }
 
 /** 「動画の詳細ページらしい」URL */
-const VIDEO_URL_RE =
+export const VIDEO_URL_RE =
   /\/(?:video|videos|movie|movies|watch|v|e|vod|play|player|embed|douga|clip|clips|stream|episode)(?:[/_\-.?]|$)|[?&](?:v|vid|video_?id|viewkey|movie_?id)=/i;
 
 /** 広告・計測・SNS ボタンなどの iframe（動画プレーヤーではないので中は読まない） */
@@ -406,6 +450,11 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const vm = vimeoId(url);
     if (vm) {
       add({ kind: "embed", src: `https://player.vimeo.com/video/${vm}`, format: "Vimeo", title });
+      return true;
+    }
+    const other = otherEmbed(url);
+    if (other) {
+      add({ kind: "embed", src: other.src, format: other.format, thumb: other.thumb, title });
       return true;
     }
     return false;
@@ -655,6 +704,19 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (!/video|stream|hls|m3u8|mp4|media|play|get_file|movie|vod/i.test(url)) continue;
     guesses++;
     add({ kind: "video", src: url, format: "動画", unverified: true, guess: true });
+  }
+
+  // --- 6b. 押すまで読み込まない埋め込み動画（lite-youtube、data-youtube-id、スクリプトの中の埋め込み URL など） ---
+  let embeds = 0;
+  for (const m of html.matchAll(/<lite-youtube\b[^>]*\bvideoid\s*=\s*["']?([\w-]{11})|\sdata-(?:youtube-?id|yt-?id|youtube-?video|ytvideo)\s*=\s*["']([\w-]{11})["']/gi)) {
+    if (embeds++ > 40) break;
+    addEmbed(`https://www.youtube.com/watch?v=${m[1] ?? m[2]}`);
+  }
+  for (const m of unescaped.matchAll(
+    /https?:\/\/(?:(?:www|m)\.)?(?:youtube(?:-nocookie)?\.com\/(?:embed\/|watch\?v=|shorts\/)[\w-]{11}|youtu\.be\/[\w-]{11}|player\.vimeo\.com\/video\/\d+|(?:www\.)?dailymotion\.com\/(?:embed\/)?video\/[a-z0-9]+|embed\.nicovideo\.jp\/watch\/(?:sm|so|nm)\d+|(?:www\.)?tiktok\.com\/(?:embed\/v2\/\d+|@[\w.-]+\/video\/\d+)|streamable\.com\/e\/[a-z0-9]+|player\.bilibili\.com\/player\.html\?[^"'\s<>\\]+)/gi,
+  )) {
+    if (embeds++ > 40) break;
+    addEmbed(m[0]);
   }
 
   // --- 7. CSS の背景画像（style="background-image:url(...)" や <style> 内） ---

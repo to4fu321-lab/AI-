@@ -1,8 +1,8 @@
 import "server-only";
-import { AD_FRAME_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { AD_FRAME_RE, VIDEO_URL_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
 import { mediaKey, SeenMedia, variantKey } from "./dedupe";
 import { isExcluded, isItemExcluded } from "./exclude";
-import { RenderDeferred, renderPage, type Rendered } from "./render";
+import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./render";
 import { checkMedia } from "./probe";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { mediaMime, readHead } from "./sniff";
@@ -143,6 +143,12 @@ const VERIFY_CONCURRENCY = 24;
 export const MAX_PENDING = 3000;
 /** 次の回へ持ち越す指紋の数の上限 */
 export const MAX_PRINTS = 5000;
+/** 動画のページらしいのに動画が見つからないとき、念のためブラウザで開いてみる回数（サイトごと。見つかったサイトは上限なし） */
+const MAX_GUESS_RENDERS = 3;
+/** 動画プレーヤーを置く部品らしい名前（id・class） */
+const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
+/** 断られた動画をブラウザで確かめ直す数の上限（1 回の実行あたり） */
+const MAX_BROWSER_CHECKS = 10;
 /** 時間切れ・通信の失敗で確かめられなかったものを、何回まで確かめ直すか */
 const MAX_VERIFY_TRIES = 3;
 
@@ -156,19 +162,25 @@ async function verifyMedia(
   signal: AbortSignal,
   stopAt: number,
   jar: CookieJar,
-): Promise<{ ok: MediaItem[]; rest: MediaItem[] }> {
+): Promise<{ ok: MediaItem[]; rest: MediaItem[]; refused: MediaItem[]; gone: number }> {
   const ok: MediaItem[] = [];
   const rest: MediaItem[] = [];
+  /** こちらのサーバーが断られた動画（ブラウザでなら見られるかもしれない） */
+  const refused: MediaItem[] = [];
+  let gone = 0;
   const prints = new Map<MediaItem, string | undefined>();
   let next = 0;
   const worker = async () => {
     while (next < items.length) {
       if (Date.now() > stopAt || signal.aborted) return;
       const item = items[next++];
-      const { result, fp } = await checkMedia(item, signal, jar);
+      const { result, fp, refused: wasRefused } = await checkMedia(item, signal, jar);
       if (result === "yes") {
         ok.push(item);
         prints.set(item, fp);
+      } else if (result === "no" && item.kind !== "image") {
+        if (wasRefused && item.kind === "video") refused.push(item);
+        else gone++;
       }
       else if (result === "unknown" && (item.tries ?? 0) + 1 < MAX_VERIFY_TRIES) rest.push({ ...item, tries: (item.tries ?? 0) + 1 });
     }
@@ -181,6 +193,8 @@ async function verifyMedia(
   return {
     ok: ok.map((m) => ({ ...m, unverified: undefined, guess: undefined, tries: undefined, checked: true, fp: prints.get(m) })),
     rest,
+    refused,
+    gone,
   };
 }
 
@@ -325,6 +339,30 @@ export async function* crawl(
    * 確かめて見られたものだけを画面へ送る（リンク切れは最初から出さない）
    */
   const pending: MediaItem[] = resume?.pending ?? [];
+  /** 見つけたが出さなかった動画の数（ファイルがない / サイトに断られた）。何も取れなかったときの説明に使う */
+  let goneVideos = resume?.dropped?.[0] ?? 0;
+  let refusedVideos = resume?.dropped?.[1] ?? 0;
+  /** ブラウザで確かめ直した数（1 回の実行で多くなりすぎないように） */
+  let browserChecks = 0;
+  /**
+   * 確認の結果を受け取り、こちらのサーバーが断られた動画は本物のブラウザで確かめ直す
+   * （ブラウザなら通すサイトがあるため。通れば一覧に出す）
+   */
+  const settle = async (v: { ok: MediaItem[]; refused: MediaItem[]; gone: number }): Promise<MediaItem[]> => {
+    goneVideos += v.gone;
+    const ok = [...v.ok];
+    for (const m of v.refused) {
+      if (options.render === "off" || browserChecks >= MAX_BROWSER_CHECKS || Date.now() > deadline || signal.aborted) {
+        refusedVideos++;
+        continue;
+      }
+      browserChecks++;
+      if (await checkInBrowser(m.src, m.referer ?? m.pageUrl, signal)) {
+        ok.push({ ...m, unverified: undefined, guess: undefined, tries: undefined, checked: true });
+      } else refusedVideos++;
+    }
+    return ok;
+  };
   /** 送った画像・動画の中身の指紋（URL が違っても同じファイルなら 2 個目は出さない） */
   const seenPrints = new Set<string>(resume?.prints ?? []);
   const dropSamePrint = (items: MediaItem[]) =>
@@ -349,6 +387,7 @@ export async function* crawl(
     cookies: jar.toJSON(),
     pending: pending.slice(0, MAX_PENDING),
     prints: [...seenPrints].slice(-MAX_PRINTS),
+    dropped: [goneVideos, refusedVideos],
   });
 
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
@@ -442,6 +481,11 @@ export async function* crawl(
   const browserPassed = new Set<string>();
   let blockedTries = 0;
   let renderStarts = 0;
+  /**
+   * 「動画があるはずなのに 1 本も見つからない」ページを、念のためブラウザで開いた回数（サイトごと）と、それで見つかった回数。
+   * 何度開いても見つからないサイトでは、それ以上は開かない（時間がかかるため）
+   */
+  const guessRenders = new Map<string, { tries: number; hits: number }>();
   let lastCheckpoint = Date.now();
   let robotsSkipped = 0;
   let lastError: string | null = null;
@@ -531,7 +575,7 @@ export async function* crawl(
       seenMedia.add(direct);
       const verified = await verifyMedia([direct], signal, Math.min(deadline, Date.now() + 12000), jar);
       pending.push(...verified.rest);
-      const ok = dropSamePrint(verified.ok);
+      const ok = dropSamePrint(await settle(verified));
       found += ok.length;
       videos += ok.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url: finalUrl, depth, found: ok.length });
@@ -676,13 +720,26 @@ export async function* crawl(
       const poor = extracted.media.length <= 2 || extracted.links.length < 3;
       const entrance =
         !!item.root && trustedVideos === 0 && (extracted.links.length < 3 || (extracted.gate && extracted.links.length < 15));
+      // 動画が 1 本も見つからないが、動画のページらしい（入力したページ・動画らしいリンクから来た・URL や部品の名前に video / player）。
+      // スクリプトで後から動画を出すプレーヤーかもしれないので、ブラウザで開いて再生ボタンを押してみる
+      const anyVideo = media.some((m) => m.kind !== "image");
+      const guess = guessRenders.get(pageOrigin) ?? { tries: 0, hits: 0 };
+      const looksLikeVideoPage =
+        !!item.root || (item.prio ?? 0) >= 2 || VIDEO_URL_RE.test(finalUrl) || PLAYERISH_RE.test(html.slice(0, 400000));
+      const guessRender =
+        wantsVideo && !anyVideo && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
         (options.render === "always" ||
           (options.render === "auto" &&
             ((extracted.clientRendered && poor) ||
               (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0) ||
-              (entrance && !extracted.redirect))));
+              (entrance && !extracted.redirect) ||
+              guessRender)));
+      if (wantRender && guessRender) {
+        guess.tries++;
+        guessRenders.set(pageOrigin, guess);
+      }
       if (wantRender) {
         try {
           r = await openInBrowser(finalUrl);
@@ -725,6 +782,10 @@ export async function* crawl(
         }
       }
 
+      if (r && guessRenders.has(pageOrigin) && media.some((m) => m.kind !== "image")) {
+        // ブラウザで開いたら（再生した通信も含めて）動画が見つかった。このサイトは、これからも動画のないページをブラウザで開く
+        guessRenders.get(pageOrigin)!.hits++;
+      }
       // 入力したページが転送されていたら（www. 付き・スマホ用アドレス・年齢確認の先など）、そこを「同じサイト」の基準にする
       if (item.root) {
         const sites = new Set(home.sites);
@@ -776,9 +837,10 @@ export async function* crawl(
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
-      const { ok, rest } = await verifyMedia(wanted, signal, Math.min(deadline, Date.now() + 12000), jar);
+      const verified = await verifyMedia(wanted, signal, Math.min(deadline, Date.now() + 12000), jar);
+      const rest = verified.rest;
       if (rest.length) pending.push(...rest);
-      let fresh = pickVariants(dropSamePrint(ok));
+      let fresh = pickVariants(dropSamePrint(await settle(verified)));
       // このページが一覧のカードから来ていて、本編の動画が見つからなかったら、カードのプレビュー動画を代わりに出す
       if (item.preview && wantsVideo && !fresh.some((m) => m.kind !== "image") && !rest.some((m) => m.kind !== "image")) {
         const stand: MediaItem = {
@@ -794,7 +856,7 @@ export async function* crawl(
         if (!seenMedia.has(stand)) {
           seenMedia.add(stand);
           const v = await verifyMedia([stand], signal, Math.min(deadline, Date.now() + 8000), jar);
-          fresh = [...fresh, ...dropSamePrint(v.ok)];
+          fresh = [...fresh, ...dropSamePrint(await settle(v))];
         }
       }
       found += fresh.length;
@@ -888,7 +950,7 @@ export async function* crawl(
     // 確かめきれずに残っていた画像・動画を、少しずつ確かめて送る
     if (pending.length && Date.now() < deadline) {
       const verified = await verifyMedia(pending.splice(0, pending.length), signal, Math.min(deadline, Date.now() + 5000), jar);
-      const ok = dropSamePrint(verified.ok);
+      const ok = dropSamePrint(await settle(verified));
       pending.push(...verified.rest);
       if (ok.length) {
         found += ok.length;
@@ -920,7 +982,7 @@ export async function* crawl(
     }
     const batch = pending.splice(0, pending.length);
     const verified = await verifyMedia(batch, signal, deadline, jar);
-    const ok = dropSamePrint(verified.ok);
+    const ok = dropSamePrint(await settle(verified));
     pending.push(...verified.rest);
     if (ok.length) {
       found += ok.length;
@@ -933,8 +995,19 @@ export async function* crawl(
   // 取れなかったときは、わかる範囲で理由を伝える
   if (!signal.aborted) {
     const noVideos = wantsVideo && videos === 0;
+    const droppedNote =
+      refusedVideos + goneVideos > 0
+        ? `動画を ${refusedVideos + goneVideos} 本見つけましたが、見られなかったので出していません（` +
+          [refusedVideos ? `サイトがこのアプリのサーバーからの読み込みを断った ${refusedVideos} 本` : "", goneVideos ? `ファイルがない・中身が動画でない ${goneVideos} 本` : ""]
+            .filter(Boolean)
+            .join("・") +
+          "）" +
+          (refusedVideos ? "。日本からしか見られないサイトの可能性があります" : "")
+        : null;
     const message =
-      robotsSkipped && (found === 0 || noVideos)
+      noVideos && droppedNote
+        ? droppedNote
+        : robotsSkipped && (found === 0 || noVideos)
         ? `robots.txt（サイトが出している「自動で読まないで」という指定）で禁止されているページが ${robotsSkipped} 件あり、読みませんでした。「robots.txt を守る」を外すと読めます`
         : found === 0
           ? lastError
@@ -944,7 +1017,9 @@ export async function* crawl(
               : "画像・動画が見つかりませんでした（ログインが必要なサイトか、このアプリでは読めない方式かもしれません）"
           : noVideos && widened > 0
             ? "リンク先まで広げて探しましたが、動画は見つかりませんでした"
-            : null;
+            : refusedVideos > 0
+              ? droppedNote
+              : null;
     if (message) yield { type: "note", url: startUrl, message };
   }
   const truncated = queue.length > 0;

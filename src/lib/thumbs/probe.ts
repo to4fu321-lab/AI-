@@ -20,7 +20,15 @@ export type LinkCheck = "yes" | "no" | "unknown";
 export interface Probe {
   result: LinkCheck;
   fp?: string;
+  /**
+   * no のうち「ファイルがない」ではなく「こちらのサーバーが断られた」もの（401・403 など、接続を切られた）。
+   * 本物のブラウザからなら見られることがあるので、ブラウザで確かめ直す目安にする
+   */
+  refused?: boolean;
 }
+
+/** ファイルがない・中身が違う、とはっきりわかる返事 */
+const goneStatus = (s: number) => s === 404 || s === 410;
 
 /** 先頭のバイトの要約（FNV-1a 方式。同じ中身なら必ず同じ値） */
 function digest(b: Uint8Array): string {
@@ -87,7 +95,7 @@ async function probe(
     }
     if (res.status !== 200 && res.status !== 206) {
       await res.body?.cancel().catch(() => {});
-      return { result: transientStatus(res.status) ? "unknown" : "no" };
+      return { result: transientStatus(res.status) ? "unknown" : "no", refused: !goneStatus(res.status) };
     }
     const type = res.headers.get("content-type");
     const total = totalSize(res);
@@ -99,9 +107,10 @@ async function probe(
     const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
     const isText = text.startsWith("<") || text.startsWith("{");
     if (kind === "image" && /svg/i.test(type ?? "") && text.includes("<svg")) return yes();
-    return kindFromContentType(type) === kind && !isText && head.length >= 12 ? yes() : { result: "no" };
+    // 中身が HTML だった＝エラーページや「人間か確かめる」ページ。断られた扱いにして、ブラウザで確かめ直せるようにする
+    return kindFromContentType(type) === kind && !isText && head.length >= 12 ? yes() : { result: "no", refused: isText };
   } catch (err) {
-    return { result: isTransient(err) ? "unknown" : "no" };
+    return { result: isTransient(err) ? "unknown" : "no", refused: !(err instanceof FetchBlockedError) };
   }
 }
 
@@ -116,7 +125,8 @@ function checkFile(url: string, kind: "image" | "video", referer: string | undef
     if (first.result === "yes" || !referer || signal.aborted) return first;
     const second = await probe(url, kind, undefined, signal, jar);
     if (second.result === "yes") return second;
-    return { result: first.result === "unknown" || second.result === "unknown" ? "unknown" : "no" };
+    if (first.result === "unknown" || second.result === "unknown") return { result: "unknown" };
+    return { result: "no", refused: !!(first.refused && second.refused) };
   });
 }
 
@@ -137,7 +147,7 @@ export function checkEmbed(src: string, signal: AbortSignal): Promise<Probe> {
       const { res } = await safeFetch(target, { timeoutMs: 8000, signal, headers: { accept: "application/json,text/html,*/*;q=0.5" } });
       await res.body?.cancel().catch(() => {});
       // 埋め込み動画は URL そのものが動画を表すので、指紋は URL にする（YouTube は動画の番号）
-      if (res.ok) return { result: "yes", fp: yt ? `yt:${yt}` : vimeo ? `vimeo:${vimeo}` : undefined };
+      if (res.ok) return { result: "yes", fp: yt ? `yt:${yt}` : vimeo ? `vimeo:${vimeo}` : `embed:${src.slice(0, 70)}` };
       return { result: transientStatus(res.status) ? "unknown" : "no" };
     } catch (err) {
       return { result: isTransient(err) ? "unknown" : "no" };

@@ -138,6 +138,8 @@ export interface CrawlState {
   pending?: MediaItem[];
   /** 送った画像・動画の中身の指紋 */
   prints?: string[];
+  /** 見つけたが出さなかった動画の数 [ファイルがない, サイトに断られた] */
+  dropped?: [number, number];
   /** サイトから渡された Cookie（ドメイン, "a=b; c=d"） */
   cookies?: [string, string][];
 }

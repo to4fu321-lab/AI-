@@ -178,6 +178,7 @@ function parseResume(value: unknown): CrawlState | undefined {
     home,
     cookies,
     pending: parsePending(v.pending),
+    dropped: Array.isArray(v.dropped) ? [clamp(v.dropped[0], 0, 100000, 0), clamp(v.dropped[1], 0, 100000, 0)] : undefined,
     prints: Array.isArray(v.prints)
       ? v.prints.filter((x): x is string => typeof x === "string" && x.length <= 80).slice(-MAX_PRINTS)
       : undefined,
