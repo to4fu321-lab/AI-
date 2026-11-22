@@ -32,8 +32,13 @@ export interface MediaItem {
    * 動画だと確かめられなかったときは一覧に出さない。画面には送らない
    */
   guess?: boolean;
-  /** リンク切れでないことをサーバーが確かめたか（付いていない動画は、画面側が表示のときに確かめる） */
-  checked?: boolean;
+  /**
+   * リンク切れでないと確かめた印。サーバーは true を付けて送り、画面は受け取った時刻（ミリ秒）に置き換えて保存する。
+   * 画面は、確かめてから時間がたったもの・印のないものを、確かめ直してから表示する
+   */
+  checked?: boolean | number;
+  /** サーバー内部用：確かめようとして時間切れになった回数 */
+  tries?: number;
 }
 
 /** /api/thumbs/crawl が 1 行ずつ返すイベント（NDJSON）。 */
@@ -121,6 +126,8 @@ export interface CrawlState {
   /** 範囲を広げて読んだページ数（0 ならまだ広げていない） */
   widened?: number;
   home?: CrawlHome;
+  /** 見つけたが、まだリンク切れかどうか確かめていない画像・動画 */
+  pending?: MediaItem[];
   /** サイトから渡された Cookie（ドメイン, "a=b; c=d"） */
   cookies?: [string, string][];
 }

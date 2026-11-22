@@ -66,31 +66,43 @@ export function proxyUrl(
   return `/api/thumbs/media?${p}`;
 }
 
+/** 確かめてからこの時間がたったものは、確かめ直してから表示する（期限付きの URL が切れることがあるため） */
+const CHECK_FRESH_MS = 6 * 60 * 60 * 1000;
+
+/** リンク切れでないと、最近確かめてあるか */
+const isFresh = (item: MediaItem, now: number) => typeof item.checked === "number" && now - item.checked < CHECK_FRESH_MS;
+
+type LinkState = "yes" | "no" | "unknown";
+
 /**
- * リンク切れの確認（サーバーに聞く）。同時に 3 件まで。結果はこの画面を開いている間だけ覚えておく。
- * サーバーが取得のときに確かめていない動画（以前に取得して保存してあったものなど）に使う
+ * リンク切れの確認（サーバーに聞く）。同時に 4 件まで。結果はこの画面を開いている間だけ覚えておく。
+ * 以前に取得して保存してあった画像・動画を、表示する前に確かめ直すのに使う
  */
-const linkChecks = new Map<string, Promise<boolean>>();
+const linkChecks = new Map<string, Promise<LinkState>>();
 let checking = 0;
 const checkWaiters: (() => void)[] = [];
-function isDeadLink(item: MediaItem): Promise<boolean> {
+function checkLink(item: MediaItem): Promise<LinkState> {
   let job = linkChecks.get(item.src);
   if (!job) {
-    job = (async () => {
-      while (checking >= 3) await new Promise<void>((r) => checkWaiters.push(r));
+    job = (async (): Promise<LinkState> => {
+      while (checking >= 4) await new Promise<void>((r) => checkWaiters.push(r));
       checking++;
       try {
         const p = new URLSearchParams({ url: item.src, ref: item.referer ?? item.pageUrl, check: "1", kind: item.kind });
         const res = await fetch(`/api/thumbs/media?${p}`);
-        return res.ok && (await res.json()).alive === "no";
+        if (!res.ok) return "unknown";
+        const alive = (await res.json()).alive;
+        return alive === "yes" || alive === "no" ? alive : "unknown";
       } catch {
-        return false;
+        return "unknown";
       } finally {
         checking--;
         checkWaiters.shift()?.();
       }
     })();
     linkChecks.set(item.src, job);
+    // 確かめられなかったものは、次に聞かれたらもう一度試す
+    void job.then((r) => r === "unknown" && linkChecks.delete(item.src));
   }
   return job;
 }
@@ -283,7 +295,8 @@ export function ThumbsApp() {
                       if (ids.has(i.id) || known.has(i) || isItemExcluded(i, excludesRef.current)) continue;
                       ids.add(i.id);
                       known.add(i);
-                      fresh.push({ ...i, jobId: id });
+                      // サーバーがリンク切れでないと確かめたもの。受け取った時刻を印にする
+                      fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined });
                     }
                     return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
                   });
@@ -382,30 +395,50 @@ export function ThumbsApp() {
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
-  /** リンクが生きていると確かめた印を付ける（次からは確かめない） */
-  const markChecked = useCallback((id: string) => setItems((l) => l.map((i) => (i.id === id ? { ...i, checked: true } : i))), []);
+
+  // --- リンク切れを最初から出さない ---
+  // 表示するのは「最近リンク切れでないと確かめたもの」だけ。
+  // 以前に保存した一覧などで確かめていないもの・時間がたったものは、裏で確かめ直し、見られるものだけ表示に加える
+  const shown = useMemo(() => items.filter((i) => isFresh(i, now)), [items, now]);
+  /** 確かめに出したもの（同じものを何度も聞かない） */
+  const asked = useRef(new Set<string>());
+  /** 確かめられなかった（通信の失敗など）もの。表示はしない */
+  const [unsure, setUnsure] = useState(0);
+  useEffect(() => {
+    if (!loaded.current || !now) return;
+    for (const item of items) {
+      if (isFresh(item, now) || asked.current.has(item.id)) continue;
+      asked.current.add(item.id);
+      void checkLink(item).then((r) => {
+        if (r === "yes") setItems((l) => l.map((i) => (i.id === item.id ? { ...i, checked: Date.now() } : i)));
+        else if (r === "no") setItems((l) => l.filter((i) => i.id !== item.id));
+        else setUnsure((n) => n + 1);
+      });
+    }
+  }, [items, now]);
+  const waiting = items.length - shown.length;
 
   const visible = useMemo(
     () =>
-      items.filter(
+      shown.filter(
         (i) =>
           (filter === "all" || (filter === "image" ? i.kind === "image" : i.kind !== "image")) &&
           (!jobFilter || i.jobId === jobFilter),
       ),
-    [items, filter, jobFilter],
+    [shown, filter, jobFilter],
   );
   const counts = useMemo(() => {
-    const scoped = jobFilter ? items.filter((i) => i.jobId === jobFilter) : items;
+    const scoped = jobFilter ? shown.filter((i) => i.jobId === jobFilter) : shown;
     const video = scoped.filter(isVideoLike).length;
     return { all: scoped.length, image: scoped.length - video, video };
-  }, [items, jobFilter]);
+  }, [shown, jobFilter]);
 
   const running = jobs.some((j) => j.status === "running");
   const foundByJob = useMemo(() => {
     const m = new Map<string, number>();
-    for (const i of items) m.set(i.jobId, (m.get(i.jobId) ?? 0) + 1);
+    for (const i of shown) m.set(i.jobId, (m.get(i.jobId) ?? 0) + 1);
     return m;
-  }, [items]);
+  }, [shown]);
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-16 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -574,11 +607,18 @@ export function ThumbsApp() {
         <ul className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
           {visible.map((item, index) => (
             <li key={item.id}>
-              <Thumb item={item} onOpen={() => setViewer(index)} onBroken={hideItem} onChecked={markChecked} />
+              <Thumb item={item} onOpen={() => setViewer(index)} onBroken={hideItem} />
             </li>
           ))}
         </ul>
-        {items.length > 0 && visible.length === 0 && (
+        {waiting > 0 && (
+          <p className="mt-2 text-center text-xs text-neutral-400">
+            {waiting > unsure ? `🔍 以前の一覧のリンク切れを確認中… 残り ${waiting - unsure} 件` : ""}
+            {waiting > unsure && unsure > 0 ? " ・ " : ""}
+            {unsure > 0 ? `通信できず確認できなかった ${unsure} 件は表示していません（開き直すともう一度確かめます）` : ""}
+          </p>
+        )}
+        {items.length > 0 && visible.length === 0 && waiting === 0 && (
           <p className="mt-10 text-center text-sm text-neutral-400">この条件に合うものはありません</p>
         )}
       </main>
@@ -721,17 +761,7 @@ function JobRow({
  *   失敗したらサーバー中継で再挑戦。画像がそれでも駄目なら一覧から外す
  * - サムネイルのない動画（または読み込めなかった動画）は、画面に見えたら動画から 1 コマ取り出して作る
  */
-function Thumb({
-  item,
-  onOpen,
-  onBroken,
-  onChecked,
-}: {
-  item: Item;
-  onOpen: () => void;
-  onBroken: (id: string) => void;
-  onChecked: (id: string) => void;
-}) {
+function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onBroken: (id: string) => void }) {
   const imageSrc = item.kind === "image" ? item.src : item.thumb;
   const [attempt, setAttempt] = useState(0);
   const [imgFailed, setImgFailed] = useState(false);
@@ -770,32 +800,6 @@ function Thumb({
       alive = false;
     };
   }, [needCapture, visible, item.src, proxied]);
-
-  // サーバーがまだ確かめていない動画は、画面に入ったときにリンク切れか確かめ、切れていたら一覧から外す
-  const needCheck = video && !item.checked;
-  useEffect(() => {
-    if (!needCheck) return;
-    const el = ref.current;
-    if (!el) return;
-    let alive = true;
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return;
-        io.disconnect();
-        void isDeadLink(item).then((dead) => {
-          if (!alive) return;
-          if (dead) onBroken(item.id);
-          else onChecked(item.id);
-        });
-      },
-      { rootMargin: "200px" },
-    );
-    io.observe(el);
-    return () => {
-      alive = false;
-      io.disconnect();
-    };
-  }, [needCheck, item, onBroken, onChecked]);
 
   const onError = () => {
     if (attempt === 0) setAttempt(1);
