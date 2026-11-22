@@ -32,6 +32,8 @@ export interface MediaItem {
    * 動画だと確かめられなかったときは一覧に出さない。画面には送らない
    */
   guess?: boolean;
+  /** リンク切れでないことをサーバーが確かめたか（付いていない動画は、画面側が表示のときに確かめる） */
+  checked?: boolean;
 }
 
 /** /api/thumbs/crawl が 1 行ずつ返すイベント（NDJSON）。 */

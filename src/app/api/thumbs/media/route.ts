@@ -1,5 +1,6 @@
 import { guardApi } from "@/lib/access/locks";
 import { extensionOf, kindFromContentType, kindFromUrl } from "@/lib/thumbs/extract";
+import { checkEmbed, checkVideo } from "@/lib/thumbs/probe";
 import { FetchBlockedError, safeFetch } from "@/lib/thumbs/safeFetch";
 import { looksLikeImage, looksLikePlaylist, looksLikeVideo, readHead } from "@/lib/thumbs/sniff";
 
@@ -33,6 +34,12 @@ export async function GET(request: Request) {
   /** HLS の目次から呼ばれた断片・鍵・下位の目次 */
   const part = params.get("part") === "1";
   const referer = ref && /^https?:\/\//.test(ref) ? ref : undefined;
+
+  // check=1：中継せず、リンクが生きているかだけ答える（画面が、保存済みの一覧のリンク切れを外すために使う）
+  if (params.get("check") === "1") {
+    const alive = params.get("kind") === "embed" ? await checkEmbed(target, request.signal) : await checkVideo(target, referer, request.signal);
+    return Response.json({ alive }, { headers: { "cache-control": "no-store" } });
+  }
 
   const range = request.headers.get("range");
   // 目次ファイルは全体が必要なので、部分取得はしない

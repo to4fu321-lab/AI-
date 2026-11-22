@@ -3,8 +3,8 @@ import { AD_FRAME_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate
 import { mediaKey, SeenMedia, variantKey } from "./dedupe";
 import { isExcluded, isItemExcluded } from "./exclude";
 import { RenderDeferred, renderPage, type Rendered } from "./render";
+import { checkEmbed, checkVideo, type LinkCheck } from "./probe";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
-import { looksLikeVideo, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
@@ -136,74 +136,47 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
   }
 }
 
-/** 動画かどうかの確認結果。yes: 動画 / no: 動画ではない / unknown: 断られた・時間切れなどで確かめられなかった */
-type VideoCheck = "yes" | "no" | "unknown";
-
-/** 確認結果（同じ実行中は使い回す） */
-const videoCheckCache = new Map<string, Promise<VideoCheck>>();
-
-async function probeVideo(url: string, referer: string | undefined, signal: AbortSignal): Promise<VideoCheck> {
-  try {
-    const headers: Record<string, string> = { range: "bytes=0-375", accept: "video/*,*/*;q=0.5" };
-    if (referer) headers.referer = referer;
-    const { res } = await safeFetch(url, { headers, timeoutMs: 5000, signal });
-    if (res.status !== 200 && res.status !== 206) {
-      await res.body?.cancel().catch(() => {});
-      return res.status === 404 || res.status === 410 ? "no" : "unknown";
-    }
-    const type = res.headers.get("content-type");
-    // 「動画」と名乗っていても中身が HTML のサーバーがあるので、先頭のバイトで確かめる
-    const head = await readHead(res, 376);
-    if (looksLikeVideo(head)) return "yes";
-    const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
-    const isText = text.startsWith("<") || text.startsWith("{");
-    return kindFromContentType(type) === "video" && !isText && head.length >= 16 ? "yes" : "no";
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * 先頭だけ取りに行き、本当に動画ファイルが返ってくるか確かめる。
- * 直リンク禁止のサーバーもあるので、まず見つけたページ（プレーヤー）を Referer として名乗り、
- * 断られたら Referer なしでもう一度試す
- */
-function checkVideo(url: string, referer: string, signal: AbortSignal): Promise<VideoCheck> {
-  let check = videoCheckCache.get(url);
-  if (!check) {
-    check = probeVideo(url, referer, signal).then((first) => (first === "unknown" && !signal.aborted ? probeVideo(url, undefined, signal) : first));
-    videoCheckCache.set(url, check);
-    if (videoCheckCache.size > 5000) videoCheckCache.delete(videoCheckCache.keys().next().value!);
-  }
-  return check;
-}
-
-/** 1 ページで確かめる動画候補の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
+/** 1 ページで確かめる動画の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
 const MAX_VERIFY_PER_PAGE = 40;
 const VERIFY_BUDGET_MS = 15000;
 
 /**
- * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
- * 一度に 16 件ずつ確かめる。
- * サーバーから断られた・時間切れなどで確かめられなかったものは、URL が動画ファイルの形（.mp4 など）なら残す
- * （こちらのサーバーからは断られても、手元の端末からは再生できることが多いため）
+ * 見つけた動画・埋め込み動画のリンクが生きているか確かめ、リンク切れを外す。一度に 16 件ずつ。
+ * - リンク切れ（404・サイトがない・中身が動画ではない）は出さない
+ * - URL の見た目だけで動画とした候補は、動画だと確かめられたものだけ出す。
+ *   ただし、サーバーから断られた・時間切れなどで確かめられなかったものは、URL が動画ファイルの形（.mp4 など）なら残す
+ *   （こちらのサーバーからは断られても、手元の端末からは再生できることが多いため）
+ * 確かめたものには checked を付ける（付いていないものは、画面側があとで確かめる）
  */
 async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: number): Promise<MediaItem[]> {
-  const result = new Map<MediaItem, VideoCheck>();
-  const pending = items.filter((m) => m.unverified).slice(0, MAX_VERIFY_PER_PAGE);
+  const result = new Map<MediaItem, LinkCheck>();
+  // 確かめないと出せないもの（見た目だけの候補）を先に
+  const pending = items
+    .filter((m) => m.kind !== "image")
+    .sort((a, b) => Number(!!b.unverified) - Number(!!a.unverified))
+    .slice(0, MAX_VERIFY_PER_PAGE);
   const stopAt = Math.min(deadline, Date.now() + VERIFY_BUDGET_MS);
   for (let i = 0; i < pending.length; i += 16) {
     if (Date.now() > stopAt || signal.aborted) break;
     const batch = pending.slice(i, i + 16);
-    const results = await Promise.all(batch.map((m) => checkVideo(m.src, m.referer ?? m.pageUrl, signal)));
+    const results = await Promise.all(
+      batch.map((m) => (m.kind === "embed" ? checkEmbed(m.src, signal) : checkVideo(m.src, m.referer ?? m.pageUrl, signal))),
+    );
     batch.forEach((m, j) => result.set(m, results[j]));
   }
   const keep = (m: MediaItem) => {
+    if (m.kind === "image") return true;
+    const r = result.get(m);
+    if (r === "no") return false;
     if (!m.unverified) return true;
-    const r = result.get(m) ?? "unknown";
-    return r === "yes" || (r === "unknown" && !m.guess && kindFromUrl(m.src) === "video");
+    return r === "yes" || (!m.guess && kindFromUrl(m.src) === "video");
   };
-  return items.filter(keep).map((m) => (m.unverified || m.guess ? { ...m, unverified: undefined, guess: undefined } : m));
+  return items.filter(keep).map((m) => {
+    if (m.kind === "image") return m;
+    const out: MediaItem = { ...m, unverified: undefined, guess: undefined };
+    if (result.has(m)) out.checked = true;
+    return out;
+  });
 }
 
 /**
