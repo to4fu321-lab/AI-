@@ -16,6 +16,8 @@ import { assertPublicUrl, thumbsLog } from "./safeFetch";
 interface Session {
   page: Page;
   at: number;
+  /** このページを使う処理を 1 つずつ順番に行うための列（読み込みの途中でページを移動すると、ほかの読み込みが壊れるため） */
+  queue: Promise<unknown>;
 }
 
 const sessions = new Map<string, Promise<Session | null>>();
@@ -107,7 +109,7 @@ async function openSession(origin: string, startUrl: string, signal: AbortSignal
       await page.close().catch(() => {});
       return null;
     }
-    const session = { page, at: Date.now() };
+    const session: Session = { page, at: Date.now(), queue: Promise.resolve() };
     scheduleClose(origin, session);
     return session;
   } catch (err) {
@@ -119,6 +121,10 @@ async function openSession(origin: string, startUrl: string, signal: AbortSignal
 
 /** そのサイトのページを開いたままにしたものを返す（なければ開く。開けなければ null） */
 export async function getSession(origin: string, startUrl: string, signal: AbortSignal, plainBrowser = false): Promise<Page | null> {
+  return (await getSessionEntry(origin, startUrl, signal, plainBrowser))?.page ?? null;
+}
+
+async function getSessionEntry(origin: string, startUrl: string, signal: AbortSignal, plainBrowser = false): Promise<Session | null> {
   let s = sessions.get(origin);
   if (!s) {
     // 枚数の上限を越えるなら、いちばん古いものを閉じる
@@ -133,58 +139,84 @@ export async function getSession(origin: string, startUrl: string, signal: Abort
     return null;
   }
   session.at = Date.now();
-  return session.page;
+  return session;
 }
 
 export function dropSession(origin: string) {
   void closeSession(origin);
 }
 
+type Read = { status: number; html: string; finalUrl: string };
+
+/** 返ってきた HTML が「人間か確かめる」ページか */
+const isChallengeHtml = (html: string) =>
+  /<title>\s*(?:Just a moment|Attention Required)/i.test(html) || (/challenge-platform|cf-chl-|cf_chl_/i.test(html.slice(0, 20000)) && html.length < 60000);
+
 /**
  * 開いたままのページの中から、同じサイトのページを読む（HTML の文字を返す）。
+ *   1. ページの中から読み込む（速い。0.3 秒ほど）
+ *   2. それが「人間か確かめる」ページを返したら、開いているページ自体をその URL へ移動して、確認を通り抜けるのを待つ
+ *      （確認は、ページを開いたときにしか通れないため）。通れば、以降は 1 の方法でも読めることが多い
  * 読めなければ null（呼ぶ側は、ページを表示し直す方法に戻る）
  */
-export async function fetchInBrowser(url: string, signal: AbortSignal): Promise<{ status: number; html: string; finalUrl: string } | null> {
+export async function fetchInBrowser(url: string, signal: AbortSignal): Promise<Read | null> {
   let origin: string;
   try {
     origin = new URL(url).origin;
   } catch {
     return null;
   }
-  const began = Date.now();
-  const page = await getSession(origin, url, signal);
-  if (!page) return null;
-  try {
-    const out = (await Promise.race([
-      page.evaluate(async (target: string) => {
-        try {
-          const res = await fetch(target, { credentials: "include", redirect: "follow", headers: { accept: "text/html,application/xhtml+xml" } });
-          const type = res.headers.get("content-type") || "";
-          const text = /html|xml|text|json/i.test(type) || !type ? (await res.text()).slice(0, 3_000_000) : "";
-          return { status: res.status, html: text, finalUrl: res.url || target, type };
-        } catch (e) {
-          return { status: 0, html: "", finalUrl: target, type: String(e) };
-        }
-      }, url),
-      sleep(15000).then(() => null),
-    ])) as { status: number; html: string; finalUrl: string; type: string } | null;
-    if (!out) {
-      thumbsLog(`session 読み込みが時間切れ ${url.slice(0, 100)}`);
-      return null;
-    }
-    // 返ってきたのがまた「人間か確かめる」ページなら、読めていない
-    const challenged = /<title>\s*(?:Just a moment|Attention Required)/i.test(out.html) || /challenge-platform|cf-chl-/i.test(out.html.slice(0, 20000)) && out.html.length < 60000;
-    thumbsLog(`session fetch ${out.status}${challenged ? "（確認ページ）" : ""} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
-    if (out.status === 0 || challenged) {
-      // ページの中の確認が切れた。開き直せるように閉じておく
-      if (challenged) dropSession(origin);
-      return null;
-    }
-    if (new URL(out.finalUrl).origin !== origin) return null;
-    return { status: out.status, html: out.html, finalUrl: out.finalUrl };
-  } catch (err) {
-    thumbsLog(`session fetch 失敗 ${err instanceof Error ? err.message.slice(0, 100) : String(err)} ${url.slice(0, 100)}`);
+  const session = await getSessionEntry(origin, url, signal);
+  if (!session) return null;
+  const job = session.queue.then(() => readInSession(session, origin, url, signal));
+  session.queue = job.catch(() => null);
+  return job.catch((err) => {
+    thumbsLog(`session 失敗 ${err instanceof Error ? err.message.slice(0, 100) : String(err)} ${url.slice(0, 100)}`);
     dropSession(origin);
     return null;
+  });
+}
+
+async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
+  const { page } = session;
+  if (page.isClosed() || signal.aborted) return null;
+  session.at = Date.now();
+  const began = Date.now();
+  const out = (await Promise.race([
+    page.evaluate(async (target: string) => {
+      try {
+        const res = await fetch(target, { credentials: "include", redirect: "follow", headers: { accept: "text/html,application/xhtml+xml" } });
+        const type = res.headers.get("content-type") || "";
+        const text = /html|xml|text|json/i.test(type) || !type ? (await res.text()).slice(0, 3_000_000) : "";
+        return { status: res.status, html: text, finalUrl: res.url || target };
+      } catch {
+        return { status: 0, html: "", finalUrl: target };
+      }
+    }, url),
+    sleep(12000).then(() => null),
+  ])) as Read | null;
+  const challenged = !out || out.status === 0 || out.status === 403 || out.status === 503 || isChallengeHtml(out.html);
+  if (out && !challenged) {
+    thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
+    if (new URL(out.finalUrl).origin !== origin) return null;
+    return out;
   }
+  // ページ自体を移動して、確認を通り抜ける
+  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
+  const until = Date.now() + 15000;
+  while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) await sleep(600);
+  const stuck = await page.evaluate(CHALLENGE).catch(() => true);
+  const html = stuck ? "" : await page.content().catch(() => "");
+  const finalUrl = page.url();
+  session.at = Date.now();
+  thumbsLog(
+    `session 移動 ${stuck ? "確認を通れず" : "通過"} ${Date.now() - began}ms（最初の読み込み ${out ? out.status : "時間切れ"}）HTTP ${res?.status() ?? "-"} html=${html.length} ${url.slice(0, 100)}`,
+  );
+  if (stuck || !html) return null;
+  try {
+    if (new URL(finalUrl).origin !== origin) return null;
+  } catch {
+    return null;
+  }
+  return { status: 200, html: html.slice(0, 3_000_000), finalUrl };
 }
