@@ -155,6 +155,8 @@ function toInt(v: string | undefined): number | undefined {
 }
 
 export interface Extracted {
+  /** 画面を JavaScript で後から描くサイトに見えるか（取れた件数が少ないときの説明用） */
+  clientRendered: boolean;
   media: MediaItem[];
   links: string[];
   /** ページ送り（次へ・2・3…）のリンク。階層を増やさずに辿る */
@@ -385,6 +387,43 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (url) add({ kind: "video", src: url, format: formatOf(url, "video") });
   }
 
+  // --- 7. CSS の背景画像（style="background-image:url(...)" や <style> 内） ---
+  for (const m of html.matchAll(/url\(\s*(?:&quot;|["'])?([^"')]+?)(?:&quot;|["'])?\s*\)/gi)) {
+    const url = resolveUrl(decodeEntities(m[1]), base);
+    if (url && kindFromUrl(url) === "image" && !/\.svg$/i.test(new URL(url).pathname)) {
+      add({ kind: "image", src: url, format: formatOf(url, "image") });
+    }
+  }
+
+  // --- 8. 遅延読み込み用の data-* 属性（data-bg, data-thumb, data-lazy など。どのタグでも） ---
+  for (const m of markup.matchAll(
+    /\sdata-(?:src|bg|background|background-image|image|img|thumb|thumbnail|original|lazy|lazy-src|lazy-bg|url|full|large)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi,
+  )) {
+    const raw = decodeEntities(m[1] ?? m[2]).replace(/^url\((["']?)(.*)\1\)$/, "$2");
+    const url = resolveUrl(raw, base);
+    if (!url) continue;
+    const kind = kindFromUrl(url);
+    if (kind) add({ kind, src: url, format: formatOf(url, kind) });
+  }
+
+  // --- 9. JavaScript のデータ（Next.js / Nuxt などが埋め込む JSON）の中の画像 URL ---
+  // 画面を JavaScript で後から描くサイトは、HTML に <img> がなく、ここにだけ URL がある
+  for (const m of unescaped.matchAll(
+    /https?:\/\/[^\s"'<>\\()]+?\.(?:jpe?g|png|webp|gif|avif)(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),])/gi,
+  )) {
+    const url = resolveUrl(m[0], base);
+    if (url && !found.has(url)) add({ kind: "image", src: url, format: formatOf(url, "image") });
+  }
+  // 拡張子のない画像 URL も、"thumbnail": "https://..." のようなキー名なら拾う
+  for (const m of unescaped.matchAll(
+    /"(?:thumb|thumbnail|thumbnailUrl|thumbnail_url|thumbUrl|thumb_url|image|imageUrl|image_url|img|poster|cover|coverUrl|cover_url|ogImage|og_image)"\s*:\s*"(https?:\/\/[^"\s]+)"/gi,
+  )) {
+    const url = resolveUrl(m[1], base);
+    if (url && !found.has(url) && kindFromUrl(url) !== "video") {
+      add({ kind: "image", src: url, format: formatOf(url, "image") });
+    }
+  }
+
   // 動画にポスターがない場合、ページの OGP 画像を代わりに使う
   if (ogImage) {
     for (const item of found.values()) {
@@ -393,7 +432,10 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   }
 
   const pagination = findPagination(markup, tags, base, pageUrl);
-  return { media: [...found.values()], links: [...new Set(links)], pagination, title: pageTitle };
+  const clientRendered =
+    /__NEXT_DATA__|self\.__next_f|window\.__NUXT__|id=["']__nuxt["']|data-reactroot|id=["'](?:root|app)["']\s*>\s*<\/div>|ng-version=/i.test(html) ||
+    (tags.filter((t) => t.name === "img").length < 3 && (html.match(/<script\b/gi)?.length ?? 0) > 10);
+  return { clientRendered, media: [...found.values()], links: [...new Set(links)], pagination, title: pageTitle };
 }
 
 type AddFn = (item: Omit<MediaItem, "id" | "pageUrl">) => void;

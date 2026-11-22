@@ -24,6 +24,7 @@ export type CrawlEvent =
   | { type: "page"; url: string; depth: number; found: number }
   | { type: "media"; items: MediaItem[] }
   | { type: "skip"; url: string; reason: string }
+  | { type: "note"; url: string; message: string }
   | { type: "error"; url: string; message: string }
   | { type: "continue"; state: CrawlState }
   | { type: "done"; pages: number; media: number; truncated: boolean };

@@ -186,11 +186,18 @@ export async function* crawl(
         return events;
       }
       const html = await readLimited(res, MAX_HTML_BYTES);
-      const { media, links, pagination } = extractFromHtml(html, finalUrl);
+      const { media, links, pagination, clientRendered } = extractFromHtml(html, finalUrl);
       const fresh = media.filter((m) => !seenMedia.has(m.id));
       for (const m of fresh) seenMedia.add(m.id);
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
+      if (depth === 0 && media.length <= 2 && clientRendered) {
+        events.push({
+          type: "note",
+          url: finalUrl,
+          message: "このページは画像を JavaScript で後から読み込むため、取れない画像があります",
+        });
+      }
 
       // ページ送り（2ページ目・次へ）は同じ階層として辿る
       for (const link of pagination) {

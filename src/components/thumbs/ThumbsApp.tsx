@@ -16,6 +16,8 @@ interface Job {
   errors: number;
   message?: string;
   truncated?: boolean;
+  /** 取れなかった理由などの補足 */
+  note?: string;
   settings?: CrawlSettings;
 }
 
@@ -155,6 +157,7 @@ export function ThumbsApp() {
               else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
               else if (event.type === "done") updateJob(id, { status: "done", truncated: event.truncated });
               else if (event.type === "continue") resume = event.state;
+              else if (event.type === "note") updateJob(id, { note: event.message });
               else if (event.type === "media") {
                 foundCount += event.items.length;
                 setItems((list) => {
@@ -476,6 +479,7 @@ function JobRow({
         <span className={`block truncate ${job.status === "error" ? "text-red-500" : "text-neutral-400"}`}>
           {status} ・ {found}件
         </span>
+        {job.note && <span className="block truncate text-amber-600 dark:text-amber-400">⚠ {job.note}</span>}
       </button>
       <button
         type="button"
