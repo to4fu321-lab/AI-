@@ -32,7 +32,10 @@ export type CrawlEvent =
   | { type: "note"; url: string; message: string }
   | { type: "error"; url: string; message: string }
   | { type: "continue"; state: CrawlState }
-  | { type: "done"; pages: number; media: number; truncated: boolean };
+  /** 途中経過の記録（数秒おき）。止まったときに画面がここから再開できる */
+  | { type: "checkpoint"; state: CrawlState }
+  /** truncated（ページ数の上限で打ち切り）のときは、続きのための state も付く */
+  | { type: "done"; pages: number; media: number; truncated: boolean; state?: CrawlState };
 
 export interface CrawlOptions {
   /** 入力ページから何階層下までリンクを辿るか（0 = 入力ページのみ、最大 20） */
@@ -48,6 +51,8 @@ export interface CrawlOptions {
    * auto: JavaScript で描くページで画像がほとんど取れないときだけ / always: 毎回 / off: 使わない
    */
   render: "auto" | "always" | "off";
+  /** 取得する種類：すべて / 動画のみ / 画像のみ */
+  kinds: "all" | "video" | "image";
 }
 
 export interface QueueItem {

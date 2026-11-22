@@ -19,6 +19,8 @@ interface Job {
   /** 取れなかった理由などの補足 */
   note?: string;
   settings?: CrawlSettings;
+  /** 最後に受け取った途中経過。止まったときは「続きから」でここから再開する */
+  resume?: CrawlState;
 }
 
 type Filter = "all" | "image" | "video";
@@ -27,6 +29,26 @@ const STORAGE_KEY = "thumbs:v1";
 /** 履歴と登録サイトは「すべて消す」をしても残すので、別の場所に保存する */
 const LIBRARY_KEY = "thumbs:library:v1";
 const MAX_ITEMS = 5000;
+
+class ServerError extends Error {
+  constructor(public status: number) {
+    super(`HTTP ${status}`);
+  }
+}
+
+/** ブラウザの英語のエラーを、何が起きたかわかる日本語にする */
+function describeError(err: unknown): string {
+  if (err instanceof ServerError) {
+    return err.status === 504
+      ? "サーバーの処理が時間切れになりました。もう一度お試しください"
+      : `サーバーでエラーが起きました（HTTP ${err.status}）`;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  if (/load failed|failed to fetch|networkerror|network|stream cut|terminated|aborted/i.test(message)) {
+    return "通信が切れました（アプリの切り替え・画面オフ・電波・サーバーの時間切れなど）。再接続も失敗しました";
+  }
+  return message;
+}
 
 export function proxyUrl(item: Pick<MediaItem, "src" | "pageUrl">, opts: { download?: boolean; name?: string } = {}) {
   const p = new URLSearchParams({ url: item.src, ref: item.pageUrl });
@@ -53,6 +75,7 @@ export function ThumbsApp() {
   const [maxPagination, setMaxPagination] = useState(50);
   const [crossSite, setCrossSite] = useState(false);
   const [render, setRender] = useState<"auto" | "always" | "off">("auto");
+  const [kinds, setKinds] = useState<"all" | "video" | "image">("all");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -86,7 +109,10 @@ export function ThumbsApp() {
     if (!loaded.current) return;
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: items.slice(0, MAX_ITEMS), jobs }));
+        // 途中経過は大きいので、新しい 5 件のジョブ分だけ保存する
+        let kept = 0;
+        const slimJobs = jobs.map((j) => (j.resume && kept++ < 5 ? j : { ...j, resume: undefined }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: items.slice(0, MAX_ITEMS), jobs: slimJobs }));
       } catch {
         /* 容量オーバーなどは無視 */
       }
@@ -112,74 +138,117 @@ export function ThumbsApp() {
   }, []);
 
   const startJob = useCallback(
-    async (url: string, override?: CrawlSettings) => {
-      const settings: CrawlSettings = override ?? { depth, maxPages, maxPagination, crossSite, render };
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }) => {
+      let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds };
+      // ページ数の上限で打ち切ったものを続けるときは、同じページ数だけ上限を足す
+      if (existing?.job.truncated && existing.job.resume) {
+        settings = { ...settings, maxPages: Math.min(1000, existing.job.resume.pages + settings.maxPages) };
+      }
+      const id = existing?.job.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const controller = new AbortController();
       controllers.current.set(id, controller);
-      setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
-      let pageCount = 0;
-      let foundCount = 0;
+      if (existing) {
+        updateJob(id, { status: "running", message: undefined, note: undefined, truncated: false, settings });
+      } else {
+        setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
+      }
+      let pageCount = existing?.job.pages ?? 0;
+      let foundCount = existing?.found ?? 0;
       const startedAt = Date.now();
-      recordHistory({ url, at: startedAt, pages: 0, found: 0, settings });
+      recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
 
       try {
-        // サーバーは 1 回に約 40 秒までしか動けないので、「続き」が返ってきたら送り返して再開してもらう
-        let resume: CrawlState | undefined;
-        do {
-          const res = await fetch("/api/thumbs/crawl", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ url, ...settings, resume }),
-            signal: controller.signal,
-          });
-          if (!res.ok || !res.body) {
-            const data = await res.json().catch(() => ({}));
-            updateJob(id, { status: "error", message: data.error ?? `エラー（HTTP ${res.status}）` });
-            return;
-          }
-          resume = undefined;
-          // ストリームを 1 行ずつ読み、届いたものからすぐ画面に追加する
-          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-          let buffer = "";
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += value;
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              const event = JSON.parse(line) as CrawlEvent;
-              if (event.type === "page") {
-                pageCount++;
-                updateJob(id, (j) => ({ pages: j.pages + 1 }));
-              }
-              else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
-              else if (event.type === "done") updateJob(id, { status: "done", truncated: event.truncated });
-              else if (event.type === "continue") resume = event.state;
-              else if (event.type === "note") updateJob(id, { note: event.message });
-              else if (event.type === "media") {
-                foundCount += event.items.length;
-                setItems((list) => {
-                  const known = new Set(list.map((i) => i.id));
-                  const fresh = event.items.filter((i) => !known.has(i.id)).map((i) => ({ ...i, jobId: id }));
-                  return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
-                });
+        // サーバーは 1 回に動ける時間に上限があるので、「続き」が返ってきたら送り返して再開してもらう。
+        // 通信が途中で切れたら、同じところから最大 3 回までやり直す
+        let current: CrawlState | undefined = existing?.job.resume;
+        /** 届いた中で一番新しい途中経過（再接続はここから） */
+        let latest: CrawlState | undefined = current;
+        let retries = 0;
+        for (;;) {
+          let next: CrawlState | undefined;
+          let finished = false;
+          try {
+            const res = await fetch("/api/thumbs/crawl", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ url, ...settings, resume: current }),
+              signal: controller.signal,
+            });
+            if (res.status >= 500) throw new ServerError(res.status);
+            if (!res.ok || !res.body) {
+              const data = await res.json().catch(() => ({}));
+              updateJob(id, { status: "error", message: data.error ?? `エラー（HTTP ${res.status}）` });
+              return;
+            }
+            // ストリームを 1 行ずつ読み、届いたものからすぐ画面に追加する
+            const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+            let buffer = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += value;
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+              for (const line of lines) {
+                if (!line.trim()) continue;
+                const event = JSON.parse(line) as CrawlEvent;
+                if (event.type === "page") {
+                  pageCount++;
+                  updateJob(id, (j) => ({ pages: j.pages + 1 }));
+                } else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
+                else if (event.type === "done") {
+                  finished = true;
+                  updateJob(id, { status: "done", truncated: event.truncated, resume: event.state });
+                } else if (event.type === "continue" || event.type === "checkpoint") {
+                  if (event.type === "continue") next = event.state;
+                  latest = event.state;
+                  updateJob(id, { resume: event.state });
+                }
+                else if (event.type === "note") updateJob(id, { note: event.message });
+                else if (event.type === "media") {
+                  foundCount += event.items.length;
+                  setItems((list) => {
+                    const known = new Set(list.map((i) => i.id));
+                    const fresh = event.items.filter((i) => !known.has(i.id)).map((i) => ({ ...i, jobId: id }));
+                    return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
+                  });
+                }
               }
             }
+            // 「終わり」も「続き」も届かずに切れた＝途中で通信が切れた
+            if (!finished && !next) throw new Error("stream cut");
+          } catch (err) {
+            if (controller.signal.aborted) throw err;
+            if (retries >= 3) throw err;
+            retries++;
+            updateJob(id, { message: `通信が切れたので再接続しています（${retries}/3）` });
+            await new Promise((r) => setTimeout(r, 2000 * retries));
+            current = latest;
+            continue; // 最後の途中経過からやり直す（重複した画像は一覧に二重に入らない）
           }
-        } while (resume && !controller.signal.aborted);
+          if (retries) updateJob(id, { message: undefined });
+          retries = 0;
+          if (!next || controller.signal.aborted) break;
+          current = next;
+        }
         updateJob(id, (j) => (j.status === "running" ? { status: "done" } : {}));
       } catch (err) {
         if (controller.signal.aborted) updateJob(id, { status: "stopped" });
-        else updateJob(id, { status: "error", message: err instanceof Error ? err.message : String(err) });
+        else updateJob(id, { status: "error", message: describeError(err) });
       } finally {
         controllers.current.delete(id);
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, render, updateJob, recordHistory],
+    [depth, maxPages, maxPagination, crossSite, render, kinds, updateJob, recordHistory],
+  );
+
+  const resumeJob = useCallback(
+    (job: Job) => {
+      if (controllers.current.has(job.id)) return;
+      void startJob(job.url, job.settings, { job, found: items.filter((i) => i.jobId === job.id).length });
+    },
+    [startJob, items],
   );
 
   const onSubmit = (e: React.FormEvent) => {
@@ -291,6 +360,14 @@ export function ThumbsApp() {
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
+              取得する種類
+              <select value={kinds} onChange={(e) => setKinds(e.target.value as "all" | "video" | "image")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+                <option value="all">すべて</option>
+                <option value="video">動画のみ</option>
+                <option value="image">画像のみ</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5">
               下の階層
               <select value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
                 {[0, 1, 2, 3, 5, 10, 15, 20].map((n) => (
@@ -363,9 +440,10 @@ export function ThumbsApp() {
                 active={jobFilter === job.id}
                 onSelect={() => setJobFilter(jobFilter === job.id ? null : job.id)}
                 onStop={() => stopJob(job.id)}
+                onResume={() => resumeJob(job)}
                 saved={sites.some((s) => s.url === job.url)}
                 canSave={sites.length < MAX_SITES}
-                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render })}
+                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds })}
                 onRemove={() => removeJob(job.id)}
               />
             ))}
@@ -444,6 +522,7 @@ function EmptyState() {
 
 function JobRow({
   job,
+  onResume,
   found,
   saved,
   canSave,
@@ -454,6 +533,7 @@ function JobRow({
   onRemove,
 }: {
   job: Job;
+  onResume: () => void;
   found: number;
   saved: boolean;
   canSave: boolean;
@@ -501,6 +581,16 @@ function JobRow({
       >
         {saved ? "★" : "☆"}
       </button>
+      {(job.status === "stopped" || job.status === "error" || (job.status === "done" && job.truncated && job.resume)) && (
+        <button
+          type="button"
+          onClick={onResume}
+          className="shrink-0 rounded-full bg-fuchsia-500 px-2.5 py-1 font-semibold text-white"
+          title={job.resume ? "止まったところから再開" : "最初からやり直す"}
+        >
+          ▶ {job.resume ? "続きから" : "やり直す"}
+        </button>
+      )}
       {job.status === "running" ? (
         <button type="button" onClick={onStop} className="shrink-0 rounded-full bg-neutral-100 px-2.5 py-1 font-semibold dark:bg-neutral-800">
           停止

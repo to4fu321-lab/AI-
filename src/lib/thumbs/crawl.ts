@@ -1,6 +1,6 @@
 import "server-only";
 import { extractFromHtml, formatOf, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
-import { renderPage, type NetworkMedia } from "./render";
+import { RenderDeferred, renderPage, type NetworkMedia } from "./render";
 import { safeFetch } from "./safeFetch";
 import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
@@ -141,7 +141,7 @@ const videoCheckCache = new Map<string, Promise<boolean>>();
 function isRealVideo(url: string, signal: AbortSignal): Promise<boolean> {
   let check = videoCheckCache.get(url);
   if (!check) {
-    check = safeFetch(url, { headers: { range: "bytes=0-63" }, timeoutMs: 6000, signal })
+    check = safeFetch(url, { headers: { range: "bytes=0-63" }, timeoutMs: 4000, signal })
       .then(async ({ res, url: finalUrl }) => {
         if (res.status !== 200 && res.status !== 206) {
           await res.body?.cancel().catch(() => {});
@@ -169,11 +169,18 @@ function isRealVideo(url: string, signal: AbortSignal): Promise<boolean> {
  * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
  * 一度に確かめる数は 8 件まで。
  */
-async function verifyVideos(items: MediaItem[], signal: AbortSignal): Promise<MediaItem[]> {
+/** 1 ページで確かめる動画候補の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
+const MAX_VERIFY_PER_PAGE = 40;
+const VERIFY_BUDGET_MS = 15000;
+
+async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: number): Promise<MediaItem[]> {
   const ok = new Map<MediaItem, boolean>();
-  const pending = items.filter((m) => m.unverified);
-  for (let i = 0; i < pending.length; i += 8) {
-    const batch = pending.slice(i, i + 8);
+  const pending = items.filter((m) => m.unverified).slice(0, MAX_VERIFY_PER_PAGE);
+  const stopAt = Math.min(deadline, Date.now() + VERIFY_BUDGET_MS);
+  for (let i = 0; i < pending.length; i += 16) {
+    // 時間が足りなくなったら、残りは確認せずに外す（確かめられないものは出さない）
+    if (Date.now() > stopAt || signal.aborted) break;
+    const batch = pending.slice(i, i + 16);
     const results = await Promise.all(batch.map((m) => isRealVideo(m.src, signal)));
     batch.forEach((m, j) => ok.set(m, results[j]));
   }
@@ -181,6 +188,9 @@ async function verifyVideos(items: MediaItem[], signal: AbortSignal): Promise<Me
     .filter((m) => !m.unverified || ok.get(m))
     .map((m) => (m.unverified ? { ...m, unverified: undefined } : m));
 }
+
+/** 途中経過の記録を送る間隔 */
+const CHECKPOINT_MS = 8000;
 
 /** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
 export const MAX_QUEUE = 5000;
@@ -225,6 +235,11 @@ export async function* crawl(
     queue.push({ url, depth });
     return true;
   };
+
+  /** 時間切れで次の回に回すページ */
+  const deferred: QueueItem[] = [];
+  let renderStarts = 0;
+  let lastCheckpoint = Date.now();
 
   const visit = async (url: string, depth: number): Promise<CrawlEvent[]> => {
     const events: CrawlEvent[] = [];
@@ -271,9 +286,11 @@ export async function* crawl(
       const looksEmpty = extracted.media.length <= 2 || extracted.links.length < 3;
       const wantRender =
         options.render === "always" || (options.render === "auto" && extracted.clientRendered && looksEmpty);
-      if (wantRender && Date.now() < deadline) {
+      if (wantRender) {
         try {
-          const r = await renderPage(finalUrl, signal);
+          // 1 回の実行で最初のブラウザ表示は必ず行う（次の回へ回し続けて進まなくなるのを防ぐ）
+          const startBy = renderStarts++ === 0 ? Number.POSITIVE_INFINITY : deadline;
+          const r = await renderPage(finalUrl, signal, startBy);
           const again = extractFromHtml(r.html, r.finalUrl);
           extracted = {
             ...again,
@@ -285,6 +302,11 @@ export async function* crawl(
           rendered = true;
         } catch (err) {
           if (signal.aborted) return events;
+          if (err instanceof RenderDeferred) {
+            // 区切りまでに始められなかった。数えずに、続きの回で開き直す
+            deferred.push({ url, depth });
+            return events;
+          }
           renderError = err instanceof Error ? err.message : String(err);
         }
       }
@@ -299,7 +321,11 @@ export async function* crawl(
         seenMedia.add(m.id);
         candidates.push(m);
       }
-      const fresh = await verifyVideos(candidates, signal);
+      // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める
+      const wanted = candidates.filter((m) =>
+        options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true,
+      );
+      const fresh = await verifyVideos(wanted, signal, deadline);
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
       if (depth === 0) {
@@ -355,6 +381,25 @@ export async function* crawl(
         yield e;
       }
     }
+    // 数秒おきに途中経過を記録として送る（画面を閉じたり止めたりしても、ここから再開できる）
+    if (Date.now() - lastCheckpoint > CHECKPOINT_MS && queue.length) {
+      lastCheckpoint = Date.now();
+      yield { type: "checkpoint", state: { queue: [...queue], seen: [...seenPages], pages, paginationUsed } };
+    }
+    if (deferred.length) {
+      // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
+      pages -= deferred.length;
+      queue.unshift(...deferred.splice(0));
+      yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
+      return;
+    }
   }
-  yield { type: "done", pages, media: mediaCount, truncated: queue.length > 0 };
+  const truncated = queue.length > 0;
+  yield {
+    type: "done",
+    pages,
+    media: mediaCount,
+    truncated,
+    state: truncated ? { queue, seen: [...seenPages], pages, paginationUsed } : undefined,
+  };
 }

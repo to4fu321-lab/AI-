@@ -75,9 +75,16 @@ export interface Rendered {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function renderPage(url: string, signal: AbortSignal, timeoutMs = 25000): Promise<Rendered> {
+/** タブの空き待ちの間に区切りの時刻を過ぎたときに投げる（ページは次の回に回す） */
+export class RenderDeferred extends Error {}
+
+export async function renderPage(url: string, signal: AbortSignal, startBy: number, timeoutMs = 25000): Promise<Rendered> {
   await assertPublicUrl(url);
   await acquireTab();
+  if (Date.now() > startBy) {
+    releaseTab();
+    throw new RenderDeferred("時間が足りないため次の回に回します");
+  }
   const browser = await getBrowser().catch((err) => {
     releaseTab();
     throw err;
