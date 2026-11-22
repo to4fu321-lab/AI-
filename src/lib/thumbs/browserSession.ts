@@ -201,7 +201,7 @@ async function readInSession(session: Session, origin: string, url: string, sign
   if (page.isClosed() || signal.aborted) return null;
   session.at = Date.now();
   const began = Date.now();
-  const passed = (r: Read | null): r is Read => !!r && r.status >= 200 && r.status < 400 && !isChallengeHtml(r.html) && r.html.length > 200;
+  const passed = (r: Read | null): boolean => !!r && r.status >= 200 && r.status < 400 && !isChallengeHtml(r.html) && r.html.length > 200;
   const sameSite = (r: Read) => {
     try {
       return new URL(r.finalUrl).origin === origin;
@@ -210,7 +210,7 @@ async function readInSession(session: Session, origin: string, url: string, sign
     }
   };
   let out = await fetchFromPage(page, url);
-  if (passed(out)) {
+  if (out && passed(out)) {
     thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
     return sameSite(out) ? out : null;
   }
@@ -224,7 +224,7 @@ async function readInSession(session: Session, origin: string, url: string, sign
     await sleep(1500);
     polls++;
     out = await fetchFromPage(page, url).catch(() => null);
-    if (passed(out)) {
+    if (out && passed(out)) {
       session.at = Date.now();
       session.stuckUntil = undefined;
       thumbsLog(`session 待って通過 ${Date.now() - began}ms（${polls} 回目）html=${out.html.length} ${url.slice(0, 100)}`);
