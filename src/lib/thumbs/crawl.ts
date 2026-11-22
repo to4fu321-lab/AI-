@@ -157,6 +157,8 @@ const MAX_GUESS_RENDERS = 3;
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
+/** Linkex のサイト（入力したのがこれらのときだけ、Linkex の一覧を読む） */
+const LINKEX_SITE_RE = /(?:^|\.)(?:linkex-douga\.com|l2e\.click|linkex\.io)$/i;
 /**
  * 「同じ種類のページ」の見分け方：サイト＋最後の部分を除いたパス
  * （/posts/abc → /posts。一覧の /posts?type=… や /gated/?page=2 とは別の種類として扱う）
@@ -853,6 +855,8 @@ export async function* crawl(
      * 動画のファイルがわかっているとき（GIF のサムネイル・一覧のプレビュー動画）は、その動画も渡す
      */
     const gated = (message: string) => {
+      // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
+      if (isTwihubListApi(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
       gatedPages++;
@@ -905,6 +909,12 @@ export async function* crawl(
     // Linkex（共有リンク・まとめサイト linkex-douga）：Linkex は Web では動画を再生させない仕組みなので、
     // 動画ファイルは取らずに、サムネイル・長さ・名前を「Linkex で開く」に並べる
     const lx = wantsVideo ? linkexPlan(url) : null;
+    // 別のサイト（gofile-douga など）からのリンクで辿り着いた Linkex は読まない。
+    // 姉妹サイトへのリンクを辿って、入力したサイトと関係のない Linkex の動画が並んでしまうため
+    if (lx && !item.root && !home.sites.some((s) => LINKEX_SITE_RE.test(s))) {
+      events.push({ type: "skip", url, reason: "入力したサイトとは別のサービス（Linkex）なので読みません" });
+      return events;
+    }
     if (lx) {
       try {
         const list = lx.kind === "list" ? await linkexList(lx.api, signal) : { tokens: [lx.token], next: null };
@@ -1138,8 +1148,7 @@ export async function* crawl(
         for (const it of listJson.items) extracted.links.push({ url: it.url, thumb: it.thumb, duration: it.duration, prio: 4 });
         if (listJson.next) extracted.pagination.push(listJson.next);
       } else {
-        const next = twihubNextFromHtml(html, finalUrl);
-        if (next) extracted.pagination.push(next);
+        extracted.pagination.push(...twihubNextFromHtml(html, finalUrl));
       }
       const media: MediaItem[] = [...extracted.media];
       const links: LinkCandidate[] = [...extracted.links];

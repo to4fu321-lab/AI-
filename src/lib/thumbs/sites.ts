@@ -26,16 +26,23 @@ export function isTwihubListApi(url: string): boolean {
   }
 }
 
-/** twihub の一覧ページ（HTML）から、続きの窓口の URL を作る（なければ null） */
-export function twihubNextFromHtml(html: string, pageUrl: string): string | null {
-  if (!TWIHUB.test(originOf(pageUrl))) return null;
+/** twihub のランキングの種類（最新・24 時間・週間・月間）。どれも一覧ページは 20 件ずつ */
+const TWIHUB_TYPES = ["realtime", "1d", "7d", "30d"];
+
+/**
+ * twihub の一覧ページ（HTML）から、続きとして読むページを作る（twihub でなければ空）。
+ * - 続きの窓口（/api/v1/posts?cursor=…）。ただし、このアプリのサーバーからは「人間かどうかの確認」で断られることが多い
+ * - ほかの種類のランキングの一覧ページ（こちらは読める）。合わせて 80 件ほど並ぶ
+ */
+export function twihubNextFromHtml(html: string, pageUrl: string): string[] {
+  if (!TWIHUB.test(originOf(pageUrl))) return [];
   const u = new URL(pageUrl);
-  if (u.pathname !== "/posts" && u.pathname !== "/") return null;
-  const m = /hasMore:true,nextCursor:"([^"]{4,120})"/.exec(html);
-  // トップページは一覧を HTML に入れず、後から読み込む。最初から窓口に聞く
-  if (!m) return u.pathname === "/" ? `${u.origin}/api/v1/posts?type=realtime&limit=40` : null;
+  if (u.pathname !== "/posts" && u.pathname !== "/") return [];
   const type = u.searchParams.get("type") ?? "realtime";
-  return `${u.origin}/api/v1/posts?${new URLSearchParams({ type, limit: "40", cursor: m[1] })}`;
+  const out = TWIHUB_TYPES.filter((t) => t !== type || u.pathname === "/").map((t) => `${u.origin}/posts?type=${t}`);
+  const m = /hasMore:true,nextCursor:"([^"]{4,120})"/.exec(html);
+  if (m) out.push(`${u.origin}/api/v1/posts?${new URLSearchParams({ type, limit: "40", cursor: m[1] })}`);
+  return out;
 }
 
 export interface ListItem {
