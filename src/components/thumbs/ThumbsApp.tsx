@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, MediaItem } from "@/lib/thumbs/types";
 
@@ -204,8 +205,13 @@ export function ThumbsApp() {
       <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-950/90">
         <div className="mx-auto max-w-6xl px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
           <div className="mb-2 flex items-center justify-between">
-            <h1 className="text-lg font-black tracking-tight">
-              <span className="mr-1">🖼️</span>サムネ収集
+            <h1 className="flex items-center gap-2 text-lg font-black tracking-tight">
+              <Link href="/apps" aria-label="アプリ一覧へ" className="text-sm font-semibold text-neutral-400">
+                ‹ アプリ
+              </Link>
+              <span>
+                <span className="mr-1">🖼️</span>サムネ収集
+              </span>
             </h1>
             {items.length > 0 && (
               <button type="button" onClick={clearAll} className="text-xs font-semibold text-neutral-400 hover:text-red-500">

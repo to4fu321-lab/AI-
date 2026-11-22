@@ -35,6 +35,10 @@ The easiest way to deploy your Next.js app is to use the [Vercel Platform](https
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
 
+## アプリ一覧（`/apps`）
+
+このサイトで公開しているアプリのまとめページです。検索とタグで絞り込めます。新しいアプリを作ったら `src/data/apps.ts` に 1 件追加するだけで載ります（公開から 14 日間は「NEW」が付きます）。
+
 ## 動画修復アプリ（`/repair`）
 
 撮影の中断や転送の失敗で再生できなくなった MP4 / MOV を、ブラウザだけで修復するページです。iPhone の Safari から使えます（ホーム画面に追加可能）。
