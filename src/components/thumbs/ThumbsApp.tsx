@@ -53,6 +53,8 @@ const clock = (sec: number) => {
 };
 /** 一覧の見た目（サムネイルの大きさ・形）の保存場所 */
 const VIEW_KEY = "thumbs:view:v1";
+/** 「さらに深く探す」を自動で続ける回数の保存場所 */
+const ROUNDS_KEY = "thumbs:rounds:v1";
 /** サムネイルの大きさ（1 枚の最小の幅 px）。画面の幅に合わせて、入るだけ並べる */
 const TILE_SIZES = [56, 76, 100, 130, 170, 220, 300, 420, 640];
 const DEFAULT_TILE = 2;
@@ -155,6 +157,8 @@ export function ThumbsApp() {
   const [robots, setRobots] = useState(true);
   /** 「Gofile をネット全体から探す」のキーワード（空でもよい） */
   const [huntWord, setHuntWord] = useState("");
+  /** 検索から探すとき、ひととおり終わった後に「さらに深く探す」を自動で何回続けるか */
+  const [huntRounds, setHuntRounds] = useState(2);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -206,6 +210,8 @@ export function ThumbsApp() {
       const view = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
       if (typeof view?.tile === "number") setTile(Math.min(TILE_SIZES.length - 1, Math.max(0, Math.round(view.tile))));
       if (view?.shape === "wide" || view?.shape === "square") setShape(view.shape);
+      const rounds = Number(localStorage.getItem(ROUNDS_KEY));
+      if (localStorage.getItem(ROUNDS_KEY) !== null && rounds >= 0 && rounds <= 20) setHuntRounds(Math.round(rounds));
     } catch {
       /* ignore */
     }
@@ -512,8 +518,19 @@ export function ThumbsApp() {
   const runHunt = (urls: string[], settings: CrawlSettings) => {
     // 一度に全部は走らせない（サーバーと Gofile に負担がかかる）。3 つずつ、終わったら次を始める
     let next = 0;
+    const rounds = huntRounds;
     const worker = async () => {
-      while (next < urls.length) await startJob(urls[next++], settings);
+      while (next < urls.length) {
+        const u = urls[next++];
+        await startJob(u, settings);
+        // ひととおり終わったら、設定した回数だけ「さらに深く探す」を自動で続ける（止めた・失敗したときは続けない）
+        for (let round = 0; round < rounds; round++) {
+          await new Promise((r) => setTimeout(r, 500));
+          const job = latest.current.jobs.find((j) => j.url === u && j.settings?.hunt);
+          if (!job || job.status !== "done" || !job.truncated || !job.resume) break;
+          await startJob(u, job.settings, { job, found: latest.current.items.filter((i) => i.jobId === job.id).length });
+        }
+      }
     };
     for (let i = 0; i < 3; i++) void worker();
   };
@@ -687,7 +704,7 @@ export function ThumbsApp() {
             </button>
           </form>
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <input
               type="text"
               value={huntWord}
@@ -712,6 +729,28 @@ export function ThumbsApp() {
             >
               🔎 動画を探す
             </button>
+            <label className="flex items-center gap-1.5 text-xs text-neutral-500" title="ひととおり探し終わった後、さらに深く探すのを自動で何回続けるか（1 回ごとに、取っておいたリンクを 80 ページずつ読み進めます）">
+              深く探す回数
+              <select
+                value={huntRounds}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  setHuntRounds(n);
+                  try {
+                    localStorage.setItem(ROUNDS_KEY, String(n));
+                  } catch {
+                    /* 保存できなくても動く */
+                  }
+                }}
+                className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+              >
+                {[0, 1, 2, 3, 5, 10, 20].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "なし" : `${n}回`}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
@@ -1029,7 +1068,7 @@ function JobRow({
         ? job.message ?? "エラー"
         : job.status === "stopped"
           ? `停止（${job.pages}ページ）`
-          : `${job.pages}ページ${job.truncated ? "（上限で打ち切り）" : ""}`;
+          : `${job.pages}ページ${job.truncated ? (job.settings?.hunt ? "（さらに深く探せます）" : "（上限で打ち切り）") : ""}`;
   const trouble = [job.errors ? `読めず ${job.errors}` : "", job.skips ? `飛ばした ${job.skips}` : ""].filter(Boolean).join("・");
   return (
     <li
@@ -1170,7 +1209,11 @@ function GatedPages({ pages, newSince }: { pages: Gated[]; newSince: number }) {
  * 画面が短くて最初から見えているときは勝手に始めず、ボタンを押してもらう
  */
 function LoadMore({ jobs, running, onMore }: { jobs: Job[]; running: boolean; onMore: (job: Job) => void }) {
-  const more = jobs.filter((j) => j.status === "done" && j.truncated && j.resume);
+  // 一度に続けるのは 3 つまで（検索から探すと取得が十数個になる。読んだページの少ないものから順に）
+  const more = jobs
+    .filter((j) => j.status === "done" && j.truncated && j.resume)
+    .sort((a, b) => a.pages - b.pages)
+    .slice(0, 3);
   const end = useRef<HTMLDivElement>(null);
   const scrolled = useRef(false);
   const latest = useRef({ more, running, onMore });
@@ -1204,7 +1247,7 @@ function LoadMore({ jobs, running, onMore }: { jobs: Job[]; running: boolean; on
         <span className="animate-pulse text-xs font-semibold text-fuchsia-500">続きを読み込み中…</span>
       ) : (
         <button type="button" onClick={() => more.forEach(onMore)} className="rounded-full bg-neutral-900 px-5 py-2 text-xs font-bold text-white dark:bg-white dark:text-neutral-900">
-          もっと読み込む
+          {more.some((j) => j.settings?.hunt) ? "さらに深く探す" : "もっと読み込む"}
         </button>
       )}
     </div>

@@ -165,6 +165,9 @@ function isFileHostItem(m: MediaItem): boolean {
 }
 /** Gofile 探しで、1 つのサイトから辿るページ数の上限 */
 const HUNT_PAGES_PER_SITE = 12;
+/** 「さらに深く探す」で辿る階層の上限・1 回に足すページ数 */
+const HUNT_MAX_DEPTH = 6;
+const HUNT_DEEPER_STEP = 80;
 /** Gofile 探しで辿らないサイト（道具・解析・辞書・検索など。Gofile の動画を紹介する場所ではない） */
 const HUNT_SKIP_RE =
   /(?:^|\.)(?:github\.com|gitlab\.com|pypi\.org|npmjs\.com|stackoverflow\.com|virustotal\.com|pulsedive\.com|criminalip\.io|urlscan\.io|hybrid-analysis\.com|scribd\.com|wikipedia\.org|facebook\.com|google\.com|microsoft\.com|bing\.com|yahoo\.co\.jp|yahoo\.com|naver\.com|seznam\.cz|sogou\.com|qq\.com|tencent\.com|csdn\.net|alternativeto\.net|any\.run|docsbot\.ai|yarnpkg\.com|gopeed\.com|chromewebstore\.google\.com|apple\.com|trustpilot\.com|scamadviser\.com|similarweb\.com)$/i;
@@ -575,6 +578,8 @@ export async function* crawl(
    * - 動画がまだ 1 本もない間：優先度の高い順に何でも（WIDEN_BLIND_PAGES ページまで）
    * - 広げた先で動画が見つかり始めたら：サムネイル付き・動画らしいリンクだけを続ける
    */
+  /** 続きを頼まれて始まった回で、読むページがもうない（＝前の回でひととおり終わった）なら、さらに深く探してよい */
+  let deeperAllowed = !!resume && queue.length === 0;
   const widen = (): number => {
     if (!autoWiden || !reserve.length) return 0;
     if (videos === 0 ? widened >= WIDEN_BLIND_PAGES : widened === 0) return 0;
@@ -1492,7 +1497,7 @@ export async function* crawl(
             continue;
           }
           // （結果のサイトの中では、動画・Gofile らしいリンクだけ。アイコン付きの利用者ページ・通報・削除依頼などは辿らない）
-          if (item.root ? own : link.prio !== 2 && link.prio < 4) continue;
+          if (item.root && own) continue;
           if (/\/(?:abuse|delete|report|user|users|login|signup)(?:\/|$)/i.test(link.url)) continue;
           // 道具・解析・辞書などのサイトは、Gofile の動画を紹介する場所ではないので辿らない。1 つのサイトに深入りもしない
           let site = "";
@@ -1502,8 +1507,15 @@ export async function* crawl(
             continue;
           }
           if (HUNT_SKIP_RE.test(site)) continue;
+          // 今回は辿らないリンク（動画らしくないリンク・1 つのサイトの上限を超えた分・階層の上限より先）は取っておき、
+          // ひととおり終わった後の「さらに深く探す」で読む
           const used = huntPerSite.get(site) ?? 0;
-          if (used >= HUNT_PAGES_PER_SITE && !gofileId(link.url)) continue;
+          const plain = !item.root && link.prio !== 2 && link.prio < 4;
+          const over = used >= HUNT_PAGES_PER_SITE && !gofileId(link.url);
+          if (plain || over || depth >= options.depth) {
+            if (depth < HUNT_MAX_DEPTH) hold(link.url, depth + 1, link.prio, link.thumb, 0, finalUrl);
+            continue;
+          }
           if (!seenPages.has(normalizePageUrl(link.url))) huntPerSite.set(site, used + 1);
         }
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
@@ -1539,6 +1551,20 @@ export async function* crawl(
   while (!signal.aborted && pages < options.maxPages) {
     if (!queue.length) {
       // 読むページがなくなった。動画が見つかっていなければ、取っておいたリンクから範囲を広げる
+      // 検索から探しているとき：ひととおり終わった後に続きを頼まれたら、取っておいたリンクを足して、さらに深く探す
+      if (options.hunt) {
+        if (!deeperAllowed || !reserve.length) break;
+        deeperAllowed = false;
+        reserve.sort((a, b) => (b.prio ?? 0) - (a.prio ?? 0) || a.depth - b.depth);
+        let added = 0;
+        while (reserve.length && added < HUNT_DEEPER_STEP) {
+          const c = reserve.shift()!;
+          reservedByKey.delete(normalizePageUrl(c.url));
+          if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, 0, false, c.from)) added++;
+        }
+        if (!added) break;
+        continue;
+      }
       const first = widened === 0;
       if (!widen()) break;
       if (first) {
@@ -1691,7 +1717,8 @@ export async function* crawl(
       appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
-  const truncated = queue.length > 0;
+  // 検索から探しているときは、取っておいたリンクがある限り「続き（さらに深く）」がある
+  const truncated = queue.length > 0 || (!!options.hunt && reserve.length > 0 && !signal.aborted);
   yield {
     type: "done",
     pages,
