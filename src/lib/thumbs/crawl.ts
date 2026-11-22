@@ -6,6 +6,8 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
+import { tweetIdOf, tweetVideos } from "./twitter";
+import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { mediaMime, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
@@ -521,6 +523,49 @@ export async function* crawl(
    * 動画が見つからなければ、その中の iframe をもう 1 段だけ読む。
    * 見つけた動画の「元ページ」は外側のページ、Referer はそのプレーヤーのページにする。
    */
+  /** X の投稿の動画を問い合わせた投稿（同じ投稿を何度も聞かない） */
+  const seenTweets = new Set<string>();
+  const getJson = async (target: string, sig: AbortSignal): Promise<Record<string, unknown> | null> => {
+    const { res } = await safeFetch(target, { signal: sig, timeoutMs: 8000, headers: { accept: "application/json" } });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+    const data = JSON.parse(await readLimited(res, 2 * 1024 * 1024));
+    return data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  };
+  /**
+   * X の投稿の番号から動画を取り出す（1 ページあたり 80 件まで、同時に 8 件ずつ）。
+   * 元ページは X の投稿（「元ページ」で投稿を開ける）。一覧のカードのサムネイル・再生時間は、もらえなかったときの代わり
+   */
+  const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
+    const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
+    for (const t of todo) seenTweets.add(t.id);
+    const out: MediaItem[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length && Date.now() < deadline && !signal.aborted) {
+        const ref = todo[next++];
+        const videos = await tweetVideos(ref.id, signal, getJson).catch(() => []);
+        for (const v of videos) {
+          out.push({
+            id: v.src,
+            kind: "video",
+            src: v.src,
+            pageUrl: v.tweetUrl,
+            referer: "https://x.com/",
+            thumb: v.thumb ?? ref.thumb,
+            duration: v.duration ?? (videos.length === 1 ? ref.duration : undefined),
+            title: v.title,
+            format: "X",
+          });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, todo.length) }, worker));
+    return out;
+  };
+
   const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
     const media: MediaItem[] = [];
     let playerHint = false;
@@ -604,6 +649,25 @@ export async function* crawl(
       return events;
     }
     // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
+    // X の投稿そのものなら、ページを開かず投稿の動画を出す
+    const tweet = wantsVideo ? tweetIdOf(url) : null;
+    if (tweet) {
+      seenTweets.delete(tweet);
+      const items = (await tweetMedia([{ id: tweet, thumb: item.thumb, duration: item.duration }])).filter((m) => !seenMedia.has(m));
+      for (const m of items) seenMedia.add(m);
+      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(await settle(verified));
+      found += ok.length;
+      videos += ok.length;
+      events.push({ type: "page", url, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      else if (item.root) {
+        noted = true;
+        events.push({ type: "note", url, message: "この投稿から動画を取り出せませんでした（動画のない投稿・削除・非公開・鍵アカウントの可能性があります）" });
+      }
+      return events;
+    }
     const hosted = wantsVideo ? hostedFile(url) : null;
     if (hosted) {
       return emitDirect({
@@ -732,6 +796,8 @@ export async function* crawl(
       let ogImage = extracted.ogImage;
 
       // iframe の中の動画プレーヤー（動画を探すときだけ。ブラウザで開いたときは、ブラウザが開いた中身を後で使う）
+      // X の投稿へのリンク（保存・ランキング系のサイト）は、投稿の番号から動画を直接もらう
+      if (wantsVideo && extracted.tweets.length) media.push(...(await tweetMedia(extracted.tweets)));
       let frameHint = false;
       if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
@@ -775,6 +841,7 @@ export async function* crawl(
           links.push(...again.links);
           for (const p of again.pagination) pagination.add(p);
           ogImage ??= again.ogImage;
+          if (wantsVideo) media.push(...(await tweetMedia([...again.tweets, ...r.tweets.map((id) => ({ id }))])));
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
@@ -790,6 +857,7 @@ export async function* crawl(
         for (const f of r.frames) {
           if (AD_FRAME_RE.test(f.url) || isAdUrl(f.url)) continue;
           const fx = extractFromHtml(f.html, f.url);
+          if (wantsVideo && fx.tweets.length) media.push(...(await tweetMedia(fx.tweets)));
           const inFrame = fx.media
             .filter((m) => m.kind !== "image")
             .map((m) => ({ ...m, pageUrl: finalUrl, referer: m.referer ?? f.url }));
