@@ -256,6 +256,8 @@ export interface Extracted {
   tweets: TweetRef[];
   /** リンクなどで見つけた Gofile の共有フォルダの番号（gofile.io/d/番号）。ページは読まず、API で中身をもらう */
   gofile: string[];
+  /** 「動画を再生」など、X の投稿の番号が入った自サイトのリンク（行き先が動画ファイルなら、それを使う） */
+  playLinks: (TweetRef & { url: string })[];
 }
 
 export interface TweetRef {
@@ -536,6 +538,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const frames = new Set<string>();
   const tweets = new Map<string, TweetRef>();
   const gofile = new Set<string>();
+  const playLinks = new Map<string, TweetRef>();
   const addTweet = (id: string, thumb?: string, duration?: number) => {
     if (tweets.size >= 150 && !tweets.has(id)) return;
     const prev = tweets.get(id);
@@ -701,8 +704,14 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       (statusId && tweetIdInUrl(url) === statusId ? statusId : null) ??
       (VIDEO_URL_RE.test(url) || PLAY_TEXT_RE.test(linkInfo?.text ?? "") ? tweetIdInUrl(url) : null);
     if (viaSite) {
-      addTweet(viaSite, linkInfo?.thumb, linkInfo?.duration);
-      if (statusId) continue;
+      if (statusId) {
+        addTweet(viaSite, linkInfo?.thumb, linkInfo?.duration);
+        continue;
+      }
+      // 「動画を再生」のリンクは、たいてい動画ファイルへそのまま転送される（twihub の /r/v/番号 など）。
+      // X の窓口に聞くより確実で速いので、まずリンクの行き先を見る（駄目なら投稿の番号として X に聞く）
+      if (playLinks.size < 40) playLinks.set(url, { id: viaSite, thumb: linkInfo?.thumb, duration: linkInfo?.duration });
+      continue;
     }
     const added = addEmbed(url, t.attrs.title);
     if (added) {
@@ -945,6 +954,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     gate,
     tweets: [...tweets.values()],
     gofile: [...gofile],
+    playLinks: [...playLinks].map(([url, ref]) => ({ url, ...ref })),
   };
 }
 
