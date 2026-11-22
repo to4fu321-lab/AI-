@@ -1,6 +1,6 @@
 import { guardApi } from "@/lib/access/locks";
 import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
-import { crawl, MAX_PENDING, MAX_PRINTS, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
+import { crawl, type CrawlProgress, markStuck, MAX_PENDING, MAX_PRINTS, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "@/lib/thumbs/types";
 
@@ -67,22 +67,55 @@ export async function POST(request: Request) {
   const resume = parseResume(body.resume);
   // ブラウザ表示（最大 35 秒）と動画の確認（最大 15 秒）が区切りの直前に始まっても収まるよう、上限の 70 秒前で区切る
   // （THUMBS_CHUNK_MS はテストで区切りを短くするためのもの。本番では設定しない）
+  const startedAt = Date.now();
   const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 70) * 1000;
   const deadline = Date.now() + chunkMs;
   const encoder = new TextEncoder();
   const abort = new AbortController();
   request.signal.addEventListener("abort", () => abort.abort());
 
+  const progress: CrawlProgress = { inFlight: new Map() };
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (e: CrawlEvent) => controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
+      let closed = false;
+      const send = (e: CrawlEvent) => {
+        if (!closed) controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
+      };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
+      // 最後の守り：サーバーの実行時間の上限の少し前になっても終わらなければ（時間のかかるページに捕まった）、
+      // いま読んでいる組を始める前の途中経過を「続き」として返して閉じる。
+      // 読み終わらなかったページには印を付け、次の回は時間のかかる処理をせずに読む（2 回目は飛ばす）。
+      // こうしないと、サーバーに打ち切られて通信が切れ、同じところで何度も止まってしまう
+      const hardStop = setTimeout(
+        () => {
+          if (closed) return;
+          const now = Date.now();
+          const running = [...progress.inFlight];
+          const slow = running.filter(([, at]) => now - at > 20000).map(([u]) => u);
+          const base = progress.safe ?? resume;
+          if (base) send({ type: "continue", state: markStuck(base, slow.length ? slow : running.map(([u]) => u)) });
+          else send({ type: "error", url: raw, message: "時間切れ（このページを読むのに時間がかかりすぎます）" });
+          abort.abort();
+          close();
+        },
+        // THUMBS_HARD_MS はテストで短くするためのもの。本番では設定しない
+        Number(process.env.THUMBS_HARD_MS) || Math.max(10000, startedAt + (maxDuration - 12) * 1000 - Date.now()),
+      );
       try {
-        for await (const event of crawl(raw, options, abort.signal, deadline, resume)) send(event);
+        for await (const event of crawl(raw, options, abort.signal, deadline, resume, progress)) {
+          if (closed) break;
+          send(event);
+        }
       } catch (err) {
         send({ type: "error", url: raw, message: err instanceof Error ? err.message : String(err) });
         send({ type: "done", pages: 0, media: 0, truncated: false });
       } finally {
-        controller.close();
+        clearTimeout(hardStop);
+        close();
       }
     },
     cancel() {
@@ -196,6 +229,12 @@ function parseResume(value: unknown): CrawlState | undefined {
     home,
     cookies,
     pending: parsePending(v.pending),
+    stuck: Array.isArray(v.stuck)
+      ? v.stuck
+          .filter((x): x is [string, number] => Array.isArray(x) && isHttpUrl(x[0]) && typeof x[1] === "number")
+          .map(([u, n]) => [u, clamp(n, 0, 10, 1)] as [string, number])
+          .slice(-200)
+      : undefined,
     dropped: Array.isArray(v.dropped) ? [clamp(v.dropped[0], 0, 100000, 0), clamp(v.dropped[1], 0, 100000, 0)] : undefined,
     prints: Array.isArray(v.prints)
       ? v.prints.filter((x): x is string => typeof x === "string" && x.length <= 80).slice(-MAX_PRINTS)

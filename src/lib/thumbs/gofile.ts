@@ -327,7 +327,7 @@ async function viaBrowser(
 }
 
 /** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
-export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string): Promise<GofileResult> {
+export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string, allowBrowser = true): Promise<GofileResult> {
   const s = await getSession(signal, givenToken).catch(() => null);
   const files: GofileFile[] = [];
   let error: string | undefined;
@@ -350,7 +350,7 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
       if (api.json) found = parseContents(api.json, id, `gofile.io|accountToken=${s.token}`);
       else if (status !== "error-passwordRequired" && status !== "error-notFound") useBrowser = true;
     }
-    if (!found && useBrowser && browserOpens < 3) {
+    if (!found && useBrowser && allowBrowser && browserOpens < 3) {
       browserOpens++;
       const b = await viaBrowser(folder, id, signal, s?.token).catch((err) => ({
         files: [] as GofileFile[],

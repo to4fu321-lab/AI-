@@ -10,7 +10,7 @@ import { tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
-import { mediaMime, readHead } from "./sniff";
+import { isVagueType, mediaMime, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
@@ -324,13 +324,37 @@ function describeFailure(err: unknown): string {
   return cause?.code ? `接続できませんでした（${cause.code}）` : err.message;
 }
 
+/**
+ * 実行中の様子（呼ぶ側が見る）。サーバーの実行時間の上限が迫っても読み終わらないとき、
+ * 呼ぶ側はここにある「いま読んでいる組を始める前の途中経過」を続きとして画面に返す
+ */
+export interface CrawlProgress {
+  /** いま読んでいる組を始める前の途中経過 */
+  safe?: CrawlState;
+  /** いま読んでいるページ → 読み始めた時刻 */
+  inFlight: Map<string, number>;
+}
+
+/** 途中経過に、読み終わらなかったページを書き足す（呼ぶ側が、時間切れのときに使う） */
+export function markStuck(state: CrawlState, urls: string[]): CrawlState {
+  const stuck = new Map(state.stuck ?? []);
+  for (const u of urls) {
+    const key = normalizePageUrl(u);
+    stuck.set(key, (stuck.get(key) ?? 0) + 1);
+  }
+  return { ...state, stuck: [...stuck].slice(-200) };
+}
+
 export async function* crawl(
   startUrl: string,
   options: CrawlOptions,
   signal: AbortSignal,
   deadline: number,
   resume?: CrawlState,
+  progress?: CrawlProgress,
 ): AsyncGenerator<CrawlEvent> {
+  /** 時間切れまでに読み終わらなかったページ（1 回目は軽く読み直し、2 回目は飛ばす） */
+  const stuck = new Map<string, number>(resume?.stuck ?? []);
   const wantsVideo = options.kinds !== "image";
   /** 動画が見つからないときに、範囲を自動で広げるか（「辿らない」や「別のサイトも辿る」のときは不要） */
   const autoWiden = wantsVideo && !options.crossSite && options.depth > 0;
@@ -430,6 +454,7 @@ export async function* crawl(
     widened,
     home,
     cookies: jar.toJSON(),
+    stuck: stuck.size ? [...stuck] : undefined,
     pending: pending.slice(0, MAX_PENDING),
     prints: [...seenPrints].slice(-MAX_PRINTS),
     dropped: [goneVideos, refusedVideos],
@@ -561,22 +586,86 @@ export async function* crawl(
    * 動画が見つからなければ、その中の iframe をもう 1 段だけ読む。
    * 見つけた動画の「元ページ」は外側のページ、Referer はそのプレーヤーのページにする。
    */
+  /**
+   * 「動画を再生」のリンクの行き先を見る（1 ページ 40 件まで、同時に 8 件）。
+   * 動画ファイルへ転送されれば、それを 1 件にする。そうでなければ、投稿の番号で X の窓口に聞く
+   */
+  const playLinkMedia = async (refs: (TweetRef & { url: string })[], pageUrl: string): Promise<MediaItem[]> => {
+    const out: MediaItem[] = [];
+    const fallback: TweetRef[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < refs.length && Date.now() < deadline && !signal.aborted) {
+        const ref = refs[next++];
+        try {
+          const { res, url: target } = await safeFetch(ref.url, {
+            signal,
+            jar,
+            timeoutMs: 8000,
+            // 行き先の動画サーバー（X など）は、ほかのサイトを Referer に名乗ると断る。サイトのリンクも
+            // 「Referer を送らない」指定なので、名乗らずに開く
+            headers: { ...PAGE_HEADERS, range: "bytes=0-0" },
+          });
+          await res.body?.cancel().catch(() => {});
+          const type = res.headers.get("content-type");
+          if ((res.ok || res.status === 206) && (kindFromContentType(type) === "video" || (isVagueType(type) && kindFromUrl(target) === "video"))) {
+            seenTweets.add(ref.id);
+            out.push({
+              id: target,
+              kind: "video",
+              src: target,
+              pageUrl,
+              referer: /twimg\.com/.test(target) ? "https://x.com/" : undefined,
+              thumb: ref.thumb,
+              duration: ref.duration,
+              format: /twimg\.com/.test(target) ? "X" : formatOf(target, "video"),
+              unverified: true,
+            });
+            continue;
+          }
+        } catch {
+          /* 行き先を見られなければ、X に聞く */
+        }
+        fallback.push(ref);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, refs.length) }, worker));
+    if (fallback.length) out.push(...(await tweetMedia(fallback)));
+    return out;
+  };
   /** X の投稿の動画を問い合わせた投稿（同じ投稿を何度も聞かない） */
   const seenTweets = new Set<string>();
+  /**
+   * X の窓口の返事の数え。答えが 1 度も返らないまま失敗が続いたら（このアプリのサーバーが断られている）、
+   * この実行ではもう聞かない（1 件ごとに時間切れを待つと、それだけで実行時間を使い切るため）
+   */
+  let xOk = 0;
+  let xFail = 0;
+  const xBroken = () => xOk === 0 && xFail >= 8;
   const getJson = async (target: string, sig: AbortSignal): Promise<Record<string, unknown> | null> => {
-    const { res } = await safeFetch(target, { signal: sig, timeoutMs: 8000, headers: { accept: "application/json" } });
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      return null;
+    if (xBroken()) return null;
+    try {
+      const { res } = await safeFetch(target, { signal: sig, timeoutMs: 6000, headers: { accept: "application/json" } });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        // 404 は「その投稿がない」だけ。断られた・不調のときだけ数える
+        if (res.status !== 404) xFail++;
+        return null;
+      }
+      const data = JSON.parse(await readLimited(res, 2 * 1024 * 1024));
+      xOk++;
+      return data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+    } catch (err) {
+      xFail++;
+      throw err;
     }
-    const data = JSON.parse(await readLimited(res, 2 * 1024 * 1024));
-    return data && typeof data === "object" ? (data as Record<string, unknown>) : null;
   };
   /**
    * X の投稿の番号から動画を取り出す（1 ページあたり 80 件まで、同時に 8 件ずつ）。
    * 元ページは X の投稿（「元ページ」で投稿を開ける）。一覧のカードのサムネイル・再生時間は、もらえなかったときの代わり
    */
   const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
+    if (xBroken()) return [];
     const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
     for (const t of todo) seenTweets.add(t.id);
     const out: MediaItem[] = [];
@@ -607,7 +696,9 @@ export async function* crawl(
   /** 中身を聞いた Gofile のフォルダ */
   const seenGofile = new Set<string>();
   /** Gofile のフォルダの中身を、画像・動画の一覧にする（1 ページあたり 10 フォルダまで） */
-  const gofileMedia = async (ids: string[]): Promise<{ media: MediaItem[]; error?: string; detail?: string }> => {
+  /** Gofile をブラウザで開いても読めなかった（この実行では、もうブラウザでは開かない。時間がかかるだけなので） */
+  let gofileBrowserFailed = false;
+  const gofileMedia = async (ids: string[], allowBrowser = true): Promise<{ media: MediaItem[]; error?: string; detail?: string }> => {
     const todo = ids.filter((id) => !seenGofile.has(id)).slice(0, 10);
     const media: MediaItem[] = [];
     let error: string | undefined;
@@ -615,9 +706,12 @@ export async function* crawl(
     for (const id of todo) {
       if (Date.now() > deadline || signal.aborted) break;
       seenGofile.add(id);
-      const r: GofileResult = await gofileFiles(id, signal, options.gofileToken).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
+      // ブラウザで開くのは時間がかかる（1 回 20〜40 秒）ので、区切りの時刻まで余裕があるときだけ
+      const browserOk = allowBrowser && !gofileBrowserFailed && options.render !== "off" && Date.now() < deadline - 5000;
+      const r: GofileResult = await gofileFiles(id, signal, options.gofileToken, browserOk).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
       error ??= r.error;
       detail ??= r.detail;
+      if (r.error && browserOk && /ブラウザ/.test(r.detail ?? "")) gofileBrowserFailed = true;
       for (const f of r.files) {
         media.push({
           id: f.src,
@@ -711,6 +805,14 @@ export async function* crawl(
       events.push({ type: "skip", url, reason: "除外リストのサイトです" });
       return events;
     }
+    // 前の回で、時間切れまでに読み終わらなかったページ。2 回目は飛ばし、1 回目は時間のかかる処理をせずに読む
+    const stuckCount = stuck.get(normalizePageUrl(url)) ?? 0;
+    if (stuckCount >= 2) {
+      lastError = "読むのに時間がかかりすぎるページがあり、飛ばしました";
+      events.push({ type: "error", url, message: "読むのに時間がかかりすぎるため飛ばしました" });
+      return events;
+    }
+    const lite = stuckCount === 1;
     // 入力したページ自体は、人がブラウザで開くのと同じなので常に読む。リンクを辿る先は robots.txt を守る
     if (!item.root && !(await allowed(url))) {
       robotsSkipped++;
@@ -756,7 +858,10 @@ export async function* crawl(
     const tweetId = tweet ?? embedded;
     if (tweetId) {
       seenTweets.delete(tweetId);
-      const items = (await tweetMedia([{ id: tweetId, thumb: item.thumb, duration: item.duration }])).filter((m) => !seenMedia.has(m));
+      // X 以外のサイトのリンクは、まず行き先を見る（動画ファイルへ転送されることが多い）。駄目なら X に聞く
+      const ref = { id: tweetId, thumb: item.thumb, duration: item.duration };
+      const got = embedded ? await playLinkMedia([{ ...ref, url }], item.from ?? url) : await tweetMedia([ref]);
+      const items = got.filter((m) => !seenMedia.has(m));
       if (tweet || items.length) {
         for (const m of items) seenMedia.add(m);
         const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
@@ -869,7 +974,7 @@ export async function* crawl(
       if (blocked) {
         // 普通の読み込みを断られたので、本物のブラウザで開き直す（ブラウザなら通すサイトが多い）
         const known = browserOnly.has(pageOrigin) || browserPassed.has(pageOrigin);
-        if (options.render === "off" || (!item.root && !known && blockedTries >= MAX_BLOCKED_TRIES)) {
+        if (options.render === "off" || lite || (!item.root && !known && blockedTries >= MAX_BLOCKED_TRIES)) {
           return fail(`サイトが自動アクセスを断っています（${blocked}）`);
         }
         try {
@@ -903,8 +1008,10 @@ export async function* crawl(
       // iframe の中の動画プレーヤー（動画を探すときだけ。ブラウザで開いたときは、ブラウザが開いた中身を後で使う）
       // X の投稿へのリンク（保存・ランキング系のサイト）は、投稿の番号から動画を直接もらう
       if (wantsVideo && extracted.tweets.length) media.push(...(await tweetMedia(extracted.tweets)));
+      // 「動画を再生」のリンク（twihub の /r/v/番号 など）：行き先が動画ファイルならそれを使い、駄目なら投稿の番号で X に聞く
+      if (wantsVideo && extracted.playLinks.length) media.push(...(await playLinkMedia(extracted.playLinks, finalUrl)));
       // Gofile の共有フォルダへのリンクは、API で中身をもらう
-      if (extracted.gofile.length) media.push(...(await gofileMedia(extracted.gofile)).media);
+      if (extracted.gofile.length) media.push(...(await gofileMedia(extracted.gofile, !lite)).media);
       let frameHint = false;
       if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
@@ -930,6 +1037,7 @@ export async function* crawl(
         wantsVideo && !anyVideo && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
+        !lite &&
         (options.render === "always" ||
           (options.render === "auto" &&
             ((extracted.clientRendered && poor) ||
@@ -1166,13 +1274,23 @@ export async function* crawl(
       queuedByUrl.delete(q.url);
       yield { type: "skip", url: q.url, reason: "同じ形のページを何度読んでも見つからなかったので飛ばしました" };
     }
+    if (progress) progress.safe = snapshot();
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
     for (const b of batch) {
       queuedByUrl.delete(b.url);
       lastRank = Math.max(lastRank, b.rank ?? b.depth);
     }
     pages += batch.length;
-    const results = await Promise.all(batch.map((p) => visit(p)));
+    const results = await Promise.all(
+      batch.map(async (p) => {
+        progress?.inFlight.set(p.url, Date.now());
+        try {
+          return await visit(p);
+        } finally {
+          progress?.inFlight.delete(p.url);
+        }
+      }),
+    );
     for (const events of results) {
       for (const e of events) {
         if (e.type === "media") mediaCount += e.items.length;
@@ -1227,6 +1345,7 @@ export async function* crawl(
   // 取れなかったときは、わかる範囲で理由を伝える
   if (!signal.aborted) {
     const noVideos = wantsVideo && videos === 0;
+    const xNote = xBroken() ? "X の窓口がこのアプリのサーバーに答えなかったため、X の投稿の動画を取れませんでした" : null;
     const droppedNote =
       refusedVideos + goneVideos > 0
         ? `動画を ${refusedVideos + goneVideos} 本見つけましたが、見られなかったので出していません（` +
@@ -1252,7 +1371,8 @@ export async function* crawl(
             : refusedVideos > 0
               ? droppedNote
               : null;
-    if (message) yield { type: "note", url: startUrl, message };
+    const finalNote = message ?? (noVideos ? xNote : null);
+    if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;
   yield {
