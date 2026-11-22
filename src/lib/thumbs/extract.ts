@@ -455,6 +455,9 @@ export function isJunkLink(url: string, text?: string): boolean {
   }
 }
 
+/** 文中のファイル置き場の共有リンク（pixeldrain・Google ドライブ・Dropbox・catbox） */
+export const FILE_SHARE_RE = /https?:\/\/(?:www\.)?(?:pixeldrain\.com\/[ul]\/\w{6,20}|drive\.google\.com\/file\/d\/[\w-]{20,}|drive\.google\.com\/drive\/folders\/[\w-]{20,}|dropbox\.com\/(?:s|scl\/fi)\/[^\s\"'<>\\]{6,200}|files\.catbox\.moe\/\w+\.\w{2,4})/gi;
+
 /** 動画を再生するボタン・リンクらしい文字 */
 const PLAY_TEXT_RE = /動画を再生|再生する|^\s*再生\s*$|動画を見る|play video|watch video|^\s*play\s*$/i;
 
@@ -956,6 +959,14 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   // スクリプト・data 属性の中の投稿の番号（JavaScript で一覧を描くサイト・埋め込み投稿）
   for (const id of findTweetIds(html, 150)) addTweet(id);
   for (const m of html.replace(/\\\//g, "/").matchAll(/gofile\.io(?:\/|%2F)d(?:\/|%2F)([\w-]{4,40})/gi)) if (gofile.size < 300) gofile.add(m[1]);
+  // 文中に書かれたファイル置き場の共有リンク（pixeldrain・Google ドライブ・Dropbox・catbox）。リンクになっていなくても拾う
+  let shares = 0;
+  for (const m of html.replace(/\\\//g, "/").matchAll(FILE_SHARE_RE)) {
+    if (shares++ >= 100) break;
+    const url = decodeEntities(m[0]);
+    if (/pixeldrain\.com\/l\/|\/drive\/folders\//i.test(url)) addLink(url, 5);
+    else addEmbed(url);
+  }
   // X の動画のサムネイルは画像としては出さない（動画の表紙なので）。GIF アニメは表紙の名前から動画がわかる
   for (const m of [...found.values()]) {
     if (m.kind !== "image" || !isTwitterVideoThumb(m.src)) continue;

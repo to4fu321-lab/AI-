@@ -468,6 +468,14 @@ export function ThumbsApp() {
       `https://search.naver.com/search.naver?query=${q(`"gofile.io/d/" ${kw}`)}`,
       `https://search.seznam.cz/?q=${q(`"gofile.io/d/" ${kw}`)}`,
       `https://www.sogou.com/web?query=${q(`"gofile.io/d/" ${kw}`)}`,
+      // Gofile 以外のファイル置き場（pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンク
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`pixeldrain.com ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"pixeldrain.com/u/" ${kw}`)}`,
+      `https://www.bing.com/search?q=${q(`"pixeldrain.com/l/" ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`drive.google.com 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"drive.google.com/file/d/" 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`dropbox.com 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"files.catbox.moe" mp4 ${kw}`)}`,
     ];
     const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true, gofileOnly: true };
     setFormError(null);
@@ -691,10 +699,10 @@ export function ThumbsApp() {
             <button
               type="button"
               onClick={startHunt}
-              title="X の投稿・掲示板・まとめサイトを検索して、Gofile のリンクの中身を集めます（数分かかります）"
+              title="X の投稿・掲示板・まとめサイトを検索して、動画の置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンクの中身を集めます（時間がかかります）"
               className="shrink-0 rounded-full bg-sky-500 px-4 py-2 text-xs font-bold text-white shadow-sm active:scale-95"
             >
-              🔎 Gofile を探す
+              🔎 ファイル置き場を探す
             </button>
             <button
               type="button"

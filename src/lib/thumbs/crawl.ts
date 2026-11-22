@@ -7,7 +7,8 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { gifVideoFromThumb, tweetGofileIds, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
+import { gifVideoFromThumb, tweetGofileIds, tweetIdInUrl, tweetIdOf, tweetShareUrls, tweetVideos } from "./twitter";
+import { pixeldrainList, pixeldrainListId } from "./pixeldrain";
 import { isTwihubList, isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
@@ -158,6 +159,10 @@ const MAX_GUESS_RENDERS = 3;
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
+/** ファイル置き場（Gofile・pixeldrain・Google ドライブなど）に置かれたものか（「ファイル置き場を探す」で集めるもの） */
+function isFileHostItem(m: MediaItem): boolean {
+  return /^(?:Gofile|pixeldrain|Google ドライブ|Dropbox|OneDrive|Box)$/.test(m.format ?? "") || /^https:\/\/files\.catbox\.moe\//.test(m.src);
+}
 /** Gofile 探しで、1 つのサイトから辿るページ数の上限 */
 const HUNT_PAGES_PER_SITE = 12;
 /** Gofile 探しで辿らないサイト（道具・解析・辞書・検索など。Gofile の動画を紹介する場所ではない） */
@@ -751,6 +756,7 @@ export async function* crawl(
         const videos = await tweetVideos(ref.id, signal, getJson).catch(() => []);
         // 投稿の文に Gofile のリンクがあれば、そのフォルダも読む（Gofile を紹介している投稿）
         queueGofile(tweetGofileIds(ref.id), `https://x.com/i/status/${ref.id}`);
+        for (const share of tweetShareUrls(ref.id)) enqueue(share, 0, lastRank + 1, 5, undefined, 0, false, `https://x.com/i/status/${ref.id}`);
         for (const v of videos) {
           out.push({
             id: v.src,
@@ -1051,6 +1057,25 @@ export async function* crawl(
         }
         return events;
       }
+    }
+    // pixeldrain のリスト（アルバム）：公開の窓口から中のファイルをもらう
+    const pd = pixeldrainListId(url);
+    if (pd) {
+      const files = await pixeldrainList(pd, signal).catch(() => []);
+      const items = files
+        .map((f): MediaItem => ({ id: f.src, kind: f.kind, src: f.src, pageUrl: url, thumb: f.kind === "video" ? f.thumb : undefined, title: f.name || undefined, format: "pixeldrain" }))
+        .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true))
+        .filter((m) => !seenMedia.has(m));
+      for (const m of items) seenMedia.add(m);
+      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 15000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(await settle(verified));
+      found += ok.length;
+      videos += ok.filter((m) => m.kind !== "image").length;
+      events.push({ type: "page", url, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      else if (item.root && !verified.rest.length) events.push({ type: "note", url, message: "この pixeldrain のリストに画像・動画はありませんでした（削除された可能性があります）" });
+      return events;
     }
     const hosted = wantsVideo ? hostedFile(url) : null;
     if (hosted) {
@@ -1363,7 +1388,7 @@ export async function* crawl(
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
         // Gofile 探しでは、Gofile の中身だけを集める
-        .filter((m) => !options.gofileOnly || m.format === "Gofile")
+        .filter((m) => !options.gofileOnly || isFileHostItem(m))
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
@@ -1467,7 +1492,7 @@ export async function* crawl(
             continue;
           }
           // （結果のサイトの中では、動画・Gofile らしいリンクだけ。アイコン付きの利用者ページ・通報・削除依頼などは辿らない）
-          if (item.root ? own : link.prio !== 2 && link.prio !== 4) continue;
+          if (item.root ? own : link.prio !== 2 && link.prio < 4) continue;
           if (/\/(?:abuse|delete|report|user|users|login|signup)(?:\/|$)/i.test(link.url)) continue;
           // 道具・解析・辞書などのサイトは、Gofile の動画を紹介する場所ではないので辿らない。1 つのサイトに深入りもしない
           let site = "";
