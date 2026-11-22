@@ -68,6 +68,18 @@ export async function GET(request: Request) {
       for (let k = 0; k < 4; k++) say(`fetch-from-post-tab#${i} ${await inPage(o.p, posts[i++])}`);
       await o.p.close().catch(() => {});
     }
+    if (plan === "F") {
+      // 確認ページの種類を調べる（自動で済む種類か、人がチェックを入れる種類か）
+      const html = await first.p
+        .evaluate(async (u: string) => {
+          const r = await fetch(u, { credentials: "include" });
+          return await r.text();
+        }, posts[0])
+        .catch((e) => `EVALERR ${String(e)}`);
+      const ctype = /cType:\s*['"]([\w-]+)['"]/.exec(html)?.[1];
+      say(`challenge cType=${ctype} len=${html.length} turnstile=${/turnstile/i.test(html)} title=${/<title>([^<]*)/.exec(html)?.[1]}`);
+      say(html.replace(/\s+/g, " ").slice(0, 700));
+    }
     if (plan === "E") {
       // 投稿ページを新しいタブで開いて、何もせずに待つ。題名が変わる（確認が済む）までの時間を測る
       const o = await open(posts[i++]);
