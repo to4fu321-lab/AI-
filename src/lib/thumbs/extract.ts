@@ -140,7 +140,7 @@ function vimeoId(url: string): string | null {
   }
 }
 
-function formatOf(url: string, kind: MediaItem["kind"]): string | undefined {
+export function formatOf(url: string, kind: MediaItem["kind"]): string | undefined {
   const ext = extensionOf(url);
   if (kind === "image" ? IMAGE_EXT.includes(ext) : VIDEO_EXT.includes(ext)) {
     return ext === "jpeg" ? "JPG" : ext.toUpperCase();

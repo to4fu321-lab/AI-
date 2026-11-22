@@ -38,6 +38,11 @@ export interface CrawlOptions {
   maxPagination: number;
   /** true なら入力したサイト以外へのリンクも辿る */
   crossSite: boolean;
+  /**
+   * ブラウザ（Chromium）で開いて JavaScript の描画後に集めるか。
+   * auto: JavaScript で描くページで画像がほとんど取れないときだけ / always: 毎回 / off: 使わない
+   */
+  render: "auto" | "always" | "off";
 }
 
 export interface QueueItem {

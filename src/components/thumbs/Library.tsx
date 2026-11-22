@@ -6,6 +6,8 @@ export interface CrawlSettings {
   maxPages: number;
   maxPagination: number;
   crossSite: boolean;
+  /** 古い保存データにはないので省略可（なければ auto） */
+  render?: "auto" | "always" | "off";
 }
 
 export interface HistoryEntry {
@@ -29,6 +31,8 @@ export function describeSettings(s: CrawlSettings): string {
   const parts = [s.depth === 0 ? "このページのみ" : `${s.depth}階層`];
   if (s.maxPagination > 0) parts.push(`ページ送り${s.maxPagination}`);
   if (s.crossSite) parts.push("他サイトも");
+  if (s.render === "always") parts.push("ブラウザ");
+  if (s.render === "off") parts.push("ブラウザなし");
   return parts.join("・");
 }
 
