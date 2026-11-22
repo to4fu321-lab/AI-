@@ -275,8 +275,8 @@ function thumbInside(inner: string, base: string): string | undefined {
 }
 
 /** <a> ごとに、中のサムネイルと「動画らしさ」を調べる */
-function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean }> {
-  const out = new Map<string, { thumb?: string; videoish: boolean }>();
+function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean; text: string }> {
+  const out = new Map<string, { thumb?: string; videoish: boolean; text: string }>();
   for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
     const attrs = parseAttrs(m[1]);
     const url = resolveUrl(attrs.href, base);
@@ -289,10 +289,14 @@ function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: str
       VIDEO_URL_RE.test(url) ||
       (!!thumb && VIDEO_CLASS_RE.test(`${attrs.class ?? ""} ${inner.slice(0, 2000)}`));
     const prev = out.get(url);
-    out.set(url, { thumb: prev?.thumb ?? thumb, videoish: (prev?.videoish ?? false) || videoish });
+    out.set(url, { thumb: prev?.thumb ?? thumb, videoish: (prev?.videoish ?? false) || videoish, text: `${prev?.text ?? ""} ${text}`.slice(0, 200) });
   }
   return out;
 }
+
+/** ダウンロード用のリンクらしい文字・URL */
+const DOWNLOAD_TEXT_RE = /ダウンロード|download|動画を保存|保存する|\bDL\b/i;
+const DOWNLOAD_URL_RE = /(?:^|[/_.\-?&=])(?:download|dl|get_?file|getfile|getvideo|get_video|attachment|dlfile)(?:$|[/_.\-?&=])/i;
 
 /** URL がページ番号付きに見えるか（?page=2、/page/3、-p4 など） */
 const PAGE_URL_RE =
@@ -528,7 +532,13 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       const info = anchors.get(url);
       const thumb = info?.thumb;
       const videoish = info?.videoish || VIDEO_URL_RE.test(url);
-      addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb);
+      // ダウンロード用のリンク（download.php?id=… など拡張子のないもの）は、中身が動画かもしれない。
+      // 辿る先として高い優先度で読む（読んだときに中身を見て、動画ならそれ自体を 1 件にする）
+      const download =
+        "download" in t.attrs ||
+        DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
+        DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
+      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb);
     }
   }
 

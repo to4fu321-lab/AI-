@@ -1,8 +1,8 @@
 import { guardApi } from "@/lib/access/locks";
 import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
-import { crawl, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
+import { crawl, MAX_PENDING, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
-import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, QueueItem } from "@/lib/thumbs/types";
+import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "@/lib/thumbs/types";
 
 export const runtime = "nodejs";
 /** Vercel の関数の最大実行時間（秒）。クロールはこの手前で打ち切る */
@@ -113,6 +113,33 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     const zone = clamp(v.zone, 0, 2, 0);
     if (zone) item.zone = zone;
     if (v.root === true) item.root = true;
+    if (isHttpUrl(v.from)) item.from = v.from;
+    out.push(item);
+  }
+  return out;
+}
+
+const shortText = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : undefined);
+
+/** 画面から送り返された「確認待ちの画像・動画」を検査する */
+function parsePending(value: unknown): MediaItem[] {
+  if (!Array.isArray(value)) return [];
+  const out: MediaItem[] = [];
+  for (const raw of value.slice(0, MAX_PENDING)) {
+    if (!raw || typeof raw !== "object") continue;
+    const v = raw as Record<string, unknown>;
+    if (v.kind !== "image" && v.kind !== "video" && v.kind !== "embed") continue;
+    if (!isHttpUrl(v.src) || !isHttpUrl(v.pageUrl)) continue;
+    const item: MediaItem = { id: shortText(v.id, 4000) ?? v.src, kind: v.kind, src: v.src, pageUrl: v.pageUrl };
+    if (isHttpUrl(v.thumb)) item.thumb = v.thumb;
+    if (isHttpUrl(v.referer)) item.referer = v.referer;
+    item.format = shortText(v.format, 20);
+    item.title = shortText(v.title, 300);
+    if (typeof v.width === "number" && v.width > 0 && v.width < 100000) item.width = Math.round(v.width);
+    if (typeof v.height === "number" && v.height > 0 && v.height < 100000) item.height = Math.round(v.height);
+    if (v.unverified === true) item.unverified = true;
+    if (v.guess === true) item.guess = true;
+    item.tries = clamp(v.tries, 0, 10, 0);
     out.push(item);
   }
   return out;
@@ -149,5 +176,6 @@ function parseResume(value: unknown): CrawlState | undefined {
     widened: clamp(v.widened, 0, 1000, 0),
     home,
     cookies,
+    pending: parsePending(v.pending),
   };
 }

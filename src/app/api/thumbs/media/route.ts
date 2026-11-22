@@ -1,8 +1,8 @@
 import { guardApi } from "@/lib/access/locks";
-import { extensionOf, kindFromContentType, kindFromUrl } from "@/lib/thumbs/extract";
-import { checkEmbed, checkVideo } from "@/lib/thumbs/probe";
+import { extensionOf, kindFromContentType } from "@/lib/thumbs/extract";
+import { checkMedia } from "@/lib/thumbs/probe";
 import { FetchBlockedError, safeFetch } from "@/lib/thumbs/safeFetch";
-import { looksLikeImage, looksLikePlaylist, looksLikeVideo, readHead } from "@/lib/thumbs/sniff";
+import { isVagueType, looksLikePlaylist, mediaMime, readHead } from "@/lib/thumbs/sniff";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -37,7 +37,14 @@ export async function GET(request: Request) {
 
   // check=1：中継せず、リンクが生きているかだけ答える（画面が、保存済みの一覧のリンク切れを外すために使う）
   if (params.get("check") === "1") {
-    const alive = params.get("kind") === "embed" ? await checkEmbed(target, request.signal) : await checkVideo(target, referer, request.signal);
+    const k = params.get("kind");
+    const kind = k === "embed" || k === "image" ? k : "video";
+    let alive: string;
+    try {
+      alive = await checkMedia({ kind, src: target, referer, pageUrl: referer ?? target }, request.signal);
+    } catch {
+      alive = "unknown";
+    }
     return Response.json({ alive }, { headers: { "cache-control": "no-store" } });
   }
 
@@ -78,8 +85,19 @@ export async function GET(request: Request) {
     return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer), { status: 200, headers: out });
   }
 
-  let kind = kindFromContentType(type) ?? (type?.includes("octet-stream") || !type ? kindFromUrl(finalUrl) : null);
-  if (!kind && part) {
+  // サーバーが中身をはっきり名乗っていれば、それを使う。
+  // 「ダウンロード用」（force-download・octet-stream など）や名乗りがないときは、ファイルの先頭の中身で決める
+  let kind = isVagueType(type) ? null : kindFromContentType(type);
+  if (!kind && !part) {
+    const sniffed = await sniffMime(target, referer, request.signal);
+    if (sniffed) {
+      kind = sniffed.startsWith("image/") ? "image" : "video";
+      out.set("content-type", sniffed);
+    }
+  }
+  if (kind && out.has("content-type")) {
+    // 先頭の中身から種類を決めた
+  } else if (!kind && part) {
     // 目次から呼ばれた断片・暗号の鍵。HTML でなければ、種類を「ただのデータ」にして通す
     if (/html/i.test(type ?? "")) {
       await upstream.body?.cancel();
@@ -98,13 +116,8 @@ export async function GET(request: Request) {
     kind = "video";
     out.set("content-type", "application/octet-stream");
   } else if (!kind) {
-    // 名乗っている種類が画像・動画ではない。先頭の中身を見て、本当は動画・画像なら通す
-    kind = await sniffKind(target, referer, request.signal);
-    if (!kind) {
-      await upstream.body?.cancel();
-      return new Response("画像・動画ではないため中継できません", { status: 415 });
-    }
-    out.set("content-type", properType(null, finalUrl, kind));
+    await upstream.body?.cancel();
+    return new Response("画像・動画ではないため中継できません", { status: 415 });
   } else {
     // 「中身の種類」を正しく名乗る。iPhone の Safari は video/mp4 などでないと再生しない
     // （元のサーバーが application/octet-stream などで返すことがある）
@@ -126,7 +139,11 @@ export async function GET(request: Request) {
   } else if (wanted && upstream.status === 200) {
     // 元のサーバーが部分取得（Range）に対応していないとき、こちらで切り出して 206 で返す。
     // Safari は Range に 206 で答えないと動画を再生しない
-    const total = encoded ? NaN : Number(upstream.headers.get("content-length"));
+    let total = encoded ? NaN : Number(upstream.headers.get("content-length"));
+    if (!(total > 0) && !download && kind === "video") {
+      // 全体の大きさを名乗らないサーバー。Safari は大きさがわからないと再生しないので、一度最後まで読んで数える（覚えておく）
+      total = (await measureLength(target, referer, request.signal)) ?? NaN;
+    }
     if (Number.isFinite(total) && total > 0 && body) {
       const start = wanted.suffix !== undefined ? Math.max(0, total - wanted.suffix) : wanted.start;
       const end = Math.min(wanted.end ?? total - 1, total - 1);
@@ -158,9 +175,14 @@ export async function GET(request: Request) {
   return new Response(body, { status, headers: out });
 }
 
+/** 読み込みに成功したか（部分取得の 206 も成功） */
+const okStatus = (s: number) => (s >= 200 && s < 300) || s === 206;
+
 /**
- * 元のサイトから取ってくる。
- * 断られたら（401・403）、Referer を変えてやり直す：見つけたページ → 動画のあるサイト自身 → Referer なし
+ * 元のサイトから取ってくる。うまくいかなければ、やり方を変えて試し直す：
+ * - Referer：見つけたページ → 動画のあるサイト自身 → 名乗らない
+ * - 部分取得（Range）：ダウンロード用の仕組み（download.php など）には、部分取得を頼むとエラーを返すものがある。
+ *   その場合は部分取得を頼まずに読み直す（必要な部分は呼ぶ側で切り出す）
  */
 async function fetchUpstream(target: string, referer: string | undefined, range: string | null, signal: AbortSignal) {
   let own: string | undefined;
@@ -169,39 +191,77 @@ async function fetchUpstream(target: string, referer: string | undefined, range:
   } catch {
     /* URL の形式エラーは safeFetch が知らせる */
   }
-  const attempts = [...new Set([referer, own, undefined])];
+  const referers = [...new Set([referer, own, undefined])];
+  const ranges = range ? [range, null] : [null];
   let last: { res: Response; url: string } | undefined;
-  for (const refererToTry of attempts) {
-    await last?.res.body?.cancel().catch(() => {});
-    const headers: Record<string, string> = { accept: "image/*,video/*,*/*;q=0.5" };
-    if (range) headers.range = range;
-    if (refererToTry) headers.referer = refererToTry;
-    // 時間切れは「返事が届くまで」だけ。中身は時間をかけて流してよい（大きな動画が途中で切れないように）
-    last = await safeFetch(target, { headers, timeoutMs: 30000, signal, streamBody: true });
-    if (last.res.status !== 401 && last.res.status !== 403) break;
+  for (const refererToTry of referers) {
+    for (const rangeToTry of ranges) {
+      await last?.res.body?.cancel().catch(() => {});
+      const headers: Record<string, string> = { accept: "image/*,video/*,*/*;q=0.5" };
+      if (rangeToTry) headers.range = rangeToTry;
+      if (refererToTry) headers.referer = refererToTry;
+      // 時間切れは「返事が届くまで」だけ。中身は時間をかけて流してよい（大きな動画が途中で切れないように）
+      last = await safeFetch(target, { headers, timeoutMs: 30000, signal, streamBody: true });
+      if (okStatus(last.res.status)) return last;
+      // ファイルがない（404・410）なら、やり方を変えても同じ
+      if (last.res.status === 404 || last.res.status === 410) return last;
+    }
   }
   return last!;
 }
 
-/** 先頭の中身から確かめた種類（同じサーバーが動いている間は覚えておく） */
-const sniffCache = new Map<string, "image" | "video" | null>();
+/** 全体の大きさを名乗らない動画の、数えた大きさ（同じサーバーが動いている間は覚えておく） */
+const lengthCache = new Map<string, Promise<number | null>>();
+/** 数えるのは 1 GB まで・2 分まで */
+const MAX_MEASURE_BYTES = 1024 * 1024 * 1024;
 
-async function sniffKind(target: string, referer: string | undefined, signal: AbortSignal): Promise<"image" | "video" | null> {
+function measureLength(target: string, referer: string | undefined, signal: AbortSignal): Promise<number | null> {
+  let job = lengthCache.get(target);
+  if (!job) {
+    job = (async () => {
+      try {
+        const limit = AbortSignal.any([signal, AbortSignal.timeout(120000)]);
+        const { res } = await fetchUpstream(target, referer, null, limit);
+        if (!okStatus(res.status) || !res.body) return null;
+        const reader = res.body.getReader();
+        let size = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return size;
+          size += value.byteLength;
+          if (size > MAX_MEASURE_BYTES) {
+            await reader.cancel().catch(() => {});
+            return null;
+          }
+        }
+      } catch {
+        return null;
+      }
+    })();
+    lengthCache.set(target, job);
+    void job.then((n) => n === null && lengthCache.delete(target));
+    if (lengthCache.size > 500) lengthCache.delete(lengthCache.keys().next().value!);
+  }
+  return job;
+}
+
+/** 先頭の中身から決めた種類（同じサーバーが動いている間は覚えておく） */
+const sniffCache = new Map<string, string | null>();
+
+async function sniffMime(target: string, referer: string | undefined, signal: AbortSignal): Promise<string | null> {
   const known = sniffCache.get(target);
   if (known !== undefined) return known;
-  let kind: "image" | "video" | null = null;
+  let mime: string | null = null;
   try {
     const { res } = await fetchUpstream(target, referer, "bytes=0-511", signal);
-    if (res.ok || res.status === 206) {
-      const head = await readHead(res, 512);
-      kind = looksLikeVideo(head) ? "video" : looksLikeImage(head) ? "image" : null;
-    } else await res.body?.cancel().catch(() => {});
+    if (okStatus(res.status)) mime = mediaMime(await readHead(res, 512));
+    else await res.body?.cancel().catch(() => {});
   } catch {
     return null;
   }
-  sniffCache.set(target, kind);
+  sniffCache.set(target, mime);
   if (sniffCache.size > 2000) sniffCache.delete(sniffCache.keys().next().value!);
-  return kind;
+  return mime;
 }
 
 /**
