@@ -62,6 +62,8 @@ interface Session {
   wt: string;
   /** うまくいった方式（次からはそれを先に試す） */
   mode?: "hash" | "static";
+  /** 設定された合言葉（ゲスト登録したものではない） */
+  given?: boolean;
 }
 
 let session: Promise<Session | null> | null = null;
@@ -127,8 +129,11 @@ async function readScripts(signal: AbortSignal): Promise<{ secret: string; wt: s
   return { secret, wt };
 }
 
-/** アカウント作成の POST は、接続先を確かめたうえで直接送る（safeFetch は GET だけ） */
-async function createGuest(signal: AbortSignal): Promise<string | null> {
+/**
+ * アカウント作成の POST は、接続先を確かめたうえで直接送る（safeFetch は GET だけ）。
+ * 作れなかったときは、その理由（Gofile の返事）も返す
+ */
+async function createGuest(signal: AbortSignal): Promise<{ token: string | null; why: string }> {
   const url = "https://api.gofile.io/accounts";
   await assertPublicUrl(url);
   const res = await fetch(url, {
@@ -138,23 +143,44 @@ async function createGuest(signal: AbortSignal): Promise<string | null> {
     body: "{}",
     redirect: "error",
   });
-  const json = res.ok ? await readJson(res) : null;
+  const json = await readJson(res);
   const token = (json?.data as { token?: unknown } | undefined)?.token;
-  return typeof token === "string" && token ? token : null;
+  if (typeof token === "string" && token) return { token, why: "ok" };
+  return { token: null, why: typeof json?.status === "string" ? json.status : `HTTP ${res.status}` };
 }
 
-/** ゲスト用の合言葉と、サイト用の合言葉の作り方（同じサーバーが動いている間、1 時間使い回す） */
-function getSession(signal: AbortSignal): Promise<Session | null> {
+/** ゲスト登録がうまくいかなかった理由（直近のもの。画面の診断に出す） */
+let lastGuestWhy = "";
+
+/**
+ * Gofile の合言葉（アカウントのトークン）。
+ * 設定されたもの（画面で入れたもの → サーバーの環境変数 GOFILE_TOKEN）があればそれを使い、
+ * なければゲスト登録して作る（同じサーバーが動いている間、1 時間使い回す）
+ */
+function getSession(signal: AbortSignal, given?: string): Promise<Session | null> {
+  const fixed = given || process.env.GOFILE_TOKEN?.trim();
+  if (fixed) {
+    return (async () => {
+      const scripts = await (scriptsCache ??= readScripts(signal));
+      return { token: fixed, ...scripts, given: true };
+    })();
+  }
   if (!session || Date.now() - sessionAt > 60 * 60 * 1000) {
     sessionAt = Date.now();
     session = (async () => {
-      const [scripts, token] = await Promise.all([readScripts(signal), createGuest(signal).catch(() => null)]);
-      return token ? { token, ...scripts } : null;
+      const [scripts, guest] = await Promise.all([
+        (scriptsCache ??= readScripts(signal)),
+        createGuest(signal).catch((err) => ({ token: null, why: err instanceof Error ? err.name : "error" })),
+      ]);
+      lastGuestWhy = guest.why;
+      return guest.token ? { token: guest.token, ...scripts } : null;
     })();
     void session.then((s) => !s && (session = null));
   }
   return session;
 }
+
+let scriptsCache: Promise<{ secret: string; wt: string }> | null = null;
 
 /** 新しい計算方式のサイト用の合言葉（4 時間ごとに変わる） */
 export function hashedWebsiteToken(token: string, secret: string, now = Date.now()): string {
@@ -169,6 +195,10 @@ const IMAGE_NAME_RE = /\.(?:jpe?g|png|gif|webp|avif|heic|bmp)$/i;
 function describe(status: string, browser?: string): string {
   if (status === "error-passwordRequired") return "パスワード付きの Gofile フォルダは読めません";
   if (status === "error-notFound") return "Gofile のフォルダが見つかりません（削除された可能性があります）";
+  if (status === "error-guest") {
+    return "Gofile がゲスト登録を断りました（このアプリのサーバーの接続元から登録が多すぎる・自動アクセスと判定された等）。Gofile の無料アカウントの「アカウントトークン」を設定画面に入れると読めるようになります";
+  }
+  if (status === "error-token") return "設定した Gofile のアカウントトークンが使えませんでした（間違い・期限切れの可能性があります）";
   if (status === "error-notPremium") {
     if (browser === "error-notPremium") {
       return "Gofile のページ自身の問い合わせも「有料会員のみ」と断られました。このアプリのサーバー（接続元の IP・自動アクセスの判定）がGofile に断られている可能性が高く、合言葉の作り方の問題ではなさそうです";
@@ -254,13 +284,27 @@ async function viaBrowser(
   folder: string,
   rootId: string,
   signal: AbortSignal,
+  token?: string,
 ): Promise<{ files: GofileFile[]; nested: string[]; status: string; detail: string }> {
-  const r = await renderPage(`https://gofile.io/d/${folder}`, signal, Number.POSITIVE_INFINITY, { captureJson: /^https:\/\/api\.gofile\.io\/contents\// }, 20000);
+  // 合言葉があれば先にブラウザへ入れておく（Gofile のページがゲスト登録をしなくて済むように）
+  const r = await renderPage(
+    `https://gofile.io/d/${folder}`,
+    signal,
+    Number.POSITIVE_INFINITY,
+    {
+      captureJson: /^https:\/\/api\.gofile\.io\/(?:contents|accounts)/,
+      cookies: token ? [{ name: "accountToken", value: token, domain: ".gofile.io" }] : undefined,
+    },
+    20000,
+  );
+  const accounts = r.json.filter((j) => /\/accounts/.test(j.url));
+  const accountStatuses = accounts.map((j) => (j.data as { status?: unknown } | null)?.status).filter((x): x is string => typeof x === "string");
+  r.json = r.json.filter((j) => /\/contents\//.test(j.url));
   const cookieToken = r.cookies.find((c) => c.name === "accountToken" && /(?:^|\.)gofile\.io$/.test(c.domain))?.value;
   const hitIndex = r.json.findIndex((j) => (j.data as { status?: unknown } | null)?.status === "ok");
   const hit = hitIndex >= 0 ? (r.json[hitIndex].data as Record<string, unknown>) : undefined;
   // 合言葉は Cookie になければ、ページ自身が一覧を聞いたときに付けた認証ヘッダーから取る
-  const token = cookieToken ?? /^Bearer\s+(\S+)/i.exec(hitIndex >= 0 ? (r.json[hitIndex].auth ?? "") : "")?.[1];
+  const useToken = cookieToken ?? /^Bearer\s+(\S+)/i.exec(hitIndex >= 0 ? (r.json[hitIndex].auth ?? "") : "")?.[1] ?? token;
   const statuses = r.json.map((j) => (j.data as { status?: unknown } | null)?.status).filter((x): x is string => typeof x === "string");
   // 画面に何が見えたか（読めなかった原因をつきとめる手がかり）
   const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(r.html)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 50) ?? "";
@@ -272,14 +316,19 @@ async function viaBrowser(
     .slice(0, 90);
   const detail =
     `ブラウザ：ページ HTTP ${r.status}・題名「${title}」・Gofile への問い合わせ ${r.json.length} 件（${statuses.join(",") || "返事なし"}）・` +
-    `合言葉 ${cookieToken ? "Cookie" : token ? "認証ヘッダー" : "なし"}・画面の文字「${text}」`;
-  if (!hit || !token) return { files: [], nested: [], status: statuses.find((x) => x !== "ok") ?? "error-browser", detail };
-  return { ...parseContents(hit, rootId, `gofile.io|accountToken=${token}`), status: "ok", detail };
+    `ゲスト登録 ${accounts.length ? accountStatuses.join(",") || "返事の形が違う" : "なし"}・` +
+    `合言葉 ${cookieToken ? "Cookie" : useToken ? "認証ヘッダー" : "なし"}・画面の文字「${text}」`;
+  if (!hit || !useToken) {
+    // ページ自身のゲスト登録が断られて、一覧を聞くところまで進めなかった
+    const guestRefused = !token && !r.json.length && accounts.length > 0 && !accountStatuses.includes("ok");
+    return { files: [], nested: [], status: guestRefused ? "error-guest" : (statuses.find((x) => x !== "ok") ?? "error-browser"), detail };
+  }
+  return { ...parseContents(hit, rootId, `gofile.io|accountToken=${useToken}`), status: "ok", detail };
 }
 
 /** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
-export async function gofileFiles(id: string, signal: AbortSignal): Promise<GofileResult> {
-  const s = await getSession(signal).catch(() => null);
+export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string): Promise<GofileResult> {
+  const s = await getSession(signal, givenToken).catch(() => null);
   const files: GofileFile[] = [];
   let error: string | undefined;
   /** API が断るので、ブラウザで開く（一度断られたら、中のフォルダもブラウザで開く。3 回まで） */
@@ -288,6 +337,8 @@ export async function gofileFiles(id: string, signal: AbortSignal): Promise<Gofi
   /** ブラウザで開いたとき Gofile 自身のページが受け取った状態（"ok" 以外の status・何も届かなかったときは "error-browser"） */
   let browserStatus: string | undefined;
   const notes: string[] = [];
+  if (!s) notes.push(`サーバーのゲスト登録：${lastGuestWhy || "失敗"}`);
+  else if (s.given) notes.push("設定した合言葉を使用");
   const visit = async (folder: string, level: number) => {
     if (level > 2 || files.length >= 300 || signal.aborted) return;
     let found: { files: GofileFile[]; nested: string[] } | null = null;
@@ -301,7 +352,7 @@ export async function gofileFiles(id: string, signal: AbortSignal): Promise<Gofi
     }
     if (!found && useBrowser && browserOpens < 3) {
       browserOpens++;
-      const b = await viaBrowser(folder, id, signal).catch((err) => ({
+      const b = await viaBrowser(folder, id, signal, s?.token).catch((err) => ({
         files: [] as GofileFile[],
         nested: [] as string[],
         status: "error-browser",

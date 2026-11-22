@@ -85,6 +85,8 @@ export interface CrawlOptions {
   exclude: string[];
   /** robots.txt（サイトが出している「自動で読まないでほしい場所」の指定）を守るか。入力したページ自体は常に読む */
   robots: boolean;
+  /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
+  gofileToken?: string;
 }
 
 export interface QueueItem {

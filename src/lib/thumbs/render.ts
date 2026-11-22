@@ -107,6 +107,8 @@ export interface RenderOptions {
    * ページ自身のスクリプトが受け取ったデータ（Gofile のファイル一覧など）を、そのまま使うため
    */
   captureJson?: RegExp;
+  /** ページを開く前にブラウザへ入れておく Cookie（Gofile の合言葉など） */
+  cookies?: { name: string; value: string; domain: string }[];
 }
 
 const MAX_FRAMES = 5;
@@ -499,6 +501,11 @@ export async function renderPage(
       record({ url: resUrl, kind, referer });
     });
 
+    if (options.cookies?.length) {
+      await page
+        .setCookie(...options.cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: "/", secure: true })))
+        .catch(() => {});
+    }
     await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs }).catch(async (err) => {
       // 時間切れでも、そこまでに描けた分は使う
       if (!(err instanceof Error && err.name === "TimeoutError")) throw err;

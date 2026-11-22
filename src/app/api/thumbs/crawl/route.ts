@@ -30,6 +30,7 @@ export async function POST(request: Request) {
     kinds?: unknown;
     exclude?: unknown;
     robots?: unknown;
+    gofileToken?: unknown;
     resume?: unknown;
   };
   try {
@@ -61,6 +62,7 @@ export async function POST(request: Request) {
     kinds: (body.kinds === "video" || body.kinds === "image" ? body.kinds : "all") as CrawlOptions["kinds"],
     render: (body.render === "always" || body.render === "off" ? body.render : "auto") as CrawlOptions["render"],
     robots: body.robots !== false,
+    gofileToken: typeof body.gofileToken === "string" && /^[A-Za-z0-9]{10,128}$/.test(body.gofileToken.trim()) ? body.gofileToken.trim() : undefined,
   };
   const resume = parseResume(body.resume);
   // ブラウザ表示（最大 35 秒）と動画の確認（最大 15 秒）が区切りの直前に始まっても収まるよう、上限の 70 秒前で区切る

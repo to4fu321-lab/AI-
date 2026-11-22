@@ -146,6 +146,12 @@ export function ThumbsApp() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [sites, setSites] = useState<SavedSite[]>([]);
   const [excludes, setExcludes] = useState<string[]>([]);
+  /** Gofile のアカウントトークン（この端末だけに保存。取得のときにサーバーへ送る） */
+  const [gofileToken, setGofileToken] = useState("");
+  const gofileTokenRef = useRef("");
+  useEffect(() => {
+    gofileTokenRef.current = gofileToken;
+  }, [gofileToken]);
   const [now, setNow] = useState(0);
   const [tile, setTile] = useState(DEFAULT_TILE);
   const [shape, setShape] = useState<Shape>("square");
@@ -170,6 +176,7 @@ export function ThumbsApp() {
       if (Array.isArray(library?.history)) setHistory(library.history);
       if (Array.isArray(library?.sites)) setSites(library.sites.slice(0, MAX_SITES));
       if (Array.isArray(library?.excludes)) setExcludes(library.excludes.slice(0, MAX_EXCLUDES));
+      if (typeof library?.gofileToken === "string") setGofileToken(library.gofileToken);
       const view = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
       if (typeof view?.tile === "number") setTile(Math.min(TILE_SIZES.length - 1, Math.max(0, Math.round(view.tile))));
       if (view?.shape === "wide" || view?.shape === "square") setShape(view.shape);
@@ -215,11 +222,11 @@ export function ThumbsApp() {
   useEffect(() => {
     if (!loaded.current) return;
     try {
-      localStorage.setItem(LIBRARY_KEY, JSON.stringify({ history, sites, excludes }));
+      localStorage.setItem(LIBRARY_KEY, JSON.stringify({ history, sites, excludes, gofileToken }));
     } catch {
       /* ignore */
     }
-  }, [history, sites, excludes]);
+  }, [history, sites, excludes, gofileToken]);
   useEffect(() => {
     if (!loaded.current) return;
     try {
@@ -272,7 +279,13 @@ export function ThumbsApp() {
             const res = await fetch("/api/thumbs/crawl", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ url, ...settings, exclude: excludesRef.current, resume: current }),
+              body: JSON.stringify({
+                url,
+                ...settings,
+                exclude: excludesRef.current,
+                gofileToken: gofileTokenRef.current || undefined,
+                resume: current,
+              }),
               signal: controller.signal,
             });
             if (res.status >= 500) throw new ServerError(res.status);
@@ -625,6 +638,8 @@ export function ThumbsApp() {
           excludes={excludes}
           onAddExclude={addExclude}
           onRemoveExclude={removeExclude}
+          gofileToken={gofileToken}
+          onGofileToken={setGofileToken}
           now={now}
           onRun={(url, settings) => void startJob(url, settings)}
           onSave={saveSite}

@@ -2,7 +2,7 @@ import type { MediaItem } from "./types";
 import { parseClock, parseIsoDuration } from "./duration";
 import { hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { findTweetIds, gifVideoFromThumb, isTwitterVideoThumb, tweetIdOf } from "./twitter";
+import { findTweetIds, gifVideoFromThumb, isTwitterVideoThumb, tweetIdInUrl, tweetIdOf } from "./twitter";
 
 /** Gofile の共有フォルダの番号（gofile.io/d/番号。違えば null）。gofile.ts はサーバー専用なので、ここにも小さく持つ */
 export function gofileLinkId(raw: string): string | null {
@@ -421,6 +421,9 @@ export function isJunkLink(url: string, text?: string): boolean {
   }
 }
 
+/** 動画を再生するボタン・リンクらしい文字 */
+const PLAY_TEXT_RE = /動画を再生|再生する|^\s*再生\s*$|動画を見る|play video|watch video|^\s*play\s*$/i;
+
 /** ダウンロード用のリンクらしい文字・URL */
 const DOWNLOAD_TEXT_RE = /ダウンロード|download|動画を保存|保存する|\bDL\b/i;
 const DOWNLOAD_URL_RE = /(?:^|[/_.\-?&=])(?:download|dl|get_?file|getfile|getvideo|get_video|attachment|dlfile)(?:$|[/_.\-?&=])/i;
@@ -689,6 +692,17 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       const info = anchors.get(url);
       addTweet(tweet, info?.thumb, info?.duration);
       continue;
+    }
+    // X の動画を集めたサイト（twihub など）の、自分のサイト経由のリンク：/r/x/ユーザー/status/番号、/r/v/番号（「動画を再生」）。
+    // 番号が X の投稿の番号として正しい形なら、投稿の番号として集める（ページを開かなくても、番号から動画をもらえる）
+    const linkInfo = anchors.get(url);
+    const statusId = /\/status(?:es)?\/(\d{18,19})(?:[/?#]|$)/.exec(new URL(url).pathname)?.[1];
+    const viaSite =
+      (statusId && tweetIdInUrl(url) === statusId ? statusId : null) ??
+      (VIDEO_URL_RE.test(url) || PLAY_TEXT_RE.test(linkInfo?.text ?? "") ? tweetIdInUrl(url) : null);
+    if (viaSite) {
+      addTweet(viaSite, linkInfo?.thumb, linkInfo?.duration);
+      if (statusId) continue;
     }
     const added = addEmbed(url, t.attrs.title);
     if (added) {
