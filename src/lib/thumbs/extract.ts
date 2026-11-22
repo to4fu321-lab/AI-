@@ -401,6 +401,26 @@ function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
   return out;
 }
 
+/**
+ * 動画のない「サイトの仕組みのページ」（ログイン・設定・規約・問い合わせ・言語や並び順の切り替えなど）。
+ * こういうリンクを辿ると、読むページ数の上限をすぐ使い切ってしまうので辿らない
+ */
+const JUNK_PATH_RE =
+  /(?:^|\/)(?:log-?in|log-?out|sign-?in|sign-?up|sign-?out|register|registration|join|account|accounts|settings?|config|preferences?|mypage|my|password|reset|forgot|auth|oauth|sso|privacy(?:-policy)?|policy|policies|terms(?:-of-(?:use|service))?|tos|legal|disclaimer|dmca|copyright|contact(?:-us)?|inquiry|about(?:-us)?|company|faq|help|support|guide|sitemap|rss|atom|cart|checkout|subscribe|subscription|pricing|plans?|upgrade|advertise|advertising|careers?|jobs|press|lang|language|share|report|notifications?|messages?|inbox|wp-admin|wp-login\.php|cdn-cgi)(?:[/.?#]|$)/i;
+const JUNK_QUERY_RE = /[?&](?:lang|hl|locale|sort|order|orderby|share|replytocom|redirect|redirect_to|return_?to|returnurl|next|action=(?:login|register|logout))=/i;
+const JUNK_TEXT_RE =
+  /^(?:ログイン|ログアウト|新規登録|会員登録|無料登録|無料会員登録|サインイン|サインアップ|設定|各種設定|アカウント|マイページ|お問い合わせ|問い合わせ|利用規約|規約|プライバシー|プライバシーポリシー|個人情報保護方針|個人情報|運営会社|会社概要|運営者情報|ヘルプ|よくある質問|サイトマップ|広告掲載|広告について|免責事項|著作権|お知らせ|login|log in|logout|sign in|sign up|register|settings|account|contact|contact us|terms|privacy|privacy policy|help|faq|about|about us|language|日本語|english|dmca)$/i;
+
+/** 動画のない仕組みのページへのリンクか（サムネイル付きのリンクには使わない） */
+export function isJunkLink(url: string, text?: string): boolean {
+  try {
+    const u = new URL(url);
+    return JUNK_PATH_RE.test(u.pathname) || JUNK_QUERY_RE.test(u.search) || (!!text && JUNK_TEXT_RE.test(text.trim()));
+  } catch {
+    return false;
+  }
+}
+
 /** ダウンロード用のリンクらしい文字・URL */
 const DOWNLOAD_TEXT_RE = /ダウンロード|download|動画を保存|保存する|\bDL\b/i;
 const DOWNLOAD_URL_RE = /(?:^|[/_.\-?&=])(?:download|dl|get_?file|getfile|getvideo|get_video|attachment|dlfile)(?:$|[/_.\-?&=])/i;
@@ -702,6 +722,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         "download" in t.attrs ||
         DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
+      if (!download && !thumb && isJunkLink(url, info?.text)) continue;
       addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration);
     }
   }
@@ -723,17 +744,18 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const thumb = thumbInside(m[3], base);
     const preview = previewInside(`${m[2]}>${m[3]}`, base);
     const videoish = VIDEO_URL_RE.test(url) || DURATION_RE.test(stripTags(m[3])) || !!preview;
+    if (!thumb && isJunkLink(url)) continue;
     addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb, preview);
   }
   for (const m of markup.matchAll(/\sdata-(?:href|link|permalink|detail-url|url)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) {
     const url = resolveUrl(decodeEntities(m[1] ?? m[2]), base);
-    if (url && !kindFromUrl(url) && isPageLikeUrl(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
+    if (url && !kindFromUrl(url) && isPageLikeUrl(url) && !isJunkLink(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
   }
   for (const m of markup.matchAll(/\sonclick\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
     const code = decodeEntities(m[1] ?? m[2]);
     const target = /(?:location(?:\.href)?\s*=|location\.(?:assign|replace)\(|window\.open\()\s*['"]([^'"]+)['"]/.exec(code);
     const url = target ? resolveUrl(target[1], base) : null;
-    if (url && !kindFromUrl(url) && isPageLikeUrl(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
+    if (url && !kindFromUrl(url) && isPageLikeUrl(url) && !isJunkLink(url)) addLink(url, VIDEO_URL_RE.test(url) ? 2 : 1);
   }
 
   // --- 5. JSON-LD（構造化データ）の VideoObject / ImageObject ---

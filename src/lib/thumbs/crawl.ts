@@ -293,6 +293,25 @@ const PAGE_HEADERS = {
   "sec-fetch-user": "?1",
 };
 
+/**
+ * URL の「形」：ドメイン＋最初の部分（数字は # にする）＋部分の数。
+ * /user/123・/user/456 は同じ形、/video/1 とは違う形。動画のないページが続く形を覚えて、読まないようにする
+ */
+function shapeOf(url: string): string {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const first = (parts[0] ?? "").toLowerCase().replace(/\d+/g, "#").slice(0, 40);
+    return `${u.host}/${first}:${parts.length}`;
+  } catch {
+    return url;
+  }
+}
+/** 同じ形のページで、動画が何回見つからなかったら、その形のページを読まなくなるか */
+const BARREN_LIMIT = 3;
+/** 動画らしいリンクが何本あれば「動画の一覧ページ」とみなし、ふつうのリンク（メニューなど）を後回しにするか */
+const LISTING_MIN_LINKS = 4;
+
 /** 読む順番：段（rank）の小さい順、同じ段なら優先度（prio）の大きい順 */
 function byOrder(a: QueueItem, b: QueueItem) {
   return (a.rank ?? a.depth) - (b.rank ?? b.depth) || (b.prio ?? 0) - (a.prio ?? 0);
@@ -384,6 +403,22 @@ export async function* crawl(
     });
   let lastRank = 0;
 
+  /** 動画（「画像のみ」なら画像）が見つからなかったページの形と回数・見つかったページの形 */
+  const barren = new Map<string, number>(resume?.barren ?? []);
+  const fruitful = new Set<string>(resume?.fruitful ?? []);
+  /**
+   * 読まずに飛ばしてよいページか：入力したページでも、動画らしいリンクでもなく、
+   * 同じ形のページを何度読んでも何も見つからず、その形で見つかったことが一度もない
+   */
+  const isBarren = (q: QueueItem) => {
+    if (q.root || (q.prio ?? 0) >= 2) return false;
+    const shape = shapeOf(q.url);
+    return !fruitful.has(shape) && (barren.get(shape) ?? 0) >= BARREN_LIMIT;
+  };
+
+  /** メニュー・カテゴリなどとして後回しにしたリンク（ほかのページに同じリンクがあっても辿らない） */
+  const navLinks = new Set<string>();
+
   const snapshot = (): CrawlState => ({
     queue: [...queue],
     seen: [...seenPages],
@@ -398,6 +433,8 @@ export async function* crawl(
     pending: pending.slice(0, MAX_PENDING),
     prints: [...seenPrints].slice(-MAX_PRINTS),
     dropped: [goneVideos, refusedVideos],
+    barren: [...barren].slice(-500),
+    fruitful: [...fruitful].slice(-500),
   });
 
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
@@ -1051,15 +1088,32 @@ export async function* crawl(
       // - 入力した階層の中：そのまま辿る
       // - 同じサイトの別の場所：動画を探していて、サムネイル付き・動画らしいリンクなら辿る（一覧 → 詳細ページ）
       // - それ以外（別のサイト・階層の上限より先）：取っておき、動画が見つからないときに広げる
+      // このページで何か見つかったか・動画らしいリンクがあったかを、ページの「形」ごとに覚える
+      const promising = links.filter((l) => l.prio >= 2 && !pagination.has(l.url)).length;
+      if (!item.root) {
+        const got = options.kinds === "video" || zone > 0 ? fresh.some((m) => m.kind !== "image") : fresh.length > 0;
+        const shape = shapeOf(url);
+        if (got) fruitful.add(shape);
+        else if (!promising && barren.size < 500) barren.set(shape, (barren.get(shape) ?? 0) + 1);
+      }
+      // 動画の一覧ページ（動画らしいリンクが何本もある）なら、ふつうのリンク（メニュー・カテゴリ・タグなど）は後回しにする。
+      // 動画が 1 本も見つからなかったときだけ、範囲を広げるときに使う
+      // 動画が見つかったページ（動画の詳細ページ）も同じ。関連動画のリンクはふつうサムネイル付きなので、それだけを辿る
+      const pageHasVideo = fresh.some((m) => m.kind !== "image");
+      const listing = wantsVideo && (promising >= LISTING_MIN_LINKS || pageHasVideo);
       for (const link of links) {
         if (pagination.has(link.url)) continue;
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
-        const within = depth < options.depth;
+        const key = normalizePageUrl(link.url);
+        // ふつうのリンクで、一覧・詳細ページにあった（またはメニューとして一度後回しにした）ものはメニューとみなす
+        const nav = wantsVideo && link.prio < 2 && (listing || navLinks.has(key));
+        if (nav && navLinks.size < 5000) navLinks.add(key);
+        const within = depth < options.depth && !nav;
         if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
           enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl, link.preview);
           const q = link.duration ? queuedByUrl.get(link.url) : undefined;
           if (q) q.duration ??= link.duration;
-        } else if (autoWiden && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
+        } else if ((autoWiden || nav) && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
           hold(link.url, depth + 1, link.prio, link.thumb, z, finalUrl);
           const r = link.duration ? reservedByKey.get(normalizePageUrl(link.url)) : undefined;
           if (r) r.duration ??= link.duration;
@@ -1093,6 +1147,13 @@ export async function* crawl(
       return;
     }
     queue.sort(byOrder);
+    // 何度読んでも何も見つからない形のページは、読むページ数を使わずに飛ばす
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (!isBarren(queue[i])) continue;
+      const [q] = queue.splice(i, 1);
+      queuedByUrl.delete(q.url);
+      yield { type: "skip", url: q.url, reason: "同じ形のページを何度読んでも見つからなかったので飛ばしました" };
+    }
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
     for (const b of batch) {
       queuedByUrl.delete(b.url);
