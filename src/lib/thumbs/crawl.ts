@@ -9,6 +9,7 @@ import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
+import { linkexFiles, linkexList, linkexPlan } from "./linkex";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch, thumbsLog } from "./safeFetch";
@@ -589,6 +590,10 @@ export async function* crawl(
   let robotsSkipped = 0;
   /** 確認を求められた・断られたので読めなかったページの数 */
   let gatedPages = 0;
+  /** アプリでしか再生できない動画（Linkex）として並べた数 */
+  let appOnly = 0;
+  /** 中身を読んだ Linkex の共有リンク */
+  const seenLinkex = new Set<string>();
   /** サイト・ページの種類ごとの、続けて確認を求められた回数 */
   const gatedStreak = new Map<string, number>();
   let lastError: string | null = null;
@@ -867,6 +872,35 @@ export async function* crawl(
     if (!item.root && !(await allowed(url))) {
       robotsSkipped++;
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
+      return events;
+    }
+    // Linkex（共有リンク・まとめサイト linkex-douga）：Linkex は Web では動画を再生させない仕組みなので、
+    // 動画ファイルは取らずに、サムネイル・長さ・名前を「Linkex で開く」に並べる
+    const lx = wantsVideo ? linkexPlan(url) : null;
+    if (lx) {
+      try {
+        const list = lx.kind === "list" ? await linkexList(lx.api, signal) : { tokens: [lx.token], next: null };
+        let shown = 0;
+        let next = 0;
+        const worker = async () => {
+          while (next < list.tokens.length && Date.now() < deadline && !signal.aborted) {
+            const token = list.tokens[next++];
+            if (seenLinkex.has(token)) continue;
+            seenLinkex.add(token);
+            for (const f of await linkexFiles(token, signal).catch(() => [])) {
+              events.push({ type: "gated", url: f.url, thumb: f.thumb, duration: f.duration, title: f.name, app: "Linkex" });
+              shown++;
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, list.tokens.length) }, worker));
+        appOnly += shown;
+        events.push({ type: "page", url, depth, found: 0 });
+        if (list.next && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 1, 1)) paginationUsed++;
+        if (!shown && item.root) events.push({ type: "note", url, message: "Linkex の共有リンクに動画が見つかりませんでした（削除・期限切れの可能性があります）" });
+      } catch (err) {
+        return fail(`Linkex の一覧を読めませんでした（${err instanceof Error ? err.message.slice(0, 60) : String(err)}）`);
+      }
       return events;
     }
     // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
@@ -1457,7 +1491,10 @@ export async function* crawl(
     const gatedNote = gatedPages
       ? `「人間かどうかの確認」を求められた・自動アクセスを断られたページが ${gatedPages} 件ありました。下の「サイトで開く」から、サイトを直接開いて見てください`
       : null;
-    const finalNote = (found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote);
+    const appNote = appOnly
+      ? `Linkex の動画 ${appOnly} 本を並べました。Linkex は Web では再生できない仕組み（アプリでのみ再生）のため、タップで Linkex を開きます`
+      : null;
+    const finalNote = appNote ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote));
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;

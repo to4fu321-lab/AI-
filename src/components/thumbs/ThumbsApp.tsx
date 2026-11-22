@@ -41,7 +41,7 @@ const MAX_ITEMS = 5000;
 const MAX_GATED = 2000;
 
 /** 確認を求められて読めなかったページ。video があれば、タップでその動画ファイルを開く */
-type Gated = { url: string; thumb?: string; duration?: number; video?: string };
+type Gated = { url: string; thumb?: string; duration?: number; video?: string; title?: string; app?: string };
 
 const clock = (sec: number) => {
   const s = Math.round(sec);
@@ -340,7 +340,7 @@ export function ThumbsApp() {
                     (j.gated ?? []).some((g) => g.url === event.url)
                       ? {}
                       : {
-                          gated: [...(j.gated ?? []), { url: event.url, thumb: event.thumb, duration: event.duration, video: event.video }].slice(
+                          gated: [...(j.gated ?? []), { url: event.url, thumb: event.thumb, duration: event.duration, video: event.video, title: event.title, app: event.app }].slice(
                             0,
                             MAX_GATED,
                           ),
@@ -968,7 +968,9 @@ function GatedPages({ pages }: { pages: Gated[] }) {
   return (
     <div className="mt-2 border-t border-neutral-100 pt-2 dark:border-neutral-800">
       <p className="mb-1.5 text-[11px] text-neutral-500">
-        🔐 確認が必要で読めなかったページ {pages.length} 件。タップすると動画（わからないときはサイト）を直接開きます
+        {pages.some((g) => g.app) && pages.every((g) => g.app)
+          ? `📱 アプリでしか再生できない動画 ${pages.length} 件。タップすると ${pages[0].app} を開きます`
+          : `🔐 このアプリでは再生できなかったもの ${pages.length} 件。タップすると動画（わからないときはサイト）を直接開きます`}
       </p>
       <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
         {shown.map((g) => (
@@ -989,11 +991,14 @@ function GatedPages({ pages }: { pages: Gated[] }) {
                   {g.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60)}
                 </span>
               )}
+              {g.title ? (
+                <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/70 to-transparent px-1.5 pb-7 pt-4 text-[10px] text-white">{g.title}</span>
+              ) : null}
               {g.duration ? (
                 <span className="absolute left-1 top-1 rounded bg-black/65 px-1.5 py-0.5 text-[11px] font-semibold text-white">{clock(g.duration)}</span>
               ) : null}
               <span className="absolute bottom-1 right-1 rounded-md bg-black/65 px-2 py-1 text-[11px] font-bold text-white">
-                {g.video ? "▶ 動画を開く" : "↗ サイトで開く"}
+                {g.video ? "▶ 動画を開く" : g.app ? `↗ ${g.app} で開く` : "↗ サイトで開く"}
               </span>
             </a>
           </li>
