@@ -1,4 +1,5 @@
 import { guardApi } from "@/lib/access/locks";
+import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { crawl, MAX_QUEUE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
 import type { CrawlEvent, CrawlOptions, CrawlState } from "@/lib/thumbs/types";
@@ -27,6 +28,7 @@ export async function POST(request: Request) {
     crossSite?: unknown;
     render?: unknown;
     kinds?: unknown;
+    exclude?: unknown;
     resume?: unknown;
   };
   try {
@@ -48,6 +50,13 @@ export async function POST(request: Request) {
     maxPages: clamp(body.maxPages, 1, 1000, 100),
     maxPagination: clamp(body.maxPagination, 0, 50, 50),
     crossSite: body.crossSite === true,
+    exclude: Array.isArray(body.exclude)
+      ? body.exclude
+          .filter((r): r is string => typeof r === "string")
+          .map(normalizeRule)
+          .filter((r): r is string => !!r)
+          .slice(0, MAX_EXCLUDES)
+      : [],
     kinds: (body.kinds === "video" || body.kinds === "image" ? body.kinds : "all") as CrawlOptions["kinds"],
     render: (body.render === "always" || body.render === "off" ? body.render : "auto") as CrawlOptions["render"],
   };

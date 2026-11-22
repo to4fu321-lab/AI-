@@ -1,5 +1,6 @@
 import "server-only";
 import { extractFromHtml, formatOf, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { isExcluded, isItemExcluded } from "./exclude";
 import { RenderDeferred, renderPage, type NetworkMedia } from "./render";
 import { safeFetch } from "./safeFetch";
 import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
@@ -229,6 +230,8 @@ export async function* crawl(
 
   const enqueue = (url: string, depth: number) => {
     if (!isPageLikeUrl(url) || seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return false;
+    // 除外リストのサイトは辿らない
+    if (isExcluded(url, options.exclude)) return false;
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) return false;
     seenPages.add(key);
@@ -243,6 +246,10 @@ export async function* crawl(
 
   const visit = async (url: string, depth: number): Promise<CrawlEvent[]> => {
     const events: CrawlEvent[] = [];
+    if (isExcluded(url, options.exclude)) {
+      events.push({ type: "skip", url, reason: "除外リストのサイトです" });
+      return events;
+    }
     if (!(await allowed(url))) {
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
       return events;
@@ -255,6 +262,12 @@ export async function* crawl(
       if (!res.ok) {
         await res.body?.cancel();
         events.push({ type: "error", url, message: `HTTP ${res.status}` });
+        return events;
+      }
+      // リダイレクトで除外リストのサイトに飛ばされた場合も読まない
+      if (finalUrl !== url && isExcluded(finalUrl, options.exclude)) {
+        await res.body?.cancel();
+        events.push({ type: "skip", url, reason: "除外リストのサイトです" });
         return events;
       }
       const type = res.headers.get("content-type");
@@ -322,7 +335,7 @@ export async function* crawl(
         candidates.push(m);
       }
       // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める
-      const wanted = candidates.filter((m) =>
+      const wanted = candidates.filter((m) => !isItemExcluded(m, options.exclude)).filter((m) =>
         options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true,
       );
       const fresh = await verifyVideos(wanted, signal, deadline);
