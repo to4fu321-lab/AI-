@@ -1,3 +1,4 @@
+import { guardApi } from "@/lib/access/locks";
 import { crawl } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
 import type { CrawlEvent } from "@/lib/thumbs/types";
@@ -16,6 +17,8 @@ const clamp = (n: unknown, min: number, max: number, fallback: number) => {
  * 全部終わるまで待たずに、ページを読むたびに画面へ流せる（ストリーミング）。
  */
 export async function POST(request: Request) {
+  const denied = await guardApi(request, "/api/thumbs/crawl");
+  if (denied) return denied;
   let body: { url?: unknown; depth?: unknown; maxPages?: unknown };
   try {
     body = await request.json();

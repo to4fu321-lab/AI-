@@ -1,3 +1,4 @@
+import { guardApi } from "@/lib/access/locks";
 import { kindFromContentType, kindFromUrl } from "@/lib/thumbs/extract";
 import { FetchBlockedError, safeFetch } from "@/lib/thumbs/safeFetch";
 
@@ -15,6 +16,8 @@ export const maxDuration = 300;
  * 画像・動画以外（HTML など）は中継しない（何でも取ってくる踏み台にしないため）。
  */
 export async function GET(request: Request) {
+  const denied = await guardApi(request, "/api/thumbs/media");
+  if (denied) return denied;
   const params = new URL(request.url).searchParams;
   const target = params.get("url") ?? "";
   const ref = params.get("ref");

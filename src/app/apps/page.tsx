@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
-import { AppsDirectory } from "@/components/apps/AppsDirectory";
+import { cookies } from "next/headers";
+import { AppsDirectory, type ListedApp } from "@/components/apps/AppsDirectory";
 import { APPS } from "@/data/apps";
+import { hasAccess, lockOfApp } from "@/lib/access/locks";
 
 export const metadata: Metadata = {
   title: "アプリ一覧 | 作ったアプリのまとめ",
@@ -20,13 +22,25 @@ export const viewport: Viewport = {
 
 /** 公開から何日間「NEW」を付けるか */
 const NEW_DAYS = 14;
-// このページはデプロイ時に 1 回だけ作られるので、NEW の判定もデプロイ時点の日付で行う
-const BUILT_AT = Date.now();
+const STARTED_AT = Date.now();
 
-const apps = [...APPS]
-  .sort((a, b) => b.addedAt.localeCompare(a.addedAt))
-  .map((a) => ({ ...a, isNew: BUILT_AT - new Date(a.addedAt).getTime() < NEW_DAYS * 86400000 }));
+export default async function AppsPage() {
+  const jar = await cookies();
+  const ezoshirube = await hasAccess(jar, "ezoshirube");
+  const owner = await hasAccess(jar, "private");
 
-export default function AppsPage() {
-  return <AppsDirectory apps={apps} />;
+  const listed: ListedApp[] = [];
+  for (const app of [...APPS].sort((a, b) => b.addedAt.localeCompare(a.addedAt))) {
+    // 鍵が開いていないメンバー用・自分用のアプリは、名前も含めて画面に送らない
+    if (app.access === "ezoshirube" && !ezoshirube) continue;
+    if (app.access === "private" && !owner) continue;
+    const key = lockOfApp(app);
+    listed.push({
+      ...app,
+      isNew: STARTED_AT - new Date(app.addedAt).getTime() < NEW_DAYS * 86400000,
+      locked: key ? !(await hasAccess(jar, key)) : false,
+    });
+  }
+
+  return <AppsDirectory apps={listed} unlocked={{ ezoshirube, owner }} />;
 }
