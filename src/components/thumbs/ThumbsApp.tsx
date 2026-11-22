@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
 import { getVideoThumb, peekVideoThumb } from "./videoThumb";
+import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
@@ -108,8 +109,9 @@ export function ThumbsApp() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
       // サーバー描画と食い違わないよう、保存データの復元は表示後に 1 回だけ行う
+      // 以前の取得で同じ動画が 2 個入っていたら、ここで 1 個にまとめる
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (saved?.items) setItems(saved.items);
+      if (saved?.items) setItems(dedupeMedia(saved.items as Item[]));
       if (saved?.jobs) setJobs(saved.jobs.map((j: Job) => (j.status === "running" ? { ...j, status: "stopped" } : j)));
       const library = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "null");
       if (Array.isArray(library?.history)) setHistory(library.history);
@@ -244,10 +246,16 @@ export function ThumbsApp() {
                 else if (event.type === "media") {
                   foundCount += event.items.length;
                   setItems((list) => {
-                    const known = new Set(list.map((i) => i.id));
-                    const fresh = event.items
-                      .filter((i) => !known.has(i.id) && !isItemExcluded(i, excludesRef.current))
-                      .map((i) => ({ ...i, jobId: id }));
+                    // 同じ動画（URL の後ろだけ違う・画質違い）は 2 個入れない
+                    const known = new SeenMedia(list);
+                    const ids = new Set(list.map((i) => i.id));
+                    const fresh: Item[] = [];
+                    for (const i of event.items) {
+                      if (ids.has(i.id) || known.has(i) || isItemExcluded(i, excludesRef.current)) continue;
+                      ids.add(i.id);
+                      known.add(i);
+                      fresh.push({ ...i, jobId: id });
+                    }
                     return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
                   });
                 }
