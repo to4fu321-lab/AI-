@@ -13,15 +13,44 @@ import { looksLikeImage, looksLikeVideo, readHead } from "./sniff";
  */
 export type LinkCheck = "yes" | "no" | "unknown";
 
+/**
+ * 確認の結果。fp は中身の指紋（ファイル全体の大きさ＋先頭の数 KB の要約）。
+ * URL がまったく違っても、指紋が同じなら同じファイル（同じ動画を 2 個出さないために使う）
+ */
+export interface Probe {
+  result: LinkCheck;
+  fp?: string;
+}
+
+/** 先頭のバイトの要約（FNV-1a 方式。同じ中身なら必ず同じ値） */
+function digest(b: Uint8Array): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < b.length; i++) {
+    h1 = Math.imul(h1 ^ b[i], 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ b[i] ^ (i & 0xff), 0x85ebca6b) >>> 0;
+  }
+  return h1.toString(36) + h2.toString(36);
+}
+
+/** 返事からファイル全体の大きさを読む（わからなければ undefined） */
+function totalSize(res: Response): number | undefined {
+  if (res.headers.get("content-encoding")) return undefined;
+  const range = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "");
+  if (range) return Number(range[1]);
+  const length = Number(res.headers.get("content-length"));
+  return res.status === 200 && length > 0 ? length : undefined;
+}
+
 /** 確認結果（同じサーバーが動いている間は使い回す。確かめられなかったものは覚えない） */
-const cache = new Map<string, Promise<LinkCheck>>();
-function cached(key: string, run: () => Promise<LinkCheck>): Promise<LinkCheck> {
+const cache = new Map<string, Promise<Probe>>();
+function cached(key: string, run: () => Promise<Probe>): Promise<Probe> {
   let check = cache.get(key);
   if (!check) {
     check = run();
     cache.set(key, check);
     if (cache.size > 20000) cache.delete(cache.keys().next().value!);
-    void check.then((r) => r === "unknown" && cache.delete(key));
+    void check.then((r) => r.result === "unknown" && cache.delete(key));
   }
   return check;
 }
@@ -43,9 +72,10 @@ async function probe(
   referer: string | undefined,
   signal: AbortSignal,
   jar: CookieJar | undefined,
-): Promise<LinkCheck> {
+): Promise<Probe> {
   try {
-    const n = kind === "video" ? 376 : 64;
+    // 動画は先頭 4 KB（MP4 なら長さ・作成日時の入った部分まで）を読んで指紋にする
+    const n = kind === "video" ? 4096 : 1024;
     const headers: Record<string, string> = { range: `bytes=0-${n - 1}`, accept: kind === "video" ? "video/*,*/*;q=0.5" : "image/*,*/*;q=0.5" };
     if (referer) headers.referer = referer;
     let { res } = await safeFetch(url, { headers, timeoutMs: 8000, signal, jar });
@@ -57,18 +87,21 @@ async function probe(
     }
     if (res.status !== 200 && res.status !== 206) {
       await res.body?.cancel().catch(() => {});
-      return transientStatus(res.status) ? "unknown" : "no";
+      return { result: transientStatus(res.status) ? "unknown" : "no" };
     }
     const type = res.headers.get("content-type");
+    const total = totalSize(res);
     // 「画像・動画」と名乗っていても中身が HTML（エラーページ）のサーバーがあるので、先頭のバイトで確かめる
     const head = await readHead(res, n);
-    if (kind === "video" ? looksLikeVideo(head) : looksLikeImage(head)) return "yes";
+    // 大きさがわかるときだけ指紋を作る（先頭だけだと、別の動画でも同じになることがあるため）
+    const yes = (): Probe => ({ result: "yes", fp: total ? `${total}:${digest(head)}` : undefined });
+    if (kind === "video" ? looksLikeVideo(head) : looksLikeImage(head)) return yes();
     const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
     const isText = text.startsWith("<") || text.startsWith("{");
-    if (kind === "image" && /svg/i.test(type ?? "") && text.includes("<svg")) return "yes";
-    return kindFromContentType(type) === kind && !isText && head.length >= 12 ? "yes" : "no";
+    if (kind === "image" && /svg/i.test(type ?? "") && text.includes("<svg")) return yes();
+    return kindFromContentType(type) === kind && !isText && head.length >= 12 ? yes() : { result: "no" };
   } catch (err) {
-    return isTransient(err) ? "unknown" : "no";
+    return { result: isTransient(err) ? "unknown" : "no" };
   }
 }
 
@@ -77,28 +110,21 @@ async function probe(
  * 直リンク禁止のサーバーもあるので、見つけたページを Referer として名乗る → 名乗らない、の順に試す。
  * どちらかで見られれば yes
  */
-function checkFile(url: string, kind: "image" | "video", referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<LinkCheck> {
+function checkFile(url: string, kind: "image" | "video", referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<Probe> {
   return cached(`${kind}:${url}`, async () => {
     const first = await probe(url, kind, referer, signal, jar);
-    if (first === "yes" || !referer || signal.aborted) return first;
+    if (first.result === "yes" || !referer || signal.aborted) return first;
     const second = await probe(url, kind, undefined, signal, jar);
-    return second === "yes" ? "yes" : first === "unknown" || second === "unknown" ? "unknown" : "no";
+    if (second.result === "yes") return second;
+    return { result: first.result === "unknown" || second.result === "unknown" ? "unknown" : "no" };
   });
-}
-
-export function checkVideo(url: string, referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<LinkCheck> {
-  return checkFile(url, "video", referer, signal, jar);
-}
-
-export function checkImage(url: string, referer: string | undefined, signal: AbortSignal, jar?: CookieJar): Promise<LinkCheck> {
-  return checkFile(url, "image", referer, signal, jar);
 }
 
 /**
  * 埋め込み動画（YouTube・Vimeo・その他のプレーヤー）が生きているか。
  * YouTube と Vimeo は、動画の情報を返す公式の窓口（oEmbed）に聞く。削除・非公開なら 404 や 401 が返る
  */
-export function checkEmbed(src: string, signal: AbortSignal): Promise<LinkCheck> {
+export function checkEmbed(src: string, signal: AbortSignal): Promise<Probe> {
   return cached(`embed:${src}`, async () => {
     try {
       const yt = youtubeId(src);
@@ -110,16 +136,17 @@ export function checkEmbed(src: string, signal: AbortSignal): Promise<LinkCheck>
           : src;
       const { res } = await safeFetch(target, { timeoutMs: 8000, signal, headers: { accept: "application/json,text/html,*/*;q=0.5" } });
       await res.body?.cancel().catch(() => {});
-      if (res.ok) return "yes";
-      return transientStatus(res.status) ? "unknown" : "no";
+      // 埋め込み動画は URL そのものが動画を表すので、指紋は URL にする（YouTube は動画の番号）
+      if (res.ok) return { result: "yes", fp: yt ? `yt:${yt}` : vimeo ? `vimeo:${vimeo}` : undefined };
+      return { result: transientStatus(res.status) ? "unknown" : "no" };
     } catch (err) {
-      return isTransient(err) ? "unknown" : "no";
+      return { result: isTransient(err) ? "unknown" : "no" };
     }
   });
 }
 
 /** 1 件の画像・動画・埋め込み動画を確かめる */
-export function checkMedia(item: Pick<MediaItem, "kind" | "src" | "referer" | "pageUrl">, signal: AbortSignal, jar?: CookieJar): Promise<LinkCheck> {
+export function checkMedia(item: Pick<MediaItem, "kind" | "src" | "referer" | "pageUrl">, signal: AbortSignal, jar?: CookieJar): Promise<Probe> {
   const referer = item.referer ?? item.pageUrl;
   if (item.kind === "embed") return checkEmbed(item.src, signal);
   return checkFile(item.src, item.kind, referer, signal, jar);

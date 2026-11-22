@@ -141,6 +141,8 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
 const VERIFY_CONCURRENCY = 24;
 /** 確認待ちとして次の回へ持ち越せる数の上限 */
 export const MAX_PENDING = 3000;
+/** 次の回へ持ち越す指紋の数の上限 */
+export const MAX_PRINTS = 5000;
 /** 時間切れ・通信の失敗で確かめられなかったものを、何回まで確かめ直すか */
 const MAX_VERIFY_TRIES = 3;
 
@@ -157,13 +159,17 @@ async function verifyMedia(
 ): Promise<{ ok: MediaItem[]; rest: MediaItem[] }> {
   const ok: MediaItem[] = [];
   const rest: MediaItem[] = [];
+  const prints = new Map<MediaItem, string | undefined>();
   let next = 0;
   const worker = async () => {
     while (next < items.length) {
       if (Date.now() > stopAt || signal.aborted) return;
       const item = items[next++];
-      const result = await checkMedia(item, signal, jar);
-      if (result === "yes") ok.push(item);
+      const { result, fp } = await checkMedia(item, signal, jar);
+      if (result === "yes") {
+        ok.push(item);
+        prints.set(item, fp);
+      }
       else if (result === "unknown" && (item.tries ?? 0) + 1 < MAX_VERIFY_TRIES) rest.push({ ...item, tries: (item.tries ?? 0) + 1 });
     }
   };
@@ -173,7 +179,7 @@ async function verifyMedia(
   const order = new Map(items.map((m, i) => [m, i]));
   ok.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
   return {
-    ok: ok.map((m) => ({ ...m, unverified: undefined, guess: undefined, tries: undefined, checked: true })),
+    ok: ok.map((m) => ({ ...m, unverified: undefined, guess: undefined, tries: undefined, checked: true, fp: prints.get(m) })),
     rest,
   };
 }
@@ -319,6 +325,15 @@ export async function* crawl(
    * 確かめて見られたものだけを画面へ送る（リンク切れは最初から出さない）
    */
   const pending: MediaItem[] = resume?.pending ?? [];
+  /** 送った画像・動画の中身の指紋（URL が違っても同じファイルなら 2 個目は出さない） */
+  const seenPrints = new Set<string>(resume?.prints ?? []);
+  const dropSamePrint = (items: MediaItem[]) =>
+    items.filter((m) => {
+      if (!m.fp) return true;
+      if (seenPrints.has(m.fp)) return false;
+      seenPrints.add(m.fp);
+      return true;
+    });
   let lastRank = 0;
 
   const snapshot = (): CrawlState => ({
@@ -333,12 +348,23 @@ export async function* crawl(
     home,
     cookies: jar.toJSON(),
     pending: pending.slice(0, MAX_PENDING),
+    prints: [...seenPrints].slice(-MAX_PRINTS),
   });
 
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
 
-  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string, zone = 0, root = false, from?: string) => {
+  const enqueue = (
+    url: string,
+    depth: number,
+    rank: number,
+    prio: number,
+    thumb?: string,
+    zone = 0,
+    root = false,
+    from?: string,
+    preview?: string,
+  ) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) {
@@ -347,6 +373,7 @@ export async function* crawl(
         const queued = queuedByUrl.get(url);
         if (queued) {
           queued.thumb ??= thumb;
+          queued.preview ??= preview;
           queued.prio = Math.max(queued.prio ?? 0, prio);
         }
       }
@@ -358,6 +385,7 @@ export async function* crawl(
     if (zone) entry.zone = zone;
     if (root) entry.root = true;
     if (from) entry.from = from;
+    if (preview) entry.preview = preview;
     queue.push(entry);
     queuedByUrl.set(url, entry);
     return true;
@@ -490,6 +518,26 @@ export async function* crawl(
       events.push({ type: "error", url, message });
       return events;
     };
+    /**
+     * リンク先がそのまま画像・動画ファイルだったとき、それ自体を 1 件にする。
+     * ほかのものと同じく、確かめて中身の指紋を取り、同じファイルをもう出していれば出さない
+     */
+    const emitDirect = async (direct: MediaItem): Promise<CrawlEvent[]> => {
+      const finalUrl = direct.src;
+      if (seenMedia.has(direct)) {
+        events.push({ type: "page", url: finalUrl, depth, found: 0 });
+        return events;
+      }
+      seenMedia.add(direct);
+      const verified = await verifyMedia([direct], signal, Math.min(deadline, Date.now() + 12000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(verified.ok);
+      found += ok.length;
+      videos += ok.filter((m) => m.kind !== "image").length;
+      events.push({ type: "page", url: finalUrl, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      return events;
+    };
     if (isExcluded(url, options.exclude)) {
       events.push({ type: "skip", url, reason: "除外リストのサイトです" });
       return events;
@@ -545,18 +593,8 @@ export async function* crawl(
                 referer: item.from,
                 thumb: directKind === "video" ? item.thumb : undefined,
                 format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
-                // いま実際に読めたので、リンク切れではない
-                checked: true,
               };
-              if (seenMedia.has(direct)) {
-                events.push({ type: "page", url: finalUrl, depth, found: 0 });
-                return events;
-              }
-              seenMedia.add(direct);
-              found++;
-              if (directKind === "video") videos++;
-              events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
-              return events;
+              return emitDirect(direct);
             }
             if (type && !/html|xml|text\/plain/i.test(type)) {
               // ページでも、画像・動画と名乗ってもいない（「ダウンロード用」など）。先頭の中身が動画・画像なら、それ自体を 1 件にする
@@ -574,17 +612,8 @@ export async function* crawl(
                 referer: item.from,
                 thumb: sniffed === "video" ? item.thumb : undefined,
                 format: mime!.split("/")[1].replace(/^x-/, "").replace("quicktime", "MOV").replace("jpeg", "JPG").toUpperCase(),
-                checked: true,
               };
-              if (seenMedia.has(direct)) {
-                events.push({ type: "page", url: finalUrl, depth, found: 0 });
-                return events;
-              }
-              seenMedia.add(direct);
-              found++;
-              if (sniffed === "video") videos++;
-              events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
-              return events;
+              return emitDirect(direct);
             }
             html = await readLimited(res, MAX_HTML_BYTES);
           }
@@ -730,6 +759,17 @@ export async function* crawl(
       const candidates = pageMedia.filter((m) => !seenMedia.has(m) && !seenVariants.has(variantKey(m) ?? ""));
       // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める。
       // 入力した階層の外のページは動画を探すために読んでいるので、画像は集めない
+      // 一覧ページのカードのプレビュー動画は、その詳細ページを読むなら出さない（本編と同じ動画の短い版なので、
+      // 両方出すと同じ動画が続けて並ぶ）。詳細ページに本編がなかったときだけ、詳細ページを読んだときに出す
+      const followed = (url: string, prio: number) => {
+        if (seenPages.has(normalizePageUrl(url))) return true;
+        const z = options.crossSite ? 0 : zoneOf(url, home);
+        return depth < options.depth && (z === 0 || (z === 1 && wantsVideo && prio >= 2));
+      };
+      const previewOf = new Set(links.filter((l) => l.preview && !pagination.has(l.url) && followed(l.url, l.prio)).map((l) => l.preview!));
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].kind === "video" && previewOf.has(candidates[i].src)) candidates.splice(i, 1);
+      }
       const videoOnly = options.kinds === "video" || zone > 0;
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
@@ -738,7 +778,25 @@ export async function* crawl(
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
       const { ok, rest } = await verifyMedia(wanted, signal, Math.min(deadline, Date.now() + 12000), jar);
       if (rest.length) pending.push(...rest);
-      const fresh = pickVariants(ok);
+      let fresh = pickVariants(dropSamePrint(ok));
+      // このページが一覧のカードから来ていて、本編の動画が見つからなかったら、カードのプレビュー動画を代わりに出す
+      if (item.preview && wantsVideo && !fresh.some((m) => m.kind !== "image") && !rest.some((m) => m.kind !== "image")) {
+        const stand: MediaItem = {
+          id: item.preview,
+          kind: "video",
+          src: item.preview,
+          pageUrl: finalUrl,
+          referer: item.from,
+          thumb: item.thumb,
+          format: formatOf(item.preview, "video"),
+          title: "プレビュー",
+        };
+        if (!seenMedia.has(stand)) {
+          seenMedia.add(stand);
+          const v = await verifyMedia([stand], signal, Math.min(deadline, Date.now() + 8000), jar);
+          fresh = [...fresh, ...dropSamePrint(v.ok)];
+        }
+      }
       found += fresh.length;
       videos += fresh.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
@@ -781,7 +839,7 @@ export async function* crawl(
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
         const within = depth < options.depth;
         if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
-          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl);
+          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl, link.preview);
         } else if (autoWiden && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
           hold(link.url, depth + 1, link.prio, link.thumb, z, finalUrl);
         }
@@ -829,8 +887,9 @@ export async function* crawl(
     }
     // 確かめきれずに残っていた画像・動画を、少しずつ確かめて送る
     if (pending.length && Date.now() < deadline) {
-      const { ok, rest } = await verifyMedia(pending.splice(0, pending.length), signal, Math.min(deadline, Date.now() + 5000), jar);
-      pending.push(...rest);
+      const verified = await verifyMedia(pending.splice(0, pending.length), signal, Math.min(deadline, Date.now() + 5000), jar);
+      const ok = dropSamePrint(verified.ok);
+      pending.push(...verified.rest);
       if (ok.length) {
         found += ok.length;
         videos += ok.filter((m) => m.kind !== "image").length;
@@ -860,8 +919,9 @@ export async function* crawl(
       return;
     }
     const batch = pending.splice(0, pending.length);
-    const { ok, rest } = await verifyMedia(batch, signal, deadline, jar);
-    pending.push(...rest);
+    const verified = await verifyMedia(batch, signal, deadline, jar);
+    const ok = dropSamePrint(verified.ok);
+    pending.push(...verified.rest);
     if (ok.length) {
       found += ok.length;
       videos += ok.filter((m) => m.kind !== "image").length;

@@ -41,7 +41,7 @@ export async function GET(request: Request) {
     const kind = k === "embed" || k === "image" ? k : "video";
     let alive: string;
     try {
-      alive = await checkMedia({ kind, src: target, referer, pageUrl: referer ?? target }, request.signal);
+      alive = (await checkMedia({ kind, src: target, referer, pageUrl: referer ?? target }, request.signal)).result;
     } catch {
       alive = "unknown";
     }

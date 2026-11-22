@@ -162,6 +162,8 @@ export interface LinkCandidate {
   url: string;
   /** リンクの中にあったサムネイル画像（一覧ページのサムネイル → 詳細ページの動画に引き継ぐ） */
   thumb?: string;
+  /** リンクのカードにあったプレビュー動画（詳細ページの本編と同じ動画の短い版。本編が見つかれば出さない） */
+  preview?: string;
   /**
    * 優先度。4: サムネイル付きで動画らしい / 3: サムネイル付き / 2: 動画らしい（再生時間・URL など）/
    * 1: タップで移動する仕掛け（onclick・data-href）/ 0: 普通のリンク
@@ -274,22 +276,48 @@ function thumbInside(inner: string, base: string): string | undefined {
   return undefined;
 }
 
+/**
+ * 一覧ページのカードの中にある、短い「予告・プレビュー動画」（マウスを乗せると流れるもの）を探す。
+ * <video> / <source> や、data-preview="….mp4" のような属性に書かれる
+ */
+function previewInside(inner: string, base: string): string | undefined {
+  for (const m of inner.matchAll(/<(video|source)\b([^>]*)>/gi)) {
+    const a = parseAttrs(m[2]);
+    const url = resolveUrl(a.src || a["data-src"], base);
+    if (url && kindFromUrl(url) === "video") return url;
+  }
+  for (const m of inner.matchAll(
+    /\sdata-(?:preview|preview-?url|preview-?src|preview-?video|video-?preview|trailer|trailer-?url|mediabook|teaser|hover|hover-?video|clip|webm|mp4|video|video-?src|video-?url)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi,
+  )) {
+    const url = resolveUrl(decodeEntities(m[1] ?? m[2]), base);
+    if (url && kindFromUrl(url) === "video") return url;
+  }
+  return undefined;
+}
+
 /** <a> ごとに、中のサムネイルと「動画らしさ」を調べる */
-function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean; text: string }> {
-  const out = new Map<string, { thumb?: string; videoish: boolean; text: string }>();
+function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean; text: string; preview?: string }> {
+  const out = new Map<string, { thumb?: string; videoish: boolean; text: string; preview?: string }>();
   for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
     const attrs = parseAttrs(m[1]);
     const url = resolveUrl(attrs.href, base);
     if (!url) continue;
+    // <a> の属性に書かれたプレビュー動画（<a data-preview="…">）も含めて調べる
     const inner = m[2];
     const thumb = thumbInside(inner, base);
+    const preview = previewInside(`${m[1]}>${inner}`, base);
     const text = stripTags(inner);
     const videoish =
       DURATION_RE.test(text) ||
       VIDEO_URL_RE.test(url) ||
       (!!thumb && VIDEO_CLASS_RE.test(`${attrs.class ?? ""} ${inner.slice(0, 2000)}`));
     const prev = out.get(url);
-    out.set(url, { thumb: prev?.thumb ?? thumb, videoish: (prev?.videoish ?? false) || videoish, text: `${prev?.text ?? ""} ${text}`.slice(0, 200) });
+    out.set(url, {
+      thumb: prev?.thumb ?? thumb,
+      videoish: (prev?.videoish ?? false) || videoish || !!preview,
+      text: `${prev?.text ?? ""} ${text}`.slice(0, 200),
+      preview: prev?.preview ?? preview,
+    });
   }
   return out;
 }
@@ -506,10 +534,10 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   // --- 4. <a href> : メディアへの直リンク、YouTube へのリンク、辿る候補のページ ---
   const anchors = analyzeAnchors(markup, base);
   const links = new Map<string, LinkCandidate>();
-  const addLink = (url: string, prio: number, thumb?: string) => {
+  const addLink = (url: string, prio: number, thumb?: string, preview?: string) => {
     const prev = links.get(url);
-    if (!prev || prio > prev.prio || (!prev.thumb && thumb)) {
-      links.set(url, { url, prio: Math.max(prio, prev?.prio ?? 0), thumb: prev?.thumb ?? thumb });
+    if (!prev || prio > prev.prio || (!prev.thumb && thumb) || (!prev.preview && preview)) {
+      links.set(url, { url, prio: Math.max(prio, prev?.prio ?? 0), thumb: prev?.thumb ?? thumb, preview: prev?.preview ?? preview });
     }
   };
   for (const t of tags) {
@@ -538,7 +566,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         "download" in t.attrs ||
         DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
-      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb);
+      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview);
     }
   }
 
@@ -557,8 +585,9 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const url = clickTarget(parseAttrs(m[2]));
     if (!url || kindFromUrl(url) || !isPageLikeUrl(url)) continue;
     const thumb = thumbInside(m[3], base);
-    const videoish = VIDEO_URL_RE.test(url) || DURATION_RE.test(stripTags(m[3]));
-    addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb);
+    const preview = previewInside(`${m[2]}>${m[3]}`, base);
+    const videoish = VIDEO_URL_RE.test(url) || DURATION_RE.test(stripTags(m[3])) || !!preview;
+    addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb, preview);
   }
   for (const m of markup.matchAll(/\sdata-(?:href|link|permalink|detail-url|url)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) {
     const url = resolveUrl(decodeEntities(m[1] ?? m[2]), base);
@@ -681,6 +710,14 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (url && url !== pageUrl && isPageLikeUrl(url)) redirect = url;
   }
   const gate = GATE_RE.test(stripTags(markup).slice(0, 20000));
+
+  // カードのプレビュー動画も、いったん候補に入れる（詳細ページを読まないときは、これが唯一の動画になるため）。
+  // 詳細ページを読むかどうかで、出すか出さないかは辿る側が決める
+  for (const link of links.values()) {
+    if (link.preview && !found.has(link.preview)) {
+      add({ kind: "video", src: link.preview, thumb: link.thumb, format: formatOf(link.preview, "video"), unverified: true });
+    }
+  }
 
   const pagination = findPagination(markup, tags, base, pageUrl);
   const clientRendered =

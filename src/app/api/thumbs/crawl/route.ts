@@ -1,6 +1,6 @@
 import { guardApi } from "@/lib/access/locks";
 import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
-import { crawl, MAX_PENDING, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
+import { crawl, MAX_PENDING, MAX_PRINTS, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
 import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "@/lib/thumbs/types";
 
@@ -114,6 +114,7 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (zone) item.zone = zone;
     if (v.root === true) item.root = true;
     if (isHttpUrl(v.from)) item.from = v.from;
+    if (isHttpUrl(v.preview)) item.preview = v.preview;
     out.push(item);
   }
   return out;
@@ -177,5 +178,8 @@ function parseResume(value: unknown): CrawlState | undefined {
     home,
     cookies,
     pending: parsePending(v.pending),
+    prints: Array.isArray(v.prints)
+      ? v.prints.filter((x): x is string => typeof x === "string" && x.length <= 80).slice(-MAX_PRINTS)
+      : undefined,
   };
 }

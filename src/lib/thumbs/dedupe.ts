@@ -31,7 +31,7 @@ function meaningfulQuery(u: URL): string {
   return kept.length ? `?${kept.sort().join("&")}` : "";
 }
 
-type Keyed = Pick<MediaItem, "kind" | "src" | "pageUrl">;
+type Keyed = Pick<MediaItem, "kind" | "src" | "pageUrl"> & { fp?: string };
 
 /** ファイルそのものを表すキー。動画ファイルなら、合言葉の違いと http/https の違いを無視する */
 export function mediaKey(item: Keyed): string {
@@ -81,12 +81,14 @@ export class SeenMedia {
   }
   has(item: Keyed): boolean {
     const v = variantKey(item);
-    return this.keys.has(mediaKey(item)) || (!!v && this.keys.has(v));
+    return this.keys.has(mediaKey(item)) || (!!v && this.keys.has(v)) || (!!item.fp && this.keys.has(`fp:${item.fp}`));
   }
   add(item: Keyed) {
     this.keys.add(mediaKey(item));
     const v = variantKey(item);
     if (v) this.keys.add(v);
+    // 中身の指紋（URL がまったく違っても、同じファイルなら同じ）
+    if (item.fp) this.keys.add(`fp:${item.fp}`);
   }
 }
 
