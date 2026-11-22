@@ -4,6 +4,8 @@ import { mediaKey, SeenMedia, variantKey } from "./dedupe";
 import { isExcluded, isItemExcluded } from "./exclude";
 import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./render";
 import { checkMedia } from "./probe";
+import { folderListPage, hostedFile } from "./filehost";
+import { isAdUrl } from "./adblock";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
 import { mediaMime, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
@@ -174,8 +176,11 @@ async function verifyMedia(
     while (next < items.length) {
       if (Date.now() > stopAt || signal.aborted) return;
       const item = items[next++];
-      const { result, fp, refused: wasRefused } = await checkMedia(item, signal, jar);
+      const { result, fp, refused: wasRefused, duration, thumb } = await checkMedia(item, signal, jar);
       if (result === "yes") {
+        // ファイルの中に書いてある長さのほうが、ページの表示より確か
+        if (duration) item.duration = Math.round(duration * 10) / 10;
+        if (thumb) item.thumb ??= thumb;
         ok.push(item);
         prints.set(item, fp);
       } else if (result === "no" && item.kind !== "image") {
@@ -205,9 +210,11 @@ async function verifyMedia(
  *    ただしサイト共通のロゴらしい画像は渡さない（呼ぶ側で判定）。
  * どちらもなければ、画面側で動画から 1 コマ取り出してサムネイルを作る。
  */
-function fillThumbs(media: MediaItem[], linkThumb: string | undefined, ogImage: string | undefined) {
+function fillThumbs(media: MediaItem[], linkThumb: string | undefined, ogImage: string | undefined, linkDuration?: number) {
   const videos = media.filter((m) => m.kind !== "image");
   if (videos.length === 0) return;
+  // 一覧のカードに出ていた再生時間は、詳細ページの動画が 1 本だけのときに付ける（何本もあると、どれの長さかわからない）
+  if (linkDuration && videos.length === 1) videos[0].duration ??= linkDuration;
   for (const v of videos) {
     if (v.thumb) continue;
     if (linkThumb && videos.length <= 3) v.thumb = linkThumb;
@@ -465,7 +472,11 @@ export async function* crawl(
       if ((videos > 0 || promising) && (reserve[0].prio ?? 0) < 2) break;
       const c = reserve.shift()!;
       reservedByKey.delete(normalizePageUrl(c.url));
-      if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, c.zone ?? 0, false, c.from)) added++;
+      if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, c.zone ?? 0, false, c.from)) {
+        added++;
+        const q = c.duration ? queuedByUrl.get(c.url) : undefined;
+        if (q) q.duration = c.duration;
+      }
     }
     widened += added;
     return added;
@@ -513,7 +524,7 @@ export async function* crawl(
   const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
     const media: MediaItem[] = [];
     let playerHint = false;
-    const targets = frameUrls.filter((u) => !isExcluded(u, options.exclude) && !AD_FRAME_RE.test(u)).slice(0, MAX_FRAMES_PER_PAGE);
+    const targets = frameUrls.filter((u) => !isExcluded(u, options.exclude) && !AD_FRAME_RE.test(u) && !isAdUrl(u)).slice(0, MAX_FRAMES_PER_PAGE);
     await Promise.all(
       targets.map(async (frameUrl) => {
         if (Date.now() > deadline || signal.aborted) return;
@@ -592,9 +603,25 @@ export async function* crawl(
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
       return events;
     }
+    // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
+    const hosted = wantsVideo ? hostedFile(url) : null;
+    if (hosted) {
+      return emitDirect({
+        id: hosted.src,
+        kind: "video",
+        src: hosted.src,
+        pageUrl: url,
+        referer: item.from,
+        thumb: hosted.thumb ?? item.thumb,
+        duration: item.duration,
+        format: hosted.service,
+      });
+    }
     try {
       let html = "";
-      let finalUrl = url;
+      // フォルダの共有リンクは、中のファイルの一覧が HTML で読めるページに読み替える
+      const fetchUrl = folderListPage(url) ?? url;
+      let finalUrl = fetchUrl;
       /** ブラウザで開いた結果（開いていなければ null） */
       let r: Rendered | null = null;
       let renderError: string | null = null;
@@ -607,7 +634,7 @@ export async function* crawl(
       if (browserOnly.has(pageOrigin)) blocked = "自動アクセスを断るサイト";
       else {
         try {
-          const { res, url: fetched } = await safeFetch(url, { signal, jar, headers: PAGE_HEADERS });
+          const { res, url: fetched } = await safeFetch(fetchUrl, { signal, jar, headers: PAGE_HEADERS });
           finalUrl = fetched;
           // リダイレクトで除外リストのサイトに飛ばされた場合も読まない
           if (finalUrl !== url && isExcluded(finalUrl, options.exclude)) {
@@ -761,7 +788,7 @@ export async function* crawl(
       if (r) {
         // ブラウザの中で開いていた iframe の中身
         for (const f of r.frames) {
-          if (AD_FRAME_RE.test(f.url)) continue;
+          if (AD_FRAME_RE.test(f.url) || isAdUrl(f.url)) continue;
           const fx = extractFromHtml(f.html, f.url);
           const inFrame = fx.media
             .filter((m) => m.kind !== "image")
@@ -778,7 +805,7 @@ export async function* crawl(
             if (hlsHosts.has(host)) continue;
             hlsHosts.add(host);
           }
-          media.push({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, referer: n.referer, format: formatOf(n.url, n.kind) });
+          media.push({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, referer: n.referer, format: n.format ?? formatOf(n.url, n.kind) });
         }
       }
 
@@ -812,7 +839,7 @@ export async function* crawl(
       // （ロゴを付けるより、画面側で動画から本物のコマを取り出すほうがよい）
       if (ogImage) ogPages.set(ogImage, (ogPages.get(ogImage) ?? 0) + 1);
       const usableOg = ogImage && depth > 0 && (ogPages.get(ogImage) ?? 0) < 2 ? ogImage : undefined;
-      fillThumbs(pageMedia, item.thumb, usableOg);
+      fillThumbs(pageMedia, item.thumb, usableOg, item.duration);
 
       // すでに出した動画（URL の後ろの合言葉だけ違うもの・別のページで出したもの）は除く
       // 画質・形式違いのどれか 1 つでも出していたら、残りの違いも出さない
@@ -902,8 +929,12 @@ export async function* crawl(
         const within = depth < options.depth;
         if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
           enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl, link.preview);
+          const q = link.duration ? queuedByUrl.get(link.url) : undefined;
+          if (q) q.duration ??= link.duration;
         } else if (autoWiden && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
           hold(link.url, depth + 1, link.prio, link.thumb, z, finalUrl);
+          const r = link.duration ? reservedByKey.get(normalizePageUrl(link.url)) : undefined;
+          if (r) r.duration ??= link.duration;
         }
       }
     } catch (err) {

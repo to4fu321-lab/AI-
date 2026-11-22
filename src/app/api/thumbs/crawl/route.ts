@@ -115,10 +115,15 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (v.root === true) item.root = true;
     if (isHttpUrl(v.from)) item.from = v.from;
     if (isHttpUrl(v.preview)) item.preview = v.preview;
+    const duration = seconds(v.duration);
+    if (duration) item.duration = duration;
     out.push(item);
   }
   return out;
 }
+
+/** 再生時間（秒）として正しい値か */
+const seconds = (v: unknown) => (typeof v === "number" && v > 0 && v < 7 * 24 * 3600 ? Math.round(v * 10) / 10 : undefined);
 
 const shortText = (v: unknown, max: number) => (typeof v === "string" && v.length <= max ? v : undefined);
 
@@ -138,6 +143,8 @@ function parsePending(value: unknown): MediaItem[] {
     item.title = shortText(v.title, 300);
     if (typeof v.width === "number" && v.width > 0 && v.width < 100000) item.width = Math.round(v.width);
     if (typeof v.height === "number" && v.height > 0 && v.height < 100000) item.height = Math.round(v.height);
+    const duration = seconds(v.duration);
+    if (duration) item.duration = duration;
     if (v.unverified === true) item.unverified = true;
     if (v.guess === true) item.guess = true;
     item.tries = clamp(v.tries, 0, 10, 0);

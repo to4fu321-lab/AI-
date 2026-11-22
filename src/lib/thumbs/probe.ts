@@ -2,7 +2,8 @@ import "server-only";
 import type { MediaItem } from "./types";
 import { kindFromContentType, youtubeId } from "./extract";
 import { type CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
-import { looksLikeImage, looksLikeVideo, readHead } from "./sniff";
+import { looksLikeImage, looksLikePlaylist, looksLikeVideo, readHead } from "./sniff";
+import { durationFromHead, moovOffset, playlistDuration } from "./duration";
 
 /**
  * リンク切れの確認。画像・動画の先頭だけ取りに行き、本当に画像・動画が返ってくるか確かめる。
@@ -25,6 +26,10 @@ export interface Probe {
    * 本物のブラウザからなら見られることがあるので、ブラウザで確かめ直す目安にする
    */
   refused?: boolean;
+  /** 動画の再生時間（秒）。ファイルの中に書いてあれば */
+  duration?: number;
+  /** 埋め込み動画のサムネイル（動画サービスが教えてくれたとき） */
+  thumb?: string;
 }
 
 /** ファイルがない・中身が違う、とはっきりわかる返事 */
@@ -102,7 +107,11 @@ async function probe(
     // 「画像・動画」と名乗っていても中身が HTML（エラーページ）のサーバーがあるので、先頭のバイトで確かめる
     const head = await readHead(res, n);
     // 大きさがわかるときだけ指紋を作る（先頭だけだと、別の動画でも同じになることがあるため）
-    const yes = (): Probe => ({ result: "yes", fp: total ? `${total}:${digest(head)}` : undefined });
+    const yes = async (): Promise<Probe> => ({
+      result: "yes",
+      fp: total ? `${total}:${digest(head)}` : undefined,
+      duration: kind === "video" ? await readDuration(url, head, total, headers, signal, jar) : undefined,
+    });
     if (kind === "video" ? looksLikeVideo(head) : looksLikeImage(head)) return yes();
     const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
     const isText = text.startsWith("<") || text.startsWith("{");
@@ -111,6 +120,57 @@ async function probe(
     return kindFromContentType(type) === kind && !isText && head.length >= 12 ? yes() : { result: "no", refused: isText };
   } catch (err) {
     return { result: isTransient(err) ? "unknown" : "no", refused: !(err instanceof FetchBlockedError) };
+  }
+}
+
+/**
+ * 動画の再生時間を読む（読めなければ undefined。読めなくても確認の結果は変えない）。
+ * - 先頭に長さが書いてあればそれ
+ * - MP4 で長さの書いてある部分（moov）が最後にあれば、そこだけ取りに行く
+ * - HLS の目次なら、断片の長さを足す（全体の目次なら、最初の画質の目次を読む）
+ */
+async function readDuration(
+  url: string,
+  head: Uint8Array,
+  total: number | undefined,
+  baseHeaders: Record<string, string>,
+  signal: AbortSignal,
+  jar: CookieJar | undefined,
+): Promise<number | undefined> {
+  try {
+    const direct = durationFromHead(head);
+    if (direct) return direct;
+    const headers = { ...baseHeaders };
+    if (looksLikePlaylist(head)) {
+      let text = new TextDecoder().decode(head);
+      let at = url;
+      for (let level = 0; level < 2; level++) {
+        if (!/#EXT-X-ENDLIST|#EXT-X-STREAM-INF/i.test(text) || (level === 0 && total && total > head.length)) {
+          delete headers.range;
+          const { res, url: got } = await safeFetch(at, { headers, timeoutMs: 6000, signal, jar });
+          if (!res.ok) return undefined;
+          text = new TextDecoder().decode(await readHead(res, 1024 * 1024));
+          at = got;
+        }
+        const p = playlistDuration(text);
+        if (p.duration) return p.duration;
+        if (!p.variant) return undefined;
+        at = new URL(p.variant, at).toString();
+        text = "";
+      }
+      return undefined;
+    }
+    const off = total ? moovOffset(head, total) : null;
+    if (off === null || !total) return undefined;
+    headers.range = `bytes=${off}-${Math.min(total - 1, off + 4095)}`;
+    const { res } = await safeFetch(url, { headers, timeoutMs: 6000, signal, jar });
+    if (res.status !== 206) {
+      await res.body?.cancel().catch(() => {});
+      return undefined;
+    }
+    return durationFromHead(await readHead(res, 4096));
+  } catch {
+    return undefined;
   }
 }
 
@@ -139,15 +199,30 @@ export function checkEmbed(src: string, signal: AbortSignal): Promise<Probe> {
     try {
       const yt = youtubeId(src);
       const vimeo = /player\.vimeo\.com\/video\/(\d+)/.exec(src)?.[1];
+      const daily = /dailymotion\.com\/embed\/video\/([a-z0-9]+)/i.exec(src)?.[1];
+      // Vimeo の oEmbed と Dailymotion の公開 API は、再生時間とサムネイルも教えてくれる
       const target = yt
         ? `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${yt}`)}`
         : vimeo
           ? `https://vimeo.com/api/oembed.json?url=${encodeURIComponent(`https://vimeo.com/${vimeo}`)}`
-          : src;
+          : daily
+            ? `https://api.dailymotion.com/video/${daily}?fields=duration,thumbnail_480_url`
+            : src;
       const { res } = await safeFetch(target, { timeoutMs: 8000, signal, headers: { accept: "application/json,text/html,*/*;q=0.5" } });
-      await res.body?.cancel().catch(() => {});
+      let info: { duration?: unknown; thumbnail_url?: unknown; thumbnail_480_url?: unknown } = {};
+      if (res.ok && (vimeo || daily)) {
+        try {
+          info = JSON.parse(new TextDecoder().decode(await readHead(res, 64 * 1024)));
+        } catch {
+          /* 形が違えば使わない */
+        }
+      } else await res.body?.cancel().catch(() => {});
       // 埋め込み動画は URL そのものが動画を表すので、指紋は URL にする（YouTube は動画の番号）
-      if (res.ok) return { result: "yes", fp: yt ? `yt:${yt}` : vimeo ? `vimeo:${vimeo}` : `embed:${src.slice(0, 70)}` };
+      if (res.ok) {
+        const duration = typeof info.duration === "number" && info.duration > 0 ? info.duration : undefined;
+        const thumb = [info.thumbnail_url, info.thumbnail_480_url].find((t): t is string => typeof t === "string" && /^https:\/\//.test(t));
+        return { result: "yes", fp: yt ? `yt:${yt}` : vimeo ? `vimeo:${vimeo}` : `embed:${src.slice(0, 70)}`, duration, thumb };
+      }
       return { result: transientStatus(res.status) ? "unknown" : "no" };
     } catch (err) {
       return { result: isTransient(err) ? "unknown" : "no" };

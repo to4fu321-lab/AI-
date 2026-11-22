@@ -19,6 +19,8 @@ export interface MediaItem {
   format?: string;
   /** alt やタイトルなどの説明 */
   title?: string;
+  /** 動画の再生時間（秒）。ファイルの中・ページの情報・一覧のカードの表示から */
+  duration?: number;
   /** HTML に書かれていたサイズ（あれば） */
   width?: number;
   height?: number;
@@ -98,6 +100,8 @@ export interface QueueItem {
    * 1・2 のページは「動画を探すため」に読むので、画像は集めない
    */
   zone?: number;
+  /** このページへのリンクのカードに出ていた再生時間（秒）。詳細ページの動画に引き継ぐ */
+  duration?: number;
   /** 一覧ページのカードにあったプレビュー動画（この詳細ページに本編が見つからなければ、代わりに出す） */
   preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */
