@@ -855,6 +855,8 @@ export async function* crawl(
      * 動画のファイルがわかっているとき（GIF のサムネイル・一覧のプレビュー動画）は、その動画も渡す
      */
     const gated = (message: string) => {
+      // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
+      if (isTwihubListApi(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
       gatedPages++;
@@ -1146,8 +1148,7 @@ export async function* crawl(
         for (const it of listJson.items) extracted.links.push({ url: it.url, thumb: it.thumb, duration: it.duration, prio: 4 });
         if (listJson.next) extracted.pagination.push(listJson.next);
       } else {
-        const next = twihubNextFromHtml(html, finalUrl);
-        if (next) extracted.pagination.push(next);
+        extracted.pagination.push(...twihubNextFromHtml(html, finalUrl));
       }
       const media: MediaItem[] = [...extracted.media];
       const links: LinkCandidate[] = [...extracted.links];
