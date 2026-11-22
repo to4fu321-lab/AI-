@@ -139,6 +139,8 @@ URL を入れると、そのページ（と下の階層のページ）にある�
 | `src/app/api/thumbs/crawl` | 結果を NDJSON で少しずつ返す（見つかった順に画面に出る） |
 | `src/app/api/thumbs/media` | 画像・動画の中継。直リンク禁止の回避（Referer を変えて再挑戦）、Range（シーク）対応、HLS の目次の書き換え、`dl=1` で保存 |
 
+- Gofile（`gofile.io/d/…`）のフォルダは、Gofile の窓口に聞いて中身を集めます。Gofile がこのアプリのサーバーからのゲスト登録を断るときは、画面の「🔑 Gofile の設定」に Gofile の無料アカウントの「Account Token」を入れると読めます（その端末にだけ保存。サーバーの環境変数 `GOFILE_TOKEN` に入れても可）
+
 ローカルのテストサイトを読みたいときだけ `THUMBS_ALLOW_PRIVATE=1 npm run dev` で起動します（本番では設定しないこと）。
 
 ### 既知の制限

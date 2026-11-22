@@ -615,7 +615,7 @@ export async function* crawl(
     for (const id of todo) {
       if (Date.now() > deadline || signal.aborted) break;
       seenGofile.add(id);
-      const r: GofileResult = await gofileFiles(id, signal).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
+      const r: GofileResult = await gofileFiles(id, signal, options.gofileToken).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
       error ??= r.error;
       detail ??= r.detail;
       for (const f of r.files) {

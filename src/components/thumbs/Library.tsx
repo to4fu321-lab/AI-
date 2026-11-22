@@ -64,6 +64,8 @@ export function Library({
   excludes,
   onAddExclude,
   onRemoveExclude,
+  gofileToken,
+  onGofileToken,
   now,
   onRun,
   onSave,
@@ -78,6 +80,9 @@ export function Library({
   /** 追加できたら true（形式が正しくないときは false） */
   onAddExclude: (rule: string) => boolean;
   onRemoveExclude: (rule: string) => void;
+  /** Gofile のアカウントトークン（空なら未設定） */
+  gofileToken: string;
+  onGofileToken: (token: string) => void;
   /** 「〇分前」の基準時刻（描画のたびに変わらないよう親から渡す） */
   now: number;
   onRun: (url: string, settings: CrawlSettings) => void;
@@ -131,6 +136,7 @@ export function Library({
       </section>
 
       <ExcludeList excludes={excludes} onAdd={onAddExclude} onRemove={onRemoveExclude} />
+      <GofileSetting token={gofileToken} onChange={onGofileToken} />
 
       {history.length > 0 && (
         <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
@@ -184,6 +190,63 @@ export function Library({
         </details>
       )}
     </div>
+  );
+}
+
+/** Gofile のアカウントトークンの設定（Gofile がゲスト登録を断るときに使う） */
+function GofileSetting({ token, onChange }: { token: string; onChange: (token: string) => void }) {
+  const [value, setValue] = useState(token);
+  const [error, setError] = useState<string | null>(null);
+  const [prev, setPrev] = useState(token);
+  // 保存してあった値を読み込んだら、入力欄にも反映する
+  if (prev !== token) {
+    setPrev(token);
+    setValue(token);
+  }
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    const v = value.trim();
+    if (v && !/^[A-Za-z0-9]{10,128}$/.test(v)) {
+      setError("英数字だけのトークンを貼り付けてください");
+      return;
+    }
+    setError(null);
+    onChange(v);
+  };
+  return (
+    <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 font-bold text-neutral-500">
+        🔑 Gofile の設定 <span className="font-normal text-neutral-400">{token ? "トークン設定済み" : "未設定"}</span>
+        <span className="ml-auto text-neutral-400 transition group-open:rotate-90">›</span>
+      </summary>
+      <div className="border-t border-neutral-100 px-3 py-2 dark:border-neutral-800">
+        <p className="mb-2 text-[11px] leading-relaxed text-neutral-400">
+          Gofile が「ゲスト登録を断りました」と出て読めないときに使います。gofile.io に無料登録してログインし、
+          「My Profile」（プロフィール）にある「Account Token」を貼り付けてください。この端末にだけ保存され、取得のときにだけ使います。
+        </p>
+        <form onSubmit={save} className="flex gap-2">
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Account Token"
+            className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-fuchsia-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:placeholder:text-neutral-500"
+          />
+          <button type="submit" className="shrink-0 rounded-full bg-neutral-900 px-3 py-1.5 font-bold text-white dark:bg-white dark:text-neutral-900">
+            保存
+          </button>
+        </form>
+        {error && <p className="mt-1 text-[11px] text-red-500">{error}</p>}
+        {token && (
+          <button type="button" onClick={() => onChange("")} className="mt-1.5 text-[11px] text-neutral-400 underline hover:text-red-500">
+            トークンを消す
+          </button>
+        )}
+      </div>
+    </details>
   );
 }
 
