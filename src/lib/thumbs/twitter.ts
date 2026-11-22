@@ -25,6 +25,35 @@ export function tweetIdOf(raw: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * X 以外のサイトの URL の中にある、投稿の番号らしい数字（X の動画保存・ランキング系サイトの /v/番号 や ?id=番号 など）。
+ * X の投稿の番号は「作られた時刻」が入った 64 ビットの数（Snowflake）なので、
+ * 18〜19 桁（2011 年なかば以降の投稿）で、作られた時刻が明日までの範囲に収まるものだけを投稿の番号とみなす。
+ * 見つからなければ null。外れても、聞いて空だったら普通にページを読むだけ
+ */
+export function tweetIdInUrl(raw: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (tweetIdOf(raw)) return null;
+  const candidates = [...u.pathname.split("/"), ...[...u.searchParams.values()]];
+  for (const c of candidates) {
+    const m = /(?:^|\D)(\d{18,19})(?!\d)/.exec(c);
+    if (!m) continue;
+    try {
+      // 上位の桁が「作られた時刻（ミリ秒）」。右へ 22 ビット寄せる（= 2 の 22 乗で割る）と時刻が取れる
+      const at = Number(BigInt(m[1]) / BigInt(1 << 22)) + 1288834974657;
+      if (at >= 1288834974657 && at <= Date.now() + 24 * 3600 * 1000) return m[1];
+    } catch {
+      /* 数として読めなければ次へ */
+    }
+  }
+  return null;
+}
+
 /** 文章（HTML・スクリプト）の中から、投稿の番号を探す */
 export function findTweetIds(text: string, limit = 100): string[] {
   const out = new Set<string>();

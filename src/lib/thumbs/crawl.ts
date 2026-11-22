@@ -6,7 +6,7 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { tweetIdOf, tweetVideos } from "./twitter";
+import { tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
@@ -747,24 +747,31 @@ export async function* crawl(
       }
       return events;
     }
-    // X の投稿そのものなら、ページを開かず投稿の動画を出す
+    // X の投稿そのものなら、ページを開かず投稿の動画を出す。
+    // X 以外のサイトでも、URL に投稿の番号が入っていれば（動画保存・ランキング系サイトの /v/番号 など）、
+    // サイトのページは開かず、番号から動画を直接もらう（サイトが自動アクセスを断っても影響を受けない）。
+    // 番号が外れで動画が出なかったときは、そのまま普通にページを読む
     const tweet = wantsVideo ? tweetIdOf(url) : null;
-    if (tweet) {
-      seenTweets.delete(tweet);
-      const items = (await tweetMedia([{ id: tweet, thumb: item.thumb, duration: item.duration }])).filter((m) => !seenMedia.has(m));
-      for (const m of items) seenMedia.add(m);
-      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
-      pending.push(...verified.rest);
-      const ok = dropSamePrint(await settle(verified));
-      found += ok.length;
-      videos += ok.length;
-      events.push({ type: "page", url, depth, found: ok.length });
-      if (ok.length) events.push({ type: "media", items: ok });
-      else if (item.root) {
-        noted = true;
-        events.push({ type: "note", url, message: "この投稿から動画を取り出せませんでした（動画のない投稿・削除・非公開・鍵アカウントの可能性があります）" });
+    const embedded = wantsVideo && !tweet ? tweetIdInUrl(url) : null;
+    const tweetId = tweet ?? embedded;
+    if (tweetId) {
+      seenTweets.delete(tweetId);
+      const items = (await tweetMedia([{ id: tweetId, thumb: item.thumb, duration: item.duration }])).filter((m) => !seenMedia.has(m));
+      if (tweet || items.length) {
+        for (const m of items) seenMedia.add(m);
+        const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
+        pending.push(...verified.rest);
+        const ok = dropSamePrint(await settle(verified));
+        found += ok.length;
+        videos += ok.length;
+        events.push({ type: "page", url, depth, found: ok.length });
+        if (ok.length) events.push({ type: "media", items: ok });
+        else if (item.root) {
+          noted = true;
+          events.push({ type: "note", url, message: "この投稿から動画を取り出せませんでした（動画のない投稿・削除・非公開・鍵アカウントの可能性があります）" });
+        }
+        return events;
       }
-      return events;
     }
     const hosted = wantsVideo ? hostedFile(url) : null;
     if (hosted) {
