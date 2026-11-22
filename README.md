@@ -50,6 +50,49 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 パスワードを変えると、それまでの通行証（Cookie）はすべて無効になります。新しいアプリを作ったら `src/data/apps.ts` に 1 件追加するだけで載ります（公開から 14 日間は「NEW」が付きます）。
 
+## 動画オート投稿（`/autopost`）と会員制動画サイト（`/members`）
+
+動画を選ぶだけで、投稿先ごとの題名と本文を AI が作り、簡易編集から投稿まで進めるページです（自分専用）。
+
+| できること | しくみ |
+| --- | --- |
+| 簡易編集（切り出し・縦長や正方形への切り抜き／余白・大きさ変更・消音） | ブラウザの中の ffmpeg（WebAssembly）。絵を変えないときは作り直さず写すだけ |
+| 題名・本文の自動生成 | 動画から抜いたコマ数枚とメモを Claude に見せて、投稿先ごとに書き分ける |
+| 投稿先ごとの決まり（必ず入れる文・ハッシュタグ・口調・文字数） | AI に伝えたうえで、最後にプログラムで必ず守らせる（`applyRules`） |
+| ログイン情報の保存 | AES-256-GCM で暗号化して保存。鍵（`AUTOPOST_SECRET`）は Vercel にだけ置く。ブラウザには返さない |
+| おまかせ | 編集 → 置き場へ送る → 文を作る → 投稿、まで続けて進む |
+
+| 投稿先 | 投稿のしかた |
+| --- | --- |
+| YouTube | 公式 API（「Google と連携」で許可。Google のパスワードはこのサイトを通らない） |
+| X | 公式 API（開発者ポータルの 4 つの鍵） |
+| Instagram（リール） | 公式 API（プロアカウントの長期トークン） |
+| 自分の会員サイト | `/members` に公開 |
+| その他のサイト | API がないサイト向け。文を作るところまで自動で、投稿ページを開いて貼り付ける。ログイン情報は暗号化して控えておける |
+
+ID とパスワードでログインを自動操作するやり方（画面の自動操作）は、各サイトの規約で禁じられ、2 段階認証などですぐ止まるため使っていません。
+
+会員制動画サイト（`/members`）は、管理画面の「会員」で足した人だけがログインして見られます。パスワードは scrypt のハッシュで保存し、動画の URL は 2 時間で切れる期限つきです。
+
+### 動画の置き場について
+
+Vercel はサイトと API を動かす場所で、動画ファイルそのものは Vercel の関数を通せません（1 回の送受信が約 4.5MB まで）。そのため動画は Supabase Storage の非公開の置き場に、ブラウザから直接アップロードします。無料プランは 1 ファイル 50MB・合計 1GB まで。会員が増えて再生が多くなると転送量の料金がかかるので、そのときは動画配信向けのサービス（Cloudflare Stream・Mux など）へ置き場を替えるのが定石です。
+
+### 使い始める前の設定
+
+1. Supabase の SQL Editor で `supabase/autopost.sql` を実行（表 4 つと、置き場 `autopost` ができる）
+2. Vercel の環境変数に `AUTOPOST_SECRET`（16 文字以上のでたらめな文字。`openssl rand -base64 32` など）と `ANTHROPIC_API_KEY` を登録
+3. `/autopost` の「投稿先」で投稿先を足し、鍵と決まりを入れる
+
+| ファイル | 役割 |
+| --- | --- |
+| `src/lib/autopost/types.ts` | 投稿先の種類と決まり（`applyRules` で必ず入れる文・文字数を守らせる） |
+| `src/lib/autopost/crypto.ts` | 暗号化・パスワードのハッシュ・署名 |
+| `src/lib/autopost/generate.ts` | Claude で題名と本文を作る |
+| `src/lib/autopost/publish.ts` | YouTube・X・Instagram への投稿 |
+| `src/app/api/autopost/[action]/route.ts` | 管理画面の API（すべて自分専用の鍵で守る） |
+| `public/autopost/edit-worker.js`・`src/components/autopost/media.ts` | ブラウザ内の編集 |
+
 ## 動画修復アプリ（`/repair`）
 
 撮影の中断や転送の失敗で再生できなくなった MP4 / MOV を、ブラウザだけで修復するページです。iPhone の Safari から使えます（ホーム画面に追加可能）。
