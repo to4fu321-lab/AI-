@@ -37,6 +37,10 @@ export interface MediaItem {
    * 画面は、確かめてから時間がたったもの・印のないものを、確かめ直してから表示する
    */
   checked?: boolean | number;
+  /**
+   * 中身の指紋（ファイル全体の大きさ＋先頭の要約）。URL が違っても指紋が同じなら同じファイルなので、2 個目は出さない
+   */
+  fp?: string;
   /** サーバー内部用：確かめようとして時間切れになった回数 */
   tries?: number;
 }
@@ -94,6 +98,8 @@ export interface QueueItem {
    * 1・2 のページは「動画を探すため」に読むので、画像は集めない
    */
   zone?: number;
+  /** 一覧ページのカードにあったプレビュー動画（この詳細ページに本編が見つからなければ、代わりに出す） */
+  preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */
   from?: string;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
@@ -130,6 +136,10 @@ export interface CrawlState {
   home?: CrawlHome;
   /** 見つけたが、まだリンク切れかどうか確かめていない画像・動画 */
   pending?: MediaItem[];
+  /** 送った画像・動画の中身の指紋 */
+  prints?: string[];
+  /** 見つけたが出さなかった動画の数 [ファイルがない, サイトに断られた] */
+  dropped?: [number, number];
   /** サイトから渡された Cookie（ドメイン, "a=b; c=d"） */
   cookies?: [string, string][];
 }

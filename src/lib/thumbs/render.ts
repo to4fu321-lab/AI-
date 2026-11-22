@@ -109,6 +109,18 @@ const PRESS_PLAY = `(() => {
     "button[aria-label*='play' i]", "button[aria-label*='再生']", "button[title*='play' i]", "[class*='play']",
   ];
   let clicked = 0;
+  // 名前に手がかりのない独自プレーヤー：「▶」「再生」「Play」と書かれたボタンや、
+  // プレーヤーらしい部品（id・class に player / video）の中のボタンも押す
+  const labelled = Array.from(document.querySelectorAll("button, [role=button], a[href^='#'], a[href^='javascript'], div[onclick], span[onclick]"))
+    .filter((el) => /^\s*(▶|►|⏵|▷|再生|再生する|play|play video|watch)\s*$/i.test((el.innerText || el.getAttribute("aria-label") || el.title || "").trim()));
+  const inPlayer = Array.from(document.querySelectorAll("[id*='player' i] button, [class*='player' i] button, [id*='video' i] button, [class*='video' i] button"));
+  for (const el of [...labelled, ...inPlayer]) {
+    if (clicked >= 3) break;
+    const r = el.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) continue;
+    el.click();
+    clicked++;
+  }
   for (const sel of selectors) {
     let els = [];
     try { els = Array.from(document.querySelectorAll(sel)); } catch (e) { continue; }
@@ -316,6 +328,41 @@ export async function renderPage(
       /* ignore */
     }
     await page.close().catch(() => {});
+    releaseTab();
+  }
+}
+
+/**
+ * 本物のブラウザで画像・動画の URL を開き、見られるか確かめる。
+ * こちらのサーバーからの読み込みは断る（403 など）が、ブラウザなら通すサイトのため。
+ * 返事が届いたらすぐ閉じる（動画全体は読まない）
+ */
+export async function checkInBrowser(url: string, referer: string | undefined, signal: AbortSignal): Promise<boolean> {
+  await assertPublicUrl(url);
+  await acquireTab();
+  let page: import("puppeteer-core").Page | null = null;
+  try {
+    const browser = await getBrowser();
+    page = await browser.newPage();
+    const onAbort = () => void page?.close().catch(() => {});
+    signal.addEventListener("abort", onAbort, { once: true });
+    await page.setUserAgent({ userAgent: USER_AGENT });
+    await page.setExtraHTTPHeaders({ "accept-language": "ja,en;q=0.8" });
+    // 先に動画のあったページを開く（ページを開いたときに渡される Cookie がないと、動画を断るサイトがあるため）
+    if (referer) {
+      await assertPublicUrl(referer);
+      await page.goto(referer, { waitUntil: "domcontentloaded", timeout: 12000 }).catch(() => null);
+    }
+    const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 12000, referer }).catch(() => null);
+    signal.removeEventListener("abort", onAbort);
+    if (!res) return false;
+    const status = res.status();
+    const type = res.headers()["content-type"] ?? "";
+    return (status === 200 || status === 206) && !/html|json|text\//i.test(type);
+  } catch {
+    return false;
+  } finally {
+    await page?.close().catch(() => {});
     releaseTab();
   }
 }
