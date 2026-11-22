@@ -1,13 +1,18 @@
 import "server-only";
-import { extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { AD_FRAME_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
 import { isExcluded, isItemExcluded } from "./exclude";
-import { RenderDeferred, renderPage } from "./render";
-import { safeFetch } from "./safeFetch";
-import type { CrawlEvent, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
+import { RenderDeferred, renderPage, type Rendered } from "./render";
+import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
+import { looksLikeVideo, readHead } from "./sniff";
+import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
  * 入力 URL から「同じサイトの、同じ階層より下」のページを幅優先で辿り、メディアを集める。
  * 結果はページを読むたびに少しずつ yield する（画面に順次出すため）。
+ *
+ * 動画を探しているのに見つからないときは、範囲を自動で広げる：
+ *   同じサイトの別の場所 → もっと深い階層 → リンク先の別サイト
+ * （範囲の外のページからは動画だけを集め、画像は集めない）
  */
 
 const MAX_HTML_BYTES = 3 * 1024 * 1024;
@@ -21,13 +26,36 @@ export function scopeOf(url: URL): string {
   return path.endsWith("/") ? path : `${path}/`;
 }
 
-function inScope(candidate: string, origin: string, scope: string, startPath: string): boolean {
+/** 2 段目が種類を表すドメイン（example.co.jp、example.com.au など）の 2 段目 */
+const SECOND_LEVEL = new Set(["co", "ne", "or", "ac", "go", "gr", "ed", "lg", "ad", "com", "net", "org", "edu", "gov"]);
+
+/**
+ * 「同じサイト」を見分けるための名前。www.example.com・m.example.com・example.com はどれも example.com。
+ * （入力した URL が www. 付きやスマホ用のアドレスへ転送されても、同じサイトとして辿れるように）
+ */
+export function siteOf(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (/^[\d.]+$/.test(host) || host.includes(":")) return host;
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  const tld = labels[labels.length - 1];
+  const keep = tld.length === 2 && SECOND_LEVEL.has(labels[labels.length - 2]) ? 3 : 2;
+  return labels.slice(-keep).join(".");
+}
+
+function homeOf(urls: string[]): CrawlHome {
+  const last = new URL(urls[urls.length - 1]);
+  return { sites: [...new Set(urls.map((u) => siteOf(new URL(u).hostname)))], scope: scopeOf(last), path: last.pathname };
+}
+
+/** 入力した場所から見た範囲。0: 入力した階層の中 / 1: 同じサイトの別の場所 / 2: 別のサイト */
+function zoneOf(candidate: string, home: CrawlHome): number {
   try {
     const u = new URL(candidate);
-    if (u.origin !== origin) return false;
-    return u.pathname === startPath || u.pathname.startsWith(scope) || `${u.pathname}/` === scope;
+    if (!home.sites.includes(siteOf(u.hostname))) return 2;
+    return u.pathname === home.path || u.pathname.startsWith(home.scope) || `${u.pathname}/` === home.scope ? 0 : 1;
   } catch {
-    return false;
+    return 2;
   }
 }
 
@@ -107,62 +135,42 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
   }
 }
 
-async function readHead(res: Response, n: number): Promise<Uint8Array> {
-  if (!res.body) return new Uint8Array();
-  const reader = res.body.getReader();
-  const out = new Uint8Array(n);
-  let got = 0;
-  while (got < n) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const part = value.subarray(0, n - got);
-    out.set(part, got);
-    got += part.byteLength;
+/** 動画かどうかの確認結果。yes: 動画 / no: 動画ではない / unknown: 断られた・時間切れなどで確かめられなかった */
+type VideoCheck = "yes" | "no" | "unknown";
+
+/** 確認結果（同じ実行中は使い回す） */
+const videoCheckCache = new Map<string, Promise<VideoCheck>>();
+
+async function probeVideo(url: string, referer: string | undefined, signal: AbortSignal): Promise<VideoCheck> {
+  try {
+    const headers: Record<string, string> = { range: "bytes=0-375", accept: "video/*,*/*;q=0.5" };
+    if (referer) headers.referer = referer;
+    const { res } = await safeFetch(url, { headers, timeoutMs: 5000, signal });
+    if (res.status !== 200 && res.status !== 206) {
+      await res.body?.cancel().catch(() => {});
+      return res.status === 404 || res.status === 410 ? "no" : "unknown";
+    }
+    const type = res.headers.get("content-type");
+    // 「動画」と名乗っていても中身が HTML のサーバーがあるので、先頭のバイトで確かめる
+    const head = await readHead(res, 376);
+    if (looksLikeVideo(head)) return "yes";
+    const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
+    const isText = text.startsWith("<") || text.startsWith("{");
+    return kindFromContentType(type) === "video" && !isText && head.length >= 16 ? "yes" : "no";
+  } catch {
+    return "unknown";
   }
-  await reader.cancel().catch(() => {});
-  return out.subarray(0, got);
 }
-
-/** 先頭のバイトが動画の形式に見えるか（MP4/MOV・WebM・MPEG-TS・HLS） */
-function looksLikeVideo(b: Uint8Array): boolean {
-  if (b.length < 4) return false;
-  const text = new TextDecoder("latin1").decode(b);
-  if (text.slice(4, 8) === "ftyp" || /^....(moov|mdat|wide|free|skip)/.test(text)) return true; // MP4 / MOV
-  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return true; // WebM / MKV
-  if (b[0] === 0x47 && (b.length < 189 || b[188] === 0x47)) return true; // MPEG-TS
-  if (text.startsWith("#EXTM3U")) return true; // HLS
-  if (text.startsWith("OggS")) return true;
-  return false;
-}
-
-/** 動画ファイルかどうかの確認結果（同じ実行中は使い回す） */
-const videoCheckCache = new Map<string, Promise<boolean>>();
 
 /**
- * 先頭 64 バイトだけ取りに行き、本当に動画ファイルが返ってくるか確かめる。
- * 直リンク禁止のサーバーもあるので、見つけたページ（プレーヤー）を Referer として名乗る
+ * 先頭だけ取りに行き、本当に動画ファイルが返ってくるか確かめる。
+ * 直リンク禁止のサーバーもあるので、まず見つけたページ（プレーヤー）を Referer として名乗り、
+ * 断られたら Referer なしでもう一度試す
  */
-function isRealVideo(url: string, referer: string, signal: AbortSignal): Promise<boolean> {
+function checkVideo(url: string, referer: string, signal: AbortSignal): Promise<VideoCheck> {
   let check = videoCheckCache.get(url);
   if (!check) {
-    check = safeFetch(url, { headers: { range: "bytes=0-63", referer }, timeoutMs: 4000, signal })
-      .then(async ({ res, url: finalUrl }) => {
-        if (res.status !== 200 && res.status !== 206) {
-          await res.body?.cancel().catch(() => {});
-          return false;
-        }
-        const type = res.headers.get("content-type");
-        const labeled =
-          kindFromContentType(type) === "video" || ((!type || type.includes("octet-stream")) && kindFromUrl(finalUrl) === "video");
-        if (!labeled) {
-          await res.body?.cancel().catch(() => {});
-          return false;
-        }
-        // 「動画」と名乗っていても中身が HTML のサーバーがあるので、先頭のバイトも確かめる
-        const head = await readHead(res, 64);
-        return looksLikeVideo(head);
-      })
-      .catch(() => false);
+    check = probeVideo(url, referer, signal).then((first) => (first === "unknown" && !signal.aborted ? probeVideo(url, undefined, signal) : first));
     videoCheckCache.set(url, check);
     if (videoCheckCache.size > 5000) videoCheckCache.delete(videoCheckCache.keys().next().value!);
   }
@@ -176,21 +184,25 @@ const VERIFY_BUDGET_MS = 15000;
 /**
  * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
  * 一度に 16 件ずつ確かめる。
+ * サーバーから断られた・時間切れなどで確かめられなかったものは、URL が動画ファイルの形（.mp4 など）なら残す
+ * （こちらのサーバーからは断られても、手元の端末からは再生できることが多いため）
  */
 async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: number): Promise<MediaItem[]> {
-  const ok = new Map<MediaItem, boolean>();
+  const result = new Map<MediaItem, VideoCheck>();
   const pending = items.filter((m) => m.unverified).slice(0, MAX_VERIFY_PER_PAGE);
   const stopAt = Math.min(deadline, Date.now() + VERIFY_BUDGET_MS);
   for (let i = 0; i < pending.length; i += 16) {
-    // 時間が足りなくなったら、残りは確認せずに外す（確かめられないものは出さない）
     if (Date.now() > stopAt || signal.aborted) break;
     const batch = pending.slice(i, i + 16);
-    const results = await Promise.all(batch.map((m) => isRealVideo(m.src, m.referer ?? m.pageUrl, signal)));
-    batch.forEach((m, j) => ok.set(m, results[j]));
+    const results = await Promise.all(batch.map((m) => checkVideo(m.src, m.referer ?? m.pageUrl, signal)));
+    batch.forEach((m, j) => result.set(m, results[j]));
   }
-  return items
-    .filter((m) => !m.unverified || ok.get(m))
-    .map((m) => (m.unverified ? { ...m, unverified: undefined } : m));
+  const keep = (m: MediaItem) => {
+    if (!m.unverified) return true;
+    const r = result.get(m) ?? "unknown";
+    return r === "yes" || (r === "unknown" && !m.guess && kindFromUrl(m.src) === "video");
+  };
+  return items.filter(keep).map((m) => (m.unverified || m.guess ? { ...m, unverified: undefined, guess: undefined } : m));
 }
 
 /**
@@ -221,10 +233,43 @@ const CHECKPOINT_MS = 8000;
 /** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
 export const MAX_QUEUE = 5000;
 export const MAX_SEEN = 20000;
+export const MAX_RESERVE = 1500;
+
+/**
+ * 範囲を広げるときの上限。
+ * - 「下の階層」の設定より、最大で何階層ぶん先まで進むか
+ * - 1 回に足すページ数
+ * - 動画が 1 本も見つからないまま読むページ数（動画のないサイトで延々と探し続けないように）
+ */
+const WIDEN_EXTRA_DEPTH = 2;
+const WIDEN_STEP = 40;
+const WIDEN_BLIND_PAGES = 60;
+
+/** サイトが自動アクセスを断るときの返事（ブラウザで開き直すと通ることがある） */
+const BLOCKED_STATUS = new Set([401, 403, 406, 409, 429]);
+/** ブラウザで開き直しても断られたとき、何ページであきらめるか */
+const MAX_BLOCKED_TRIES = 3;
+
+/** ページを開くときに名乗る内容（ブラウザでリンクを開いたときと同じ） */
+const PAGE_HEADERS = {
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/*,video/*;q=0.8,*/*;q=0.5",
+  "upgrade-insecure-requests": "1",
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+};
 
 /** 読む順番：段（rank）の小さい順、同じ段なら優先度（prio）の大きい順 */
 function byOrder(a: QueueItem, b: QueueItem) {
   return (a.rank ?? a.depth) - (b.rank ?? b.depth) || (b.prio ?? 0) - (a.prio ?? 0);
+}
+
+function describeFailure(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  if (err.name === "TimeoutError") return "時間切れ（サイトの応答が遅すぎます）";
+  const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+  return cause?.code ? `接続できませんでした（${cause.code}）` : err.message;
 }
 
 export async function* crawl(
@@ -234,15 +279,17 @@ export async function* crawl(
   deadline: number,
   resume?: CrawlState,
 ): AsyncGenerator<CrawlEvent> {
-  const start = new URL(startUrl);
-  const origin = start.origin;
-  const scope = scopeOf(start);
-  const startPath = start.pathname;
   const wantsVideo = options.kinds !== "image";
+  /** 動画が見つからないときに、範囲を自動で広げるか（「辿らない」や「別のサイトも辿る」のときは不要） */
+  const autoWiden = wantsVideo && !options.crossSite && options.depth > 0;
+  /** 「同じサイト・同じ階層」の基準。入力したページが転送されたら、転送先に合わせ直す */
+  let home: CrawlHome = resume?.home ?? homeOf([startUrl]);
+  const jar = new CookieJar(resume?.cookies);
 
   // robots.txt はサイトごとに 1 回だけ読む
   const robots = new Map<string, Promise<(path: string) => boolean>>();
   const allowed = async (url: string) => {
+    if (!options.robots) return true;
     const u = new URL(url);
     let rule = robots.get(u.origin);
     if (!rule) {
@@ -254,15 +301,35 @@ export async function* crawl(
 
   const seenPages = new Set<string>(resume?.seen ?? [normalizePageUrl(startUrl)]);
   const seenMedia = new Set<string>();
-  const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0, rank: 0 }];
+  const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0, rank: 0, root: true }];
+  /** 範囲や階層の外だったので後回しにしたリンク */
+  const reserve: QueueItem[] = resume?.reserve ?? [];
+  const reservedByKey = new Map<string, QueueItem>(reserve.map((q) => [normalizePageUrl(q.url), q]));
   let pages = resume?.pages ?? 0;
   let paginationUsed = resume?.paginationUsed ?? 0;
+  let videos = resume?.videos ?? 0;
+  let found = resume?.found ?? 0;
+  let widened = resume?.widened ?? 0;
   let mediaCount = 0;
+  let lastRank = 0;
+
+  const snapshot = (): CrawlState => ({
+    queue: [...queue],
+    seen: [...seenPages],
+    pages,
+    paginationUsed,
+    reserve: [...reserve],
+    videos,
+    found,
+    widened,
+    home,
+    cookies: jar.toJSON(),
+  });
 
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
 
-  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string) => {
+  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string, zone = 0, root = false) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) {
@@ -279,17 +346,82 @@ export async function* crawl(
     if (seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return false;
     seenPages.add(key);
     const entry: QueueItem = { url, depth, rank, prio, thumb };
+    if (zone) entry.zone = zone;
+    if (root) entry.root = true;
     queue.push(entry);
     queuedByUrl.set(url, entry);
     return true;
+  };
+
+  /** 今は辿らないリンクを取っておく（動画が見つからないときに、ここから範囲を広げる） */
+  const hold = (url: string, depth: number, prio: number, thumb: string | undefined, zone: number) => {
+    if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return;
+    const key = normalizePageUrl(url);
+    if (seenPages.has(key)) return;
+    const prev = reservedByKey.get(key);
+    if (prev) {
+      prev.thumb ??= thumb;
+      prev.prio = Math.max(prev.prio ?? 0, prio);
+      prev.depth = Math.min(prev.depth, depth);
+      return;
+    }
+    if (reserve.length >= MAX_RESERVE) return;
+    const entry: QueueItem = { url, depth, prio, thumb, zone };
+    reserve.push(entry);
+    reservedByKey.set(key, entry);
+  };
+
+  /**
+   * 読むページがなくなったとき、取っておいたリンクから範囲を広げる。
+   * - 動画がまだ 1 本もない間：優先度の高い順に何でも（WIDEN_BLIND_PAGES ページまで）
+   * - 広げた先で動画が見つかり始めたら：サムネイル付き・動画らしいリンクだけを続ける
+   */
+  const widen = (): number => {
+    if (!autoWiden || !reserve.length) return 0;
+    if (videos === 0 ? widened >= WIDEN_BLIND_PAGES : widened === 0) return 0;
+    reserve.sort((a, b) => (b.prio ?? 0) - (a.prio ?? 0) || (a.zone ?? 0) - (b.zone ?? 0) || a.depth - b.depth);
+    const limit = videos === 0 ? Math.min(WIDEN_STEP, WIDEN_BLIND_PAGES - widened) : WIDEN_STEP;
+    // サムネイル付き・動画らしいリンクがあるうちは、それだけを足す（普通のリンクは、それでも見つからないときに）
+    const promising = (reserve[0].prio ?? 0) >= 2;
+    let added = 0;
+    while (reserve.length && added < limit) {
+      if ((videos > 0 || promising) && (reserve[0].prio ?? 0) < 2) break;
+      const c = reserve.shift()!;
+      reservedByKey.delete(normalizePageUrl(c.url));
+      if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, c.zone ?? 0)) added++;
+    }
+    widened += added;
+    return added;
   };
 
   /** og:image ごとの、それを使っていたページ数（サイト共通のロゴを見分ける） */
   const ogPages = new Map<string, number>();
   /** 時間切れで次の回に回すページ */
   const deferred: QueueItem[] = [];
+  /** 普通の読み込みを断るので、最初からブラウザで開くサイト */
+  const browserOnly = new Set<string>();
+  /** ブラウザで一度通れたサイト（もらった Cookie で普通の読み込みが通るか、次のページで試す） */
+  const browserPassed = new Set<string>();
+  let blockedTries = 0;
   let renderStarts = 0;
   let lastCheckpoint = Date.now();
+  let robotsSkipped = 0;
+  let lastError: string | null = null;
+  let noted = false;
+
+  const openInBrowser = async (target: string): Promise<Rendered> => {
+    // 1 回の実行で最初のブラウザ表示は必ず行う（次の回へ回し続けて進まなくなるのを防ぐ）
+    const startBy = renderStarts++ === 0 ? Number.POSITIVE_INFINITY : deadline;
+    const r = await renderPage(target, signal, startBy, { play: wantsVideo });
+    // 年齢確認の結果などの Cookie は、以降の普通の読み込みでも使う
+    try {
+      const site = siteOf(new URL(r.finalUrl).hostname);
+      for (const c of r.cookies) if (siteOf(c.domain) === site) jar.put(c.domain, c.name, c.value);
+    } catch {
+      /* ignore */
+    }
+    return r;
+  };
 
   /**
    * iframe で埋め込まれたページ（外部の動画プレーヤーなど）を読み、中の動画を集める。
@@ -299,7 +431,7 @@ export async function* crawl(
   const readFrames = async (frameUrls: string[], topPage: string, parent: string, level: number): Promise<{ media: MediaItem[]; playerHint: boolean }> => {
     const media: MediaItem[] = [];
     let playerHint = false;
-    const targets = frameUrls.filter((u) => !isExcluded(u, options.exclude)).slice(0, MAX_FRAMES_PER_PAGE);
+    const targets = frameUrls.filter((u) => !isExcluded(u, options.exclude) && !AD_FRAME_RE.test(u)).slice(0, MAX_FRAMES_PER_PAGE);
     await Promise.all(
       targets.map(async (frameUrl) => {
         if (Date.now() > deadline || signal.aborted) return;
@@ -307,11 +439,14 @@ export async function* crawl(
           if (!(await allowed(frameUrl))) return;
           const { res, url: frameFinal } = await safeFetch(frameUrl, {
             signal,
+            jar,
             timeoutMs: 10000,
-            headers: { accept: "text/html,*/*;q=0.5", referer: parent },
+            headers: { ...PAGE_HEADERS, "sec-fetch-dest": "iframe", "sec-fetch-site": "cross-site", referer: parent },
           });
           if (!res.ok || !/html/i.test(res.headers.get("content-type") ?? "")) {
             await res.body?.cancel().catch(() => {});
+            // プレーヤーらしい iframe が読めなかったら、ブラウザで開いて確かめる目安にする
+            if (!res.ok) playerHint = true;
             return;
           }
           const ex = extractFromHtml(await readLimited(res, MAX_FRAME_BYTES), frameFinal);
@@ -320,8 +455,9 @@ export async function* crawl(
             .filter((m) => m.kind !== "image")
             .map((m) => ({ ...m, pageUrl: topPage, referer: m.referer ?? frameFinal }));
           fillThumbs(found, undefined, ex.ogImage);
-          if (found.length === 0 && level < MAX_FRAME_LEVEL && ex.frames.length) {
-            const nested = await readFrames(ex.frames, topPage, frameFinal, level + 1);
+          const inner = ex.redirect && !found.length ? [ex.redirect, ...ex.frames] : ex.frames;
+          if (found.length === 0 && level < MAX_FRAME_LEVEL && inner.length) {
+            const nested = await readFrames(inner, topPage, frameFinal, level + 1);
             found = nested.media;
             playerHint ||= nested.playerHint;
           }
@@ -337,62 +473,128 @@ export async function* crawl(
   const visit = async (item: QueueItem): Promise<CrawlEvent[]> => {
     const { url, depth } = item;
     const rank = item.rank ?? depth;
+    const zone = options.crossSite ? 0 : (item.zone ?? 0);
     const events: CrawlEvent[] = [];
+    const fail = (message: string) => {
+      lastError = message;
+      events.push({ type: "error", url, message });
+      return events;
+    };
     if (isExcluded(url, options.exclude)) {
       events.push({ type: "skip", url, reason: "除外リストのサイトです" });
       return events;
     }
-    if (!(await allowed(url))) {
+    // 入力したページ自体は、人がブラウザで開くのと同じなので常に読む。リンクを辿る先は robots.txt を守る
+    if (!item.root && !(await allowed(url))) {
+      robotsSkipped++;
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
       return events;
     }
     try {
-      const { res, url: finalUrl } = await safeFetch(url, {
-        signal,
-        headers: { accept: "text/html,application/xhtml+xml,image/*,video/*;q=0.8,*/*;q=0.5" },
-      });
-      if (!res.ok) {
-        await res.body?.cancel();
-        events.push({ type: "error", url, message: `HTTP ${res.status}` });
-        return events;
+      let html = "";
+      let finalUrl = url;
+      /** ブラウザで開いた結果（開いていなければ null） */
+      let r: Rendered | null = null;
+      let renderError: string | null = null;
+      /** 普通の読み込みが断られた理由 */
+      let blocked: string | null = null;
+      const pageOrigin = new URL(url).origin;
+
+      if (browserOnly.has(pageOrigin)) blocked = "自動アクセスを断るサイト";
+      else {
+        try {
+          const { res, url: fetched } = await safeFetch(url, { signal, jar, headers: PAGE_HEADERS });
+          finalUrl = fetched;
+          // リダイレクトで除外リストのサイトに飛ばされた場合も読まない
+          if (finalUrl !== url && isExcluded(finalUrl, options.exclude)) {
+            await res.body?.cancel();
+            events.push({ type: "skip", url, reason: "除外リストのサイトです" });
+            return events;
+          }
+          if (!res.ok) {
+            await res.body?.cancel();
+            if (!BLOCKED_STATUS.has(res.status) && res.status < 500) return fail(`HTTP ${res.status}`);
+            blocked = `HTTP ${res.status}`;
+          } else {
+            const type = res.headers.get("content-type");
+            // 入力がメディアの直 URL だった場合は、それ自体を 1 件として返す
+            const directKind = kindFromContentType(type) ?? (type?.includes("html") ? null : kindFromUrl(finalUrl));
+            if (directKind) {
+              await res.body?.cancel();
+              if ((directKind === "image" && (zone > 0 || options.kinds === "video")) || (directKind === "video" && !wantsVideo)) {
+                events.push({ type: "page", url: finalUrl, depth, found: 0 });
+                return events;
+              }
+              const direct: MediaItem = {
+                id: finalUrl,
+                kind: directKind,
+                src: finalUrl,
+                pageUrl: finalUrl,
+                thumb: directKind === "video" ? item.thumb : undefined,
+                format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
+              };
+              if (seenMedia.has(direct.id)) {
+                events.push({ type: "page", url: finalUrl, depth, found: 0 });
+                return events;
+              }
+              seenMedia.add(direct.id);
+              found++;
+              if (directKind === "video") videos++;
+              events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
+              return events;
+            }
+            if (type && !/html|xml|text\/plain/i.test(type)) {
+              await res.body?.cancel();
+              events.push({ type: "skip", url, reason: `ページではありません（${type.split(";")[0]}）` });
+              return events;
+            }
+            html = await readLimited(res, MAX_HTML_BYTES);
+          }
+        } catch (err) {
+          if (signal.aborted || err instanceof FetchBlockedError) throw err;
+          // 接続を切られた・時間切れなど。入力したページなら、ブラウザで開き直してみる
+          if (!item.root) throw err;
+          blocked = describeFailure(err);
+        }
       }
-      // リダイレクトで除外リストのサイトに飛ばされた場合も読まない
-      if (finalUrl !== url && isExcluded(finalUrl, options.exclude)) {
-        await res.body?.cancel();
-        events.push({ type: "skip", url, reason: "除外リストのサイトです" });
-        return events;
+
+      if (blocked) {
+        // 普通の読み込みを断られたので、本物のブラウザで開き直す（ブラウザなら通すサイトが多い）
+        const known = browserOnly.has(pageOrigin) || browserPassed.has(pageOrigin);
+        if (options.render === "off" || (!item.root && !known && blockedTries >= MAX_BLOCKED_TRIES)) {
+          return fail(`サイトが自動アクセスを断っています（${blocked}）`);
+        }
+        try {
+          r = await openInBrowser(finalUrl);
+        } catch (err) {
+          if (signal.aborted) return events;
+          if (err instanceof RenderDeferred) {
+            deferred.push(item);
+            return events;
+          }
+          if (!known) blockedTries++;
+          return fail(`サイトが自動アクセスを断っています（${blocked}。ブラウザでも開けませんでした）`);
+        }
+        if (r.status >= 400) {
+          if (!known) blockedTries++;
+          return fail(`サイトが自動アクセスを断っています（HTTP ${r.status}。ブラウザで開いても同じでした）`);
+        }
+        // 一度通れたら、次のページはもらった Cookie で普通に読んでみる。それでも断られるサイトは、以降ずっとブラウザで開く
+        if (browserPassed.has(pageOrigin)) browserOnly.add(pageOrigin);
+        else browserPassed.add(pageOrigin);
+        html = r.html;
+        finalUrl = r.finalUrl;
       }
-      const type = res.headers.get("content-type");
-      // 入力がメディアの直 URL だった場合は、それ自体を 1 件として返す
-      const directKind = kindFromContentType(type) ?? (type?.includes("html") ? null : kindFromUrl(finalUrl));
-      if (directKind) {
-        await res.body?.cancel();
-        const direct: MediaItem = {
-          id: finalUrl,
-          kind: directKind,
-          src: finalUrl,
-          pageUrl: finalUrl,
-          thumb: directKind === "video" ? item.thumb : undefined,
-          format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
-        };
-        events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
-        return events;
-      }
-      if (type && !/html|xml|text\/plain/i.test(type)) {
-        await res.body?.cancel();
-        events.push({ type: "skip", url, reason: `ページではありません（${type.split(";")[0]}）` });
-        return events;
-      }
-      const html = await readLimited(res, MAX_HTML_BYTES);
+
       const extracted = extractFromHtml(html, finalUrl);
       const media: MediaItem[] = [...extracted.media];
       const links: LinkCandidate[] = [...extracted.links];
       const pagination = new Set(extracted.pagination);
       let ogImage = extracted.ogImage;
 
-      // iframe の中の動画プレーヤー（動画を探すときだけ）
+      // iframe の中の動画プレーヤー（動画を探すときだけ。ブラウザで開いたときは、ブラウザが開いた中身を後で使う）
       let frameHint = false;
-      if (wantsVideo && extracted.frames.length) {
+      if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
         media.push(...fr.media);
         frameHint = fr.playerHint;
@@ -401,38 +603,26 @@ export async function* crawl(
       // ブラウザで開き直すか
       // - JavaScript で描くページで、画像やリンクがほとんど取れなかったとき
       // - 動画プレーヤーがありそうなのに、確かな動画が 1 本も見つからないとき（再生ボタンを押して探す）
+      // - 入力したページから何も取れなかったとき・年齢確認などの入口ページのとき（「はい」を押して先へ進む）
       const trustedVideos = media.filter((m) => m.kind !== "image" && !m.unverified).length;
-      const looksEmpty = extracted.media.length <= 2 || extracted.links.length < 3;
+      const poor = extracted.media.length <= 2 || extracted.links.length < 3;
+      const entrance =
+        !!item.root && trustedVideos === 0 && (extracted.links.length < 3 || (extracted.gate && extracted.links.length < 15));
       const wantRender =
-        options.render === "always" ||
-        (options.render === "auto" &&
-          ((extracted.clientRendered && looksEmpty) || (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0)));
-      let rendered = false;
-      let renderError: string | null = null;
+        !r &&
+        (options.render === "always" ||
+          (options.render === "auto" &&
+            ((extracted.clientRendered && poor) ||
+              (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0) ||
+              (entrance && !extracted.redirect))));
       if (wantRender) {
         try {
-          // 1 回の実行で最初のブラウザ表示は必ず行う（次の回へ回し続けて進まなくなるのを防ぐ）
-          const startBy = renderStarts++ === 0 ? Number.POSITIVE_INFINITY : deadline;
-          const r = await renderPage(finalUrl, signal, startBy, { play: wantsVideo });
+          r = await openInBrowser(finalUrl);
           const again = extractFromHtml(r.html, r.finalUrl);
           media.push(...again.media);
           links.push(...again.links);
           for (const p of again.pagination) pagination.add(p);
           ogImage ??= again.ogImage;
-          // ブラウザの中で開いていた iframe の中身
-          for (const f of r.frames) {
-            const fx = extractFromHtml(f.html, f.url);
-            const found = fx.media
-              .filter((m) => m.kind !== "image")
-              .map((m) => ({ ...m, pageUrl: finalUrl, referer: m.referer ?? f.url }));
-            fillThumbs(found, undefined, fx.ogImage);
-            media.push(...found);
-          }
-          // 表示・再生の間にブラウザが受け取った画像・動画
-          for (const n of r.network) {
-            media.push({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, referer: n.referer, format: formatOf(n.url, n.kind) });
-          }
-          rendered = true;
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
@@ -442,6 +632,37 @@ export async function* crawl(
           }
           renderError = err instanceof Error ? err.message : String(err);
         }
+      }
+      if (r) {
+        // ブラウザの中で開いていた iframe の中身
+        for (const f of r.frames) {
+          if (AD_FRAME_RE.test(f.url)) continue;
+          const fx = extractFromHtml(f.html, f.url);
+          const inFrame = fx.media
+            .filter((m) => m.kind !== "image")
+            .map((m) => ({ ...m, pageUrl: finalUrl, referer: m.referer ?? f.url }));
+          fillThumbs(inFrame, undefined, fx.ogImage);
+          media.push(...inFrame);
+        }
+        // 表示・再生の間にブラウザが受け取った画像・動画。
+        // 配信形式（HLS）は「全体の目次 → 画質ごとの目次」の順に読まれるので、同じ配信元からは最初の 1 つだけ使う
+        const hlsHosts = new Set<string>();
+        for (const n of r.network) {
+          if (extensionOf(n.url) === "m3u8") {
+            const host = new URL(n.url).host;
+            if (hlsHosts.has(host)) continue;
+            hlsHosts.add(host);
+          }
+          media.push({ id: n.url, kind: n.kind, src: n.url, pageUrl: finalUrl, referer: n.referer, format: formatOf(n.url, n.kind) });
+        }
+      }
+
+      // 入力したページが転送されていたら（www. 付き・スマホ用アドレス・年齢確認の先など）、そこを「同じサイト」の基準にする
+      if (item.root) {
+        const sites = new Set(home.sites);
+        for (const u of [finalUrl, r?.finalUrl]) if (u) sites.add(siteOf(new URL(u).hostname));
+        const base = new URL(finalUrl);
+        home = { sites: [...sites], scope: scopeOf(base), path: base.pathname };
       }
 
       // 同じページ内の重複をまとめる（サムネイルなどの情報は補い合う）
@@ -454,6 +675,7 @@ export async function* crawl(
           prev.title ??= m.title;
           prev.referer ??= m.referer;
           if (!m.unverified) prev.unverified = undefined;
+          if (!m.guess) prev.guess = undefined;
         }
       }
       const pageMedia = [...merged.values()];
@@ -469,61 +691,93 @@ export async function* crawl(
         seenMedia.add(m.id);
         candidates.push(m);
       }
-      // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める
+      // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める。
+      // 入力した階層の外のページは動画を探すために読んでいるので、画像は集めない
+      const videoOnly = options.kinds === "video" || zone > 0;
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
-        .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
+        .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       const fresh = await verifyVideos(wanted, signal, deadline);
+      found += fresh.length;
+      videos += fresh.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
       if (fresh.length) events.push({ type: "media", items: fresh });
-      if (depth === 0) {
+      if (item.root) {
         const message = renderError
           ? `ブラウザで開けませんでした（${renderError.slice(0, 80)}）`
-          : rendered && pageMedia.length <= 2
-            ? "ブラウザで開いても画像が見つかりませんでした（ログインや年齢確認が必要なページかもしれません）"
-            : !rendered && pageMedia.length <= 2 && extracted.clientRendered
+          : r && pageMedia.length <= 2 && links.length < 3 && !pageMedia.some((m) => m.kind !== "image")
+            ? "ブラウザで開いても画像・動画が見つかりませんでした（ログインが必要なページかもしれません）"
+            : !r && pageMedia.length <= 2 && extracted.clientRendered
               ? "このページは画像を JavaScript で後から読み込むため、取れない画像があります（「ブラウザで開く」を試してください）"
               : null;
-        if (message) events.push({ type: "note", url: finalUrl, message });
+        if (message) {
+          noted = true;
+          events.push({ type: "note", url: finalUrl, message });
+        }
+      }
+
+      // 自動で別のページへ飛ばすだけのページ（<meta refresh>・location.href = …）は、行き先を同じ階層として読む。
+      // ブラウザで開いたときは、ブラウザがもう移動している
+      if (extracted.redirect && !r && poor) {
+        const z = item.root || options.crossSite ? 0 : zoneOf(extracted.redirect, home);
+        enqueue(extracted.redirect, depth, rank, 9, item.thumb, z, item.root);
       }
 
       // ページ送り（2ページ目・次へ）は同じ階層として辿る。読む順番は 1 段後ろ
       // → 「このページの詳細ページ」と「次の一覧ページ」が同じ段に並び、詳細ページが先に読まれる
-      for (const link of pagination) {
-        if (paginationUsed >= options.maxPagination) break;
-        if (enqueue(link, depth, rank + 1, 1)) paginationUsed++;
+      if (zone < 2) {
+        for (const link of pagination) {
+          if (paginationUsed >= options.maxPagination) break;
+          if (enqueue(link, depth, rank + 1, 1, undefined, zone)) paginationUsed++;
+        }
       }
       // 普通のリンクは 1 階層下として辿る（サムネイル付き・動画らしいリンクが先）
-      if (depth < options.depth) {
-        for (const link of links) {
-          if (pagination.has(link.url)) continue;
-          if (!options.crossSite && !inScope(link.url, origin, scope, startPath)) continue;
-          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb);
+      // - 入力した階層の中：そのまま辿る
+      // - 同じサイトの別の場所：動画を探していて、サムネイル付き・動画らしいリンクなら辿る（一覧 → 詳細ページ）
+      // - それ以外（別のサイト・階層の上限より先）：取っておき、動画が見つからないときに広げる
+      for (const link of links) {
+        if (pagination.has(link.url)) continue;
+        const z = options.crossSite ? 0 : zoneOf(link.url, home);
+        const within = depth < options.depth;
+        if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
+          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z);
+        } else if (autoWiden && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
+          hold(link.url, depth + 1, link.prio, link.thumb, z);
         }
       }
     } catch (err) {
       if (signal.aborted) return events;
-      const message =
-        err instanceof Error
-          ? err.name === "TimeoutError"
-            ? "時間切れ（サイトの応答が遅すぎます）"
-            : err.message
-          : String(err);
-      events.push({ type: "error", url, message });
+      return fail(describeFailure(err));
     }
     return events;
   };
 
   // 段の小さい順・優先度の高い順に、最大 CONCURRENCY 件ずつ並列に読む
-  while (queue.length && !signal.aborted && pages < options.maxPages) {
+  while (!signal.aborted && pages < options.maxPages) {
+    if (!queue.length) {
+      // 読むページがなくなった。動画が見つかっていなければ、取っておいたリンクから範囲を広げる
+      const first = widened === 0;
+      if (!widen()) break;
+      if (first) {
+        noted = true;
+        yield {
+          type: "note",
+          url: startUrl,
+          message: "入力した範囲には動画が見つからなかったので、リンク先（同じサイトの別の場所・別のサイト）まで広げて探しています",
+        };
+      }
+    }
     if (Date.now() > deadline) {
       // 時間切れ。続きを画面に預けて、もう一度呼んでもらう
-      yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
+      yield { type: "continue", state: snapshot() };
       return;
     }
     queue.sort(byOrder);
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
-    for (const b of batch) queuedByUrl.delete(b.url);
+    for (const b of batch) {
+      queuedByUrl.delete(b.url);
+      lastRank = Math.max(lastRank, b.rank ?? b.depth);
+    }
     pages += batch.length;
     const results = await Promise.all(batch.map((p) => visit(p)));
     for (const events of results) {
@@ -533,18 +787,36 @@ export async function* crawl(
       }
     }
     // 数秒おきに途中経過を記録として送る（画面を閉じたり止めたりしても、ここから再開できる）
-    if (Date.now() - lastCheckpoint > CHECKPOINT_MS && queue.length) {
+    if (Date.now() - lastCheckpoint > CHECKPOINT_MS && (queue.length || reserve.length)) {
       lastCheckpoint = Date.now();
-      yield { type: "checkpoint", state: { queue: [...queue], seen: [...seenPages], pages, paginationUsed } };
+      yield { type: "checkpoint", state: snapshot() };
     }
     if (deferred.length) {
       // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
       pages -= deferred.length;
       for (const d of deferred) queuedByUrl.set(d.url, d);
       queue.unshift(...deferred.splice(0));
-      yield { type: "continue", state: { queue, seen: [...seenPages], pages, paginationUsed } };
+      yield { type: "continue", state: snapshot() };
       return;
     }
+  }
+
+  // 取れなかったときは、わかる範囲で理由を伝える
+  if (!signal.aborted) {
+    const noVideos = wantsVideo && videos === 0;
+    const message =
+      robotsSkipped && (found === 0 || noVideos)
+        ? `robots.txt（サイトが出している「自動で読まないで」という指定）で禁止されているページが ${robotsSkipped} 件あり、読みませんでした。「robots.txt を守る」を外すと読めます`
+        : found === 0
+          ? lastError
+            ? `ページを読めませんでした：${lastError}`
+            : noted
+              ? null
+              : "画像・動画が見つかりませんでした（ログインが必要なサイトか、このアプリでは読めない方式かもしれません）"
+          : noVideos && widened > 0
+            ? "リンク先まで広げて探しましたが、動画は見つかりませんでした"
+            : null;
+    if (message) yield { type: "note", url: startUrl, message };
   }
   const truncated = queue.length > 0;
   yield {
@@ -552,6 +824,6 @@ export async function* crawl(
     pages,
     media: mediaCount,
     truncated,
-    state: truncated ? { queue, seen: [...seenPages], pages, paginationUsed } : undefined,
+    state: truncated ? snapshot() : undefined,
   };
 }

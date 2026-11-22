@@ -27,6 +27,11 @@ export interface MediaItem {
    * 本当に動画ファイルか、サーバーが一覧に出す前に確かめる。画面には送らない
    */
   unverified?: boolean;
+  /**
+   * 拡張子もなく、キー名（"video_url" など）だけで動画かもしれないと見たもの。
+   * 動画だと確かめられなかったときは一覧に出さない。画面には送らない
+   */
+  guess?: boolean;
 }
 
 /** /api/thumbs/crawl が 1 行ずつ返すイベント（NDJSON）。 */
@@ -60,6 +65,8 @@ export interface CrawlOptions {
   kinds: "all" | "video" | "image";
   /** 除外リスト（取得しないサイト・URL。exclude.ts の書き方） */
   exclude: string[];
+  /** robots.txt（サイトが出している「自動で読まないでほしい場所」の指定）を守るか。入力したページ自体は常に読む */
+  robots: boolean;
 }
 
 export interface QueueItem {
@@ -75,6 +82,23 @@ export interface QueueItem {
   prio?: number;
   /** このページへのリンクに付いていたサムネイル（詳細ページの動画のサムネイルに引き継ぐ） */
   thumb?: string;
+  /**
+   * 入力した場所から見た範囲。0（省略）: 入力した階層の中 / 1: 同じサイトの別の場所 / 2: 別のサイト。
+   * 1・2 のページは「動画を探すため」に読むので、画像は集めない
+   */
+  zone?: number;
+  /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
+  root?: boolean;
+}
+
+/** 「同じサイト・同じ階層」の基準（入力したページが転送された先に合わせる） */
+export interface CrawlHome {
+  /** 同じサイトとみなすドメイン（example.com なら www. や m. も同じ扱い） */
+  sites: string[];
+  /** 入力した階層（/gallery/ など） */
+  scope: string;
+  /** 入力したページのパス */
+  path: string;
 }
 
 /**
@@ -86,4 +110,15 @@ export interface CrawlState {
   seen: string[];
   pages: number;
   paginationUsed: number;
+  /** 範囲や階層の外だったので後回しにしたリンク。動画が見つからないときに、ここから範囲を広げる */
+  reserve?: QueueItem[];
+  /** ここまでに見つけた動画の数 */
+  videos?: number;
+  /** ここまでに見つけた画像・動画の数 */
+  found?: number;
+  /** 範囲を広げて読んだページ数（0 ならまだ広げていない） */
+  widened?: number;
+  home?: CrawlHome;
+  /** サイトから渡された Cookie（ドメイン, "a=b; c=d"） */
+  cookies?: [string, string][];
 }

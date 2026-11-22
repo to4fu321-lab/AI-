@@ -12,6 +12,8 @@ export interface CrawlSettings {
   render?: "auto" | "always" | "off";
   /** 古い保存データにはないので省略可（なければ all） */
   kinds?: "all" | "video" | "image";
+  /** robots.txt を守るか。古い保存データにはないので省略可（なければ守る） */
+  robots?: boolean;
 }
 
 export interface HistoryEntry {
@@ -39,6 +41,7 @@ export function describeSettings(s: CrawlSettings): string {
   if (s.crossSite) parts.push("他サイトも");
   if (s.render === "always") parts.push("ブラウザ");
   if (s.render === "off") parts.push("ブラウザなし");
+  if (s.robots === false) parts.push("robots.txt 無視");
   return parts.join("・");
 }
 
