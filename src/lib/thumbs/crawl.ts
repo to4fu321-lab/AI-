@@ -180,6 +180,12 @@ async function verifyMedia(
     while (next < items.length) {
       if (Date.now() > stopAt || signal.aborted) return;
       const item = items[next++];
+      // Gofile のファイルは、Gofile の窓口が「ある」と答えたもの。1 つずつ確かめに行くと、
+      // Gofile の配信サーバーに「聞きすぎ」（429）で止められるので、確かめずに出す
+      if (item.format === "Gofile" && item.cookie) {
+        ok.push(item);
+        continue;
+      }
       const { result, fp, refused: wasRefused, duration, thumb } = await checkMedia(item, signal, jar);
       if (result === "yes") {
         // ファイルの中に書いてある長さのほうが、ページの表示より確か
@@ -1068,7 +1074,7 @@ export async function* crawl(
         !lite &&
         (options.render === "always" ||
           (options.render === "auto" &&
-            ((extracted.clientRendered && poor) ||
+            ((extracted.clientRendered && poor && !elsewhere) ||
               (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0 && !elsewhere && (!sessionRead || !!item.root)) ||
               (entrance && !extracted.redirect) ||
               guessRender)));
