@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 /** 取得の設定（登録サイトと履歴に一緒に保存して、同じ条件で取り直せるようにする） */
 export interface CrawlSettings {
   depth: number;
@@ -56,6 +58,9 @@ function timeAgo(at: number, now: number): string {
 export function Library({
   sites,
   history,
+  excludes,
+  onAddExclude,
+  onRemoveExclude,
   now,
   onRun,
   onSave,
@@ -65,6 +70,11 @@ export function Library({
 }: {
   sites: SavedSite[];
   history: HistoryEntry[];
+  /** 除外リスト（取得しないサイト・URL） */
+  excludes: string[];
+  /** 追加できたら true（形式が正しくないときは false） */
+  onAddExclude: (rule: string) => boolean;
+  onRemoveExclude: (rule: string) => void;
   /** 「〇分前」の基準時刻（描画のたびに変わらないよう親から渡す） */
   now: number;
   onRun: (url: string, settings: CrawlSettings) => void;
@@ -116,6 +126,8 @@ export function Library({
           </ul>
         )}
       </section>
+
+      <ExcludeList excludes={excludes} onAdd={onAddExclude} onRemove={onRemoveExclude} />
 
       {history.length > 0 && (
         <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
@@ -169,5 +181,67 @@ export function Library({
         </details>
       )}
     </div>
+  );
+}
+
+function ExcludeList({
+  excludes,
+  onAdd,
+  onRemove,
+}: {
+  excludes: string[];
+  onAdd: (rule: string) => boolean;
+  onRemove: (rule: string) => void;
+}) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const add = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (onAdd(value)) {
+      setValue("");
+      setError(null);
+    } else {
+      setError("サイト名か URL を入れてください（例: example.com / example.com/ads/）");
+    }
+  };
+  return (
+    <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 font-bold text-neutral-500">
+        🚫 除外リスト <span className="font-normal text-neutral-400">{excludes.length}件</span>
+        <span className="ml-auto text-neutral-400 transition group-open:rotate-90">›</span>
+      </summary>
+      <div className="border-t border-neutral-100 px-3 py-2 dark:border-neutral-800">
+        <p className="mb-2 text-[11px] text-neutral-400">
+          ここにあるサイトは辿らず、画像・動画も一覧に出しません。サイト名だけ（example.com）ならサイト全体、URL の一部（example.com/ads/）ならそこから下だけ。
+        </p>
+        <form onSubmit={add} className="flex gap-2">
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            inputMode="url"
+            autoCapitalize="off"
+            autoCorrect="off"
+            placeholder="example.com"
+            className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-[16px] outline-none focus:border-fuchsia-400 dark:border-neutral-700 dark:bg-neutral-950"
+          />
+          <button type="submit" className="shrink-0 rounded-full bg-neutral-900 px-3 py-1.5 font-bold text-white dark:bg-white dark:text-neutral-900">
+            追加
+          </button>
+        </form>
+        {error && <p className="mt-1 text-[11px] text-red-500">{error}</p>}
+        {excludes.length > 0 && (
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {excludes.map((rule) => (
+              <li key={rule} className="flex items-center rounded-full bg-neutral-100 pl-2.5 dark:bg-neutral-800">
+                <span className="max-w-[14rem] truncate">{rule}</span>
+                <button type="button" onClick={() => onRemove(rule)} aria-label={`${rule} を除外リストから外す`} className="px-2 py-1 text-neutral-400 hover:text-red-500">
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
   );
 }

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
+import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
@@ -84,8 +85,14 @@ export function ThumbsApp() {
   const [formError, setFormError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [sites, setSites] = useState<SavedSite[]>([]);
+  const [excludes, setExcludes] = useState<string[]>([]);
   const [now, setNow] = useState(0);
   const controllers = useRef(new Map<string, AbortController>());
+  // 取得中にリストを変えても、次の通信から最新のリストが使われるよう ref にも持つ
+  const excludesRef = useRef<string[]>([]);
+  useEffect(() => {
+    excludesRef.current = excludes;
+  }, [excludes]);
   const loaded = useRef(false);
 
   // --- 前回の一覧を復元 / 保存（ブラウザの localStorage） ---
@@ -99,6 +106,7 @@ export function ThumbsApp() {
       const library = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "null");
       if (Array.isArray(library?.history)) setHistory(library.history);
       if (Array.isArray(library?.sites)) setSites(library.sites.slice(0, MAX_SITES));
+      if (Array.isArray(library?.excludes)) setExcludes(library.excludes.slice(0, MAX_EXCLUDES));
     } catch {
       /* ignore */
     }
@@ -122,11 +130,11 @@ export function ThumbsApp() {
   useEffect(() => {
     if (!loaded.current) return;
     try {
-      localStorage.setItem(LIBRARY_KEY, JSON.stringify({ history, sites }));
+      localStorage.setItem(LIBRARY_KEY, JSON.stringify({ history, sites, excludes }));
     } catch {
       /* ignore */
     }
-  }, [history, sites]);
+  }, [history, sites, excludes]);
 
   /** 履歴の先頭に入れる（同じ URL があれば置き換え） */
   const recordHistory = useCallback((entry: HistoryEntry) => {
@@ -171,7 +179,7 @@ export function ThumbsApp() {
             const res = await fetch("/api/thumbs/crawl", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ url, ...settings, resume: current }),
+              body: JSON.stringify({ url, ...settings, exclude: excludesRef.current, resume: current }),
               signal: controller.signal,
             });
             if (res.status >= 500) throw new ServerError(res.status);
@@ -209,7 +217,9 @@ export function ThumbsApp() {
                   foundCount += event.items.length;
                   setItems((list) => {
                     const known = new Set(list.map((i) => i.id));
-                    const fresh = event.items.filter((i) => !known.has(i.id)).map((i) => ({ ...i, jobId: id }));
+                    const fresh = event.items
+                      .filter((i) => !known.has(i.id) && !isItemExcluded(i, excludesRef.current))
+                      .map((i) => ({ ...i, jobId: id }));
                     return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
                   });
                 }
@@ -275,6 +285,16 @@ export function ThumbsApp() {
     setInput("");
     for (const u of valid) void startJob(u);
   };
+
+  /** 除外リストに追加し、すでに一覧にある該当の画像・動画も消す */
+  const addExclude = useCallback((input: string): boolean => {
+    const rule = normalizeRule(input);
+    if (!rule) return false;
+    setExcludes((list) => (list.includes(rule) ? list : [...list, rule].slice(-MAX_EXCLUDES)));
+    setItems((list) => list.filter((i) => !isItemExcluded(i, [rule])));
+    return true;
+  }, []);
+  const removeExclude = (rule: string) => setExcludes((list) => list.filter((r) => r !== rule));
 
   const saveSite = (url: string, settings: CrawlSettings) => {
     setSites((list) => (list.some((s) => s.url === url) || list.length >= MAX_SITES ? list : [...list, { url, settings }]));
@@ -423,6 +443,9 @@ export function ThumbsApp() {
         <Library
           sites={sites}
           history={history}
+          excludes={excludes}
+          onAddExclude={addExclude}
+          onRemoveExclude={removeExclude}
           now={now}
           onRun={(url, settings) => void startJob(url, settings)}
           onSave={saveSite}
@@ -495,6 +518,11 @@ export function ThumbsApp() {
           index={viewer}
           onIndex={setViewer}
           onClose={() => setViewer(null)}
+          onExclude={(host) => {
+            if (!confirm(`${host} を除外リストに追加して、一覧から消しますか？\n（次からこのサイトは取得しません）`)) return;
+            setViewer(null);
+            addExclude(host);
+          }}
         />
       )}
     </div>
@@ -695,11 +723,13 @@ function Viewer({
   index,
   onIndex,
   onClose,
+  onExclude,
 }: {
   items: Item[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
+  onExclude: (host: string) => void;
 }) {
   const item = items[index];
   const [useProxy, setUseProxy] = useState(false);
@@ -845,6 +875,14 @@ function Viewer({
               {item.kind === "embed" ? "埋め込み動画は保存できません" : "配信形式（HLS）のため保存できません"}
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => onExclude(hostOf(item.pageUrl))}
+            className="rounded-full bg-white/10 px-3 py-2.5 text-sm font-semibold"
+            title="このサイトを除外リストに追加"
+          >
+            🚫 除外
+          </button>
           <a
             href={item.pageUrl}
             target="_blank"

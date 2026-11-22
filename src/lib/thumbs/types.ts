@@ -53,6 +53,8 @@ export interface CrawlOptions {
   render: "auto" | "always" | "off";
   /** 取得する種類：すべて / 動画のみ / 画像のみ */
   kinds: "all" | "video" | "image";
+  /** 除外リスト（取得しないサイト・URL。exclude.ts の書き方） */
+  exclude: string[];
 }
 
 export interface QueueItem {
