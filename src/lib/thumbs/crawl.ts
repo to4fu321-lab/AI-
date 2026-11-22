@@ -7,7 +7,8 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
+import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
+import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch, thumbsLog } from "./safeFetch";
@@ -153,6 +154,21 @@ export const MAX_PRINTS = 5000;
 const MAX_GUESS_RENDERS = 3;
 /** 動画プレーヤーを置く部品らしい名前（id・class） */
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
+/** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
+const GATED_STREAK = 3;
+/**
+ * 「同じ種類のページ」の見分け方：サイト＋最後の部分を除いたパス
+ * （/posts/abc → /posts。一覧の /posts?type=… や /gated/?page=2 とは別の種類として扱う）
+ */
+function gateKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    return `${u.origin}/${parts.slice(0, -1).join("/")}|${parts.length}`;
+  } catch {
+    return url;
+  }
+}
 /** 断られた動画をブラウザで確かめ直す数の上限（1 回の実行あたり） */
 const MAX_BROWSER_CHECKS = 10;
 /** 時間切れ・通信の失敗で確かめられなかったものを、何回まで確かめ直すか */
@@ -573,6 +589,8 @@ export async function* crawl(
   let robotsSkipped = 0;
   /** 確認を求められた・断られたので読めなかったページの数 */
   let gatedPages = 0;
+  /** サイト・ページの種類ごとの、続けて確認を求められた回数 */
+  const gatedStreak = new Map<string, number>();
   let lastError: string | null = null;
   let noted = false;
 
@@ -799,10 +817,15 @@ export async function* crawl(
       events.push({ type: "error", url, message });
       return events;
     };
-    /** 確認を求められた・断られたページ。読めなかったことを伝え、画面に「サイトを開く」ボタンを出してもらう */
+    /**
+     * 確認を求められた・断られたページ。読めなかったことを伝え、画面に「サイトを開く」ボタンを出してもらう。
+     * 動画のファイルがわかっているとき（GIF のサムネイル・一覧のプレビュー動画）は、その動画も渡す
+     */
     const gated = (message: string) => {
-      events.push({ type: "gated", url, thumb: item.thumb });
+      const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
+      events.push({ type: "gated", url, thumb: item.thumb, duration: item.duration, video: video || undefined });
       gatedPages++;
+      gatedStreak.set(gateKey(url), (gatedStreak.get(gateKey(url)) ?? 0) + 1);
       return fail(message);
     };
     /**
@@ -837,6 +860,9 @@ export async function* crawl(
       return events;
     }
     const lite = stuckCount === 1;
+    // 同じサイトの同じ種類のページ（/posts/… など）が続けて確認を求められている。読みに行っても同じなので、
+    // 読まずに「サイトで開く」に並べる（サイトに何度も読みに行かないように）
+    if (!item.root && (gatedStreak.get(gateKey(url)) ?? 0) >= GATED_STREAK) return gated("サイトが「人間かどうかの確認」を求めているため、このページは読めません");
     // 入力したページ自体は、人がブラウザで開くのと同じなので常に読む。リンクを辿る先は robots.txt を守る
     if (!item.root && !(await allowed(url))) {
       robotsSkipped++;
@@ -965,7 +991,7 @@ export async function* crawl(
               };
               return emitDirect(direct);
             }
-            if (type && !/html|xml|text\/plain/i.test(type)) {
+            if (type && !/html|xml|text\/plain/i.test(type) && !(isTwihubListApi(finalUrl) && /json/i.test(type))) {
               // ページでも、画像・動画と名乗ってもいない（「ダウンロード用」など）。先頭の中身が動画・画像なら、それ自体を 1 件にする
               const mime = mediaMime(await readHead(res, 512));
               const sniffed = mime?.startsWith("image/") ? "image" : mime ? "video" : null;
@@ -1043,7 +1069,16 @@ export async function* crawl(
         finalUrl = r.finalUrl;
       }
 
-      const extracted = extractFromHtml(html, finalUrl);
+      // twihub の一覧の続き（JSON）は、投稿ページへのリンクとさらに続きの URL にする
+      const listJson = isTwihubListApi(finalUrl) ? twihubFromJson(html, finalUrl) : null;
+      const extracted = extractFromHtml(listJson ? "" : html, finalUrl);
+      if (listJson) {
+        for (const it of listJson.items) extracted.links.push({ url: it.url, thumb: it.thumb, duration: it.duration, prio: 4 });
+        if (listJson.next) extracted.pagination.push(listJson.next);
+      } else {
+        const next = twihubNextFromHtml(html, finalUrl);
+        if (next) extracted.pagination.push(next);
+      }
       const media: MediaItem[] = [...extracted.media];
       const links: LinkCandidate[] = [...extracted.links];
       const pagination = new Set(extracted.pagination);
@@ -1221,6 +1256,7 @@ export async function* crawl(
       found += fresh.length;
       videos += fresh.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });
+      gatedStreak.delete(gateKey(url));
       if (fresh.length) events.push({ type: "media", items: fresh });
       if (item.root) {
         const message = renderError
