@@ -210,6 +210,26 @@ async function readInSession(session: Session, origin: string, url: string, sign
   }
   // さっき確認を通れなかったばかりなら、待たずにあきらめる（1 ページごとに何十秒も待たないように）
   if (session.stuckUntil && Date.now() < session.stuckUntil) return null;
+  // 開いているページの中で、サイトの「人間か確かめる」仕組み（裏で動くスクリプト）が済むのを待つ。
+  // ページを移動すると確認がやり直しになるので、まずは移動せずに、数秒おきに読み込みを試す
+  const waitUntil = Date.now() + 45000;
+  let polls = 0;
+  while (Date.now() < waitUntil && !signal.aborted && !page.isClosed()) {
+    await sleep(2500);
+    polls++;
+    const again = await fetchFromPage(page, url).catch(() => null);
+    if (again && again.status >= 200 && again.status < 400 && !isChallengeHtml(again.html) && again.html.length > 200) {
+      session.at = Date.now();
+      thumbsLog(`session 待って通過 ${Date.now() - began}ms（${polls} 回目）html=${again.html.length} ${url.slice(0, 100)}`);
+      try {
+        if (new URL(again.finalUrl).origin !== origin) return null;
+      } catch {
+        return null;
+      }
+      return again;
+    }
+  }
+  thumbsLog(`session 待っても通らず ${Date.now() - began}ms（${polls} 回）${url.slice(0, 100)}`);
   // ページ自体を移動して、確認を通り抜ける。確認には 20〜30 秒かかることがあるので、40 秒まで待つ
   const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
   const until = Date.now() + 40000;
