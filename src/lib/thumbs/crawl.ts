@@ -7,8 +7,9 @@ import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./ren
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
-import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
-import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
+import { gifVideoFromThumb, tweetGofileIds, tweetIdInUrl, tweetIdOf, tweetShareUrls, tweetVideos } from "./twitter";
+import { pixeldrainList, pixeldrainListId } from "./pixeldrain";
+import { isTwihubList, isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
@@ -158,6 +159,15 @@ const MAX_GUESS_RENDERS = 3;
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
+/** ファイル置き場（Gofile・pixeldrain・Google ドライブなど）に置かれたものか（「ファイル置き場を探す」で集めるもの） */
+function isFileHostItem(m: MediaItem): boolean {
+  return /^(?:Gofile|pixeldrain|Google ドライブ|Dropbox|OneDrive|Box)$/.test(m.format ?? "") || /^https:\/\/files\.catbox\.moe\//.test(m.src);
+}
+/** Gofile 探しで、1 つのサイトから辿るページ数の上限 */
+const HUNT_PAGES_PER_SITE = 12;
+/** Gofile 探しで辿らないサイト（道具・解析・辞書・検索など。Gofile の動画を紹介する場所ではない） */
+const HUNT_SKIP_RE =
+  /(?:^|\.)(?:github\.com|gitlab\.com|pypi\.org|npmjs\.com|stackoverflow\.com|virustotal\.com|pulsedive\.com|criminalip\.io|urlscan\.io|hybrid-analysis\.com|scribd\.com|wikipedia\.org|facebook\.com|google\.com|microsoft\.com|bing\.com|yahoo\.co\.jp|yahoo\.com|naver\.com|seznam\.cz|sogou\.com|qq\.com|tencent\.com|csdn\.net|alternativeto\.net|any\.run|docsbot\.ai|yarnpkg\.com|gopeed\.com|chromewebstore\.google\.com|apple\.com|trustpilot\.com|scamadviser\.com|similarweb\.com)$/i;
 /** Linkex のサイト（入力したのがこれらのときだけ、Linkex の一覧を読む） */
 const LINKEX_SITE_RE = /(?:^|\.)(?:linkex-douga\.com|l2e\.click|linkex\.io)$/i;
 /**
@@ -605,10 +615,12 @@ export async function* crawl(
   let lastCheckpoint = Date.now();
   let robotsSkipped = 0;
   /** 確認を求められた・断られたので読めなかったページの数 */
+  /** Gofile 探し：サイトごとに、辿ることにしたページの数 */
+  const huntPerSite = new Map<string, number>();
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
-  /** まとめサイトに載っていたが、Gofile では消されていた・空だったフォルダの数 */
+  /** リンクはあったが、Gofile では消されていた・空だったフォルダの数 */
   let goneGofile = 0;
   /** アプリでしか再生できない動画（Linkex）として並べた数 */
   let appOnly = 0;
@@ -725,6 +737,13 @@ export async function* crawl(
    * X の投稿の番号から動画を取り出す（1 ページあたり 80 件まで、同時に 8 件ずつ）。
    * 元ページは X の投稿（「元ページ」で投稿を開ける）。一覧のカードのサムネイル・再生時間は、もらえなかったときの代わり
    */
+  /** 見つけた Gofile の共有フォルダを、読む列に入れる（1 ページに何十個あっても、全部読めるように） */
+  const queueGofile = (ids: string[], from?: string) => {
+    for (const id of ids) {
+      if (seenGofile.has(id)) continue;
+      enqueue(`https://gofile.io/d/${id}`, 0, lastRank + 1, 5, undefined, 0, false, from);
+    }
+  };
   const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
     if (xBroken()) return [];
     const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
@@ -735,6 +754,9 @@ export async function* crawl(
       while (next < todo.length && Date.now() < deadline && !signal.aborted) {
         const ref = todo[next++];
         const videos = await tweetVideos(ref.id, signal, getJson).catch(() => []);
+        // 投稿の文に Gofile のリンクがあれば、そのフォルダも読む（Gofile を紹介している投稿）
+        queueGofile(tweetGofileIds(ref.id), `https://x.com/i/status/${ref.id}`);
+        for (const share of tweetShareUrls(ref.id)) enqueue(share, 0, lastRank + 1, 5, undefined, 0, false, `https://x.com/i/status/${ref.id}`);
         for (const v of videos) {
           out.push({
             id: v.src,
@@ -843,6 +865,7 @@ export async function* crawl(
      */
     const thumbOnly = (open: string = url, label?: string) => {
       if (!wantsVideo || !item.thumb || item.root || events.some((e) => e.type === "gated")) return;
+      if (options.gofileOnly && !label) return;
       const video = gifVideoFromThumb(item.thumb) || item.preview;
       const title = label ? (item.title ? `${item.title}（${label}）` : label) : item.title;
       events.push({ type: "gated", url: open, thumb: item.thumb, title, duration: item.duration, video: video || undefined });
@@ -860,7 +883,8 @@ export async function* crawl(
      */
     const gated = (message: string) => {
       // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
-      if (isTwihubListApi(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
+      if (options.gofileOnly || (options.hunt && !item.thumb)) return fail(message);
+      if (isTwihubListApi(url) || isTwihubList(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
       gatedPages++;
@@ -988,7 +1012,7 @@ export async function* crawl(
       if (ok.length) events.push({ type: "media", items: ok });
       // まとめサイトのカードから来た Gofile のフォルダが、消されていた・空だった：サムネイルだけ並べる（タップでまとめサイトのページ）
       if (!ok.length && !verified.rest.length && !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "")) {
-        if (item.thumb && !item.root) goneGofile++;
+        goneGofile++;
         thumbOnly(item.from ?? url, /見つかりません/.test(g.error ?? "") ? "Gofile で削除済み" : "Gofile に中身なし");
       }
       if (!ok.length && !verified.rest.length && item.root) {
@@ -1016,7 +1040,8 @@ export async function* crawl(
       // X 以外のサイトのリンクは、まず行き先を見る（動画ファイルへ転送されることが多い）。駄目なら X に聞く
       const ref = { id: tweetId, thumb: item.thumb, duration: item.duration };
       const got = embedded ? await playLinkMedia([{ ...ref, url }], item.from ?? url) : await tweetMedia([ref]);
-      const items = got.filter((m) => !seenMedia.has(m));
+      // Gofile 探しでは、投稿の動画は出さない（投稿の文にある Gofile のリンクだけを読む）
+      const items = got.filter((m) => !seenMedia.has(m) && !options.gofileOnly);
       if (tweet || items.length) {
         for (const m of items) seenMedia.add(m);
         const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
@@ -1026,12 +1051,31 @@ export async function* crawl(
         videos += ok.length;
         events.push({ type: "page", url, depth, found: ok.length });
         if (ok.length) events.push({ type: "media", items: ok });
-        else if (item.root) {
+        else if (item.root && !tweetGofileIds(tweetId).length) {
           noted = true;
           events.push({ type: "note", url, message: "この投稿から動画を取り出せませんでした（動画のない投稿・削除・非公開・鍵アカウントの可能性があります）" });
         }
         return events;
       }
+    }
+    // pixeldrain のリスト（アルバム）：公開の窓口から中のファイルをもらう
+    const pd = pixeldrainListId(url);
+    if (pd) {
+      const files = await pixeldrainList(pd, signal).catch(() => []);
+      const items = files
+        .map((f): MediaItem => ({ id: f.src, kind: f.kind, src: f.src, pageUrl: url, thumb: f.kind === "video" ? f.thumb : undefined, title: f.name || undefined, format: "pixeldrain" }))
+        .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true))
+        .filter((m) => !seenMedia.has(m));
+      for (const m of items) seenMedia.add(m);
+      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 15000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(await settle(verified));
+      found += ok.length;
+      videos += ok.filter((m) => m.kind !== "image").length;
+      events.push({ type: "page", url, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      else if (item.root && !verified.rest.length) events.push({ type: "note", url, message: "この pixeldrain のリストに画像・動画はありませんでした（削除された可能性があります）" });
+      return events;
     }
     const hosted = wantsVideo ? hostedFile(url) : null;
     if (hosted) {
@@ -1194,7 +1238,11 @@ export async function* crawl(
       // 「動画を再生」のリンク（twihub の /r/v/番号 など）：行き先が動画ファイルならそれを使い、駄目なら投稿の番号で X に聞く
       if (wantsVideo && extracted.playLinks.length) media.push(...(await playLinkMedia(extracted.playLinks, finalUrl)));
       // Gofile の共有フォルダへのリンクは、API で中身をもらう
-      if (extracted.gofile.length) media.push(...(await gofileMedia(extracted.gofile, !lite)).media);
+      if (extracted.gofile.length) {
+        media.push(...(await gofileMedia(extracted.gofile, !lite)).media);
+        // 1 ページで聞くのは 10 フォルダまで。残りは列に入れて、順に読む
+        queueGofile(extracted.gofile, finalUrl);
+      }
       let frameHint = false;
       if (wantsVideo && extracted.frames.length && !r) {
         const fr = await readFrames(extracted.frames, finalUrl, finalUrl, 1);
@@ -1220,7 +1268,7 @@ export async function* crawl(
       // ブラウザの中から読んだページも対象外（1 枚 30 秒かかるので、速く読める利点がなくなる）
       const elsewhere = extracted.gofile.length > 0 || extracted.tweets.length > 0 || extracted.playLinks.length > 0;
       const guessRender =
-        wantsVideo && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
+        wantsVideo && !options.gofileOnly && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
         !lite &&
@@ -1243,7 +1291,10 @@ export async function* crawl(
           for (const p of again.pagination) pagination.add(p);
           ogImage ??= again.ogImage;
           if (wantsVideo) media.push(...(await tweetMedia([...again.tweets, ...r.tweets.map((id) => ({ id }))])));
-          if (again.gofile.length) media.push(...(await gofileMedia(again.gofile)).media);
+          if (again.gofile.length) {
+            media.push(...(await gofileMedia(again.gofile)).media);
+            queueGofile(again.gofile, r.finalUrl);
+          }
         } catch (err) {
           if (signal.aborted) return events;
           if (err instanceof RenderDeferred) {
@@ -1336,6 +1387,8 @@ export async function* crawl(
       const videoOnly = options.kinds === "video" || zone > 0;
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
+        // Gofile 探しでは、Gofile の中身だけを集める
+        .filter((m) => !options.gofileOnly || isFileHostItem(m))
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
@@ -1393,7 +1446,10 @@ export async function* crawl(
       if (zone < 2) {
         for (const link of pagination) {
           if (paginationUsed >= options.maxPagination) break;
-          if (enqueue(link, depth, rank + 1, 1, undefined, zone)) paginationUsed++;
+          // twihub のほかのランキングの一覧は、投稿ページより先に読む（投稿ページで「人間かどうかの確認」を
+          // 何度か求められると、その後は一覧ページまで断られるようになるため）
+          const first = isTwihubList(link);
+          if (enqueue(link, depth, first ? rank : rank + 1, first ? 9 : 1, undefined, zone)) paginationUsed++;
         }
       }
       // 普通のリンクは 1 階層下として辿る（サムネイル付き・動画らしいリンクが先）
@@ -1425,6 +1481,31 @@ export async function* crawl(
       const listing = wantsVideo && (promising >= LISTING_MIN_LINKS || pageHasVideo);
       for (const link of links) {
         if (pagination.has(link.url)) continue;
+        // Gofile 探し：検索結果のページからは、結果のサイトへのリンクだけを辿る（検索サイト自身のメニューは辿らない）。
+        // 結果のサイトの中では、Gofile と書かれたリンク・サムネイル付きのリンクだけを辿る
+        if (options.hunt) {
+          let own = false;
+          try {
+            // （5ちゃんねるのスレッド検索は、結果のスレッドも同じサイトにあるので、スレッドは辿る）
+            own = home.sites.includes(siteOf(new URL(link.url).hostname)) && !/\/read\.cgi\//.test(link.url);
+          } catch {
+            continue;
+          }
+          // （結果のサイトの中では、動画・Gofile らしいリンクだけ。アイコン付きの利用者ページ・通報・削除依頼などは辿らない）
+          if (item.root ? own : link.prio !== 2 && link.prio < 4) continue;
+          if (/\/(?:abuse|delete|report|user|users|login|signup)(?:\/|$)/i.test(link.url)) continue;
+          // 道具・解析・辞書などのサイトは、Gofile の動画を紹介する場所ではないので辿らない。1 つのサイトに深入りもしない
+          let site = "";
+          try {
+            site = siteOf(new URL(link.url).hostname);
+          } catch {
+            continue;
+          }
+          if (HUNT_SKIP_RE.test(site)) continue;
+          const used = huntPerSite.get(site) ?? 0;
+          if (used >= HUNT_PAGES_PER_SITE && !gofileId(link.url)) continue;
+          if (!seenPages.has(normalizePageUrl(link.url))) huntPerSite.set(site, used + 1);
+        }
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
         const key = normalizePageUrl(link.url);
         // ふつうのリンクで、一覧・詳細ページにあった（またはメニューとして一度後回しにした）ものはメニューとみなす
@@ -1492,6 +1573,7 @@ export async function* crawl(
       }
       queue.splice(i, 1);
       queuedByUrl.delete(q.url);
+      if (options.gofileOnly || (options.hunt && !q.thumb)) continue;
       const video = (q.thumb && gifVideoFromThumb(q.thumb)) || q.preview;
       gatedPages++;
       yield { type: "gated", url: q.url, thumb: q.thumb, title: q.title, duration: q.duration, video: video || undefined };
@@ -1601,12 +1683,12 @@ export async function* crawl(
       ? `Linkex の動画 ${appOnly} 本を並べました。Linkex は Web では再生できない仕組み（アプリでのみ再生）のため、タップで Linkex を開きます`
       : null;
     const thumbNote = goneGofile
-      ? "Gofile で削除済み・中身なしのフォルダは、サムネイルだけ並べています（Gofile は消されるのが早いため、新しいリンクでも見られないことがあります）"
+      ? `Gofile のリンクのうち ${goneGofile} 件は、Gofile で削除済み・中身なしでした（サムネイルがわかるものは、サムネイルだけ並べています。Gofile は消されるのが早いため、新しいリンクでも見られないことがあります）`
       : thumbOnlyPages
       ? `動画を取り出せなかったページ ${thumbOnlyPages} 件は、サムネイルだけ並べました。タップするとそのページを開きます`
       : null;
     const finalNote =
-      appNote ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;

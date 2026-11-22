@@ -168,6 +168,37 @@ function fromFx(json: Record<string, unknown>, id: string): TweetVideo[] {
 
 type Fetcher = (url: string, signal: AbortSignal) => Promise<Record<string, unknown> | null>;
 
+/** 投稿の文に書かれていた Gofile の共有フォルダの番号（投稿の番号ごと） */
+const gofileInTweet = new Map<string, string[]>();
+
+const sharesInTweet = new Map<string, string[]>();
+const SHARE_RE =
+  /https?:\/\/(?:www\.)?(?:pixeldrain\.com\/[ul]\/\w{6,20}|drive\.google\.com\/file\/d\/[\w-]{20,}|drive\.google\.com\/drive\/folders\/[\w-]{20,}|dropbox\.com\/(?:s|scl\/fi)\/[^\s"'<>\\]{6,200}|files\.catbox\.moe\/\w+\.\w{2,4})/gi;
+
+/** その投稿の文にあった、ファイル置き場の共有リンク（tweetVideos で読んだ後に使う） */
+export function tweetShareUrls(id: string): string[] {
+  return sharesInTweet.get(id) ?? [];
+}
+
+/** その投稿の文にあった Gofile の共有フォルダの番号（tweetVideos で読んだ後に使う） */
+export function tweetGofileIds(id: string): string[] {
+  return gofileInTweet.get(id) ?? [];
+}
+
+/** 返事の中（リンクの本当の行き先・引用された投稿も含む）から、Gofile の共有フォルダの番号を拾う */
+function rememberGofile(id: string, json: unknown) {
+  const ids = new Set<string>();
+  for (const m of JSON.stringify(json).replace(/\\\//g, "/").matchAll(/gofile\.io\/d\/([\w-]{4,40})/g)) ids.add(m[1]);
+  // ほかのファイル置き場（pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンクも覚える
+  const shares = new Set<string>();
+  for (const m of JSON.stringify(json).replace(/\\\//g, "/").matchAll(SHARE_RE)) shares.add(m[0]);
+  if (shares.size) sharesInTweet.set(id, [...shares].slice(0, 20));
+  if (sharesInTweet.size > 5000) sharesInTweet.delete(sharesInTweet.keys().next().value!);
+  if (!ids.size) return;
+  gofileInTweet.set(id, [...ids].slice(0, 20));
+  if (gofileInTweet.size > 5000) gofileInTweet.delete(gofileInTweet.keys().next().value!);
+}
+
 /** 結果を覚えておく（同じサーバーが動いている間。見つからなかったものも覚える） */
 const cache = new Map<string, Promise<TweetVideo[]>>();
 
@@ -183,6 +214,7 @@ export function tweetVideos(id: string, signal: AbortSignal, getJson: Fetcher): 
         `https://cdn.syndication.twimg.com/tweet-result?id=${id}&lang=ja&token=${syndicationToken(id)}`,
         signal,
       ).catch(() => null);
+      if (syn) rememberGofile(id, syn);
       if (syn && syn.__typename !== "TweetTombstone") {
         const found = fromSyndication(syn, id);
         if (found.length) return found;
@@ -191,6 +223,7 @@ export function tweetVideos(id: string, signal: AbortSignal, getJson: Fetcher): 
       }
       // 年齢制限などで埋め込み用の窓口が答えないときは、もう 1 つの公開サービスに聞く
       const fx = await getJson(`https://api.fxtwitter.com/i/status/${id}`, signal).catch(() => null);
+      if (fx) rememberGofile(id, fx);
       return fx ? fromFx(fx, id) : [];
     })();
     cache.set(id, job);

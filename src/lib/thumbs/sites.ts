@@ -16,6 +16,16 @@ function originOf(url: string): string {
   }
 }
 
+/** twihub のランキングの一覧ページ（/posts?type=…）か */
+export function isTwihubList(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return TWIHUB.test(u.origin) && u.pathname === "/posts";
+  } catch {
+    return false;
+  }
+}
+
 /** twihub の一覧の続きを返す窓口か */
 export function isTwihubListApi(url: string): boolean {
   try {

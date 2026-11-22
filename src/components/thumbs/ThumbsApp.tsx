@@ -153,6 +153,8 @@ export function ThumbsApp() {
   const [render, setRender] = useState<"auto" | "always" | "off">("auto");
   const [kinds, setKinds] = useState<"all" | "video" | "image">("all");
   const [robots, setRobots] = useState(true);
+  /** 「Gofile をネット全体から探す」のキーワード（空でもよい） */
+  const [huntWord, setHuntWord] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -446,6 +448,76 @@ export function ThumbsApp() {
     for (const u of valid) void startJob(u);
   };
 
+  /**
+   * Gofile をネット全体から探す。検索（Yahoo! のリアルタイム検索＝X の投稿、Web 検索、Bing）の結果のページから出発して、
+   * 結果のサイト（X の投稿・掲示板・まとめ）を辿り、Gofile のリンクの中身を集める
+   */
+  const startHunt = () => {
+    const kw = huntWord.trim().slice(0, 60);
+    const q = (s: string) => encodeURIComponent(s.trim());
+    const urls = [
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile.io ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile ${kw || "配布"}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`gofile ${kw || "動画"} 掲示板`)}`,
+      `https://www.bing.com/search?q=${q(`"gofile.io/d/" ${kw}`)}`,
+      // 5ちゃんねるのスレッド検索・はてなブックマークの本文検索（掲示板・まとめ記事を探す）
+      `https://find.5ch.net/search?q=${q(`gofile ${kw}`)}`,
+      `https://b.hatena.ne.jp/q/${q(`gofile ${kw}`)}?target=text&sort=recent`,
+      // 海外の検索（韓国・チェコ・中国。日本の検索に出ない掲示板・まとめが見つかることがある）
+      `https://search.naver.com/search.naver?query=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://search.seznam.cz/?q=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://www.sogou.com/web?query=${q(`"gofile.io/d/" ${kw}`)}`,
+      // Gofile 以外のファイル置き場（pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンク
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`pixeldrain.com ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"pixeldrain.com/u/" ${kw}`)}`,
+      `https://www.bing.com/search?q=${q(`"pixeldrain.com/l/" ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`drive.google.com 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"drive.google.com/file/d/" 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`dropbox.com 動画 ${kw}`)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`"files.catbox.moe" mp4 ${kw}`)}`,
+    ];
+    const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true, gofileOnly: true };
+    setFormError(null);
+    runHunt(urls, settings);
+  };
+
+  /**
+   * 任意のワードで、動画をネット全体から探す。検索（Web・X の投稿・動画検索・掲示板・まとめ）の結果のページから出発して、
+   * 結果のサイトを辿り、見つけた動画を全部集める
+   */
+  const startVideoHunt = () => {
+    const kw = huntWord.trim().slice(0, 60);
+    if (!kw) {
+      setFormError("動画を探すときは、キーワードを入れてください");
+      return;
+    }
+    const q = (s: string) => encodeURIComponent(s.trim());
+    const urls = [
+      `https://search.yahoo.co.jp/search?p=${q(`${kw} 動画`)}`,
+      `https://search.yahoo.co.jp/realtime/search?p=${q(`${kw} 動画`)}`,
+      `https://www.bing.com/search?q=${q(`${kw} 動画`)}`,
+      `https://search.yahoo.co.jp/video/search?p=${q(kw)}`,
+      `https://search.yahoo.co.jp/search?p=${q(`${kw} 動画 まとめ`)}`,
+      `https://b.hatena.ne.jp/q/${q(`${kw} 動画`)}?target=text&sort=recent`,
+      `https://find.5ch.net/search?q=${q(kw)}`,
+      `https://search.naver.com/search.naver?query=${q(`${kw} 動画`)}`,
+    ];
+    const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true };
+    setFormError(null);
+    runHunt(urls, settings);
+  };
+
+  /** 検索をいくつも始める */
+  const runHunt = (urls: string[], settings: CrawlSettings) => {
+    // 一度に全部は走らせない（サーバーと Gofile に負担がかかる）。3 つずつ、終わったら次を始める
+    let next = 0;
+    const worker = async () => {
+      while (next < urls.length) await startJob(urls[next++], settings);
+    };
+    for (let i = 0; i < 3; i++) void worker();
+  };
+
   /** 除外リストに追加し、すでに一覧にある該当の画像・動画も消す */
   const addExclude = useCallback((input: string): boolean => {
     const rule = normalizeRule(input);
@@ -615,6 +687,32 @@ export function ThumbsApp() {
             </button>
           </form>
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={huntWord}
+              onChange={(e) => setHuntWord(e.target.value)}
+              placeholder="探すワード"
+              aria-label="探すワード"
+              className="min-w-0 flex-1 basis-full sm:basis-0 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-sky-400 focus:bg-white dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500"
+            />
+            <button
+              type="button"
+              onClick={startHunt}
+              title="X の投稿・掲示板・まとめサイトを検索して、動画の置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンクの中身を集めます（時間がかかります）"
+              className="shrink-0 rounded-full bg-sky-500 px-4 py-2 text-xs font-bold text-white shadow-sm active:scale-95"
+            >
+              🔎 ファイル置き場を探す
+            </button>
+            <button
+              type="button"
+              onClick={startVideoHunt}
+              title="キーワードで検索して、結果のサイト（動画サイト・X の投稿・掲示板・まとめ）を辿り、見つけた動画を集めます（数分かかります）"
+              className="shrink-0 rounded-full bg-emerald-500 px-4 py-2 text-xs font-bold text-white shadow-sm active:scale-95"
+            >
+              🔎 動画を探す
+            </button>
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類
@@ -872,6 +970,33 @@ function EmptyState() {
   );
 }
 
+/** Gofile 探しの取得の名前（検索の URL のままだと読みにくいので） */
+function huntLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? decodeURIComponent(u.pathname.replace(/^\/q\//, ""))).replace(/"/g, "");
+    const h = u.hostname;
+    const where = u.pathname.startsWith("/realtime")
+      ? "X の投稿"
+      : h.includes("bing")
+        ? "Web（Bing）"
+        : h.includes("5ch")
+          ? "5ちゃんねる"
+          : h.includes("hatena")
+            ? "はてなブックマーク"
+            : h.includes("naver")
+              ? "Web（Naver）"
+              : h.includes("seznam")
+                ? "Web（Seznam）"
+                : h.includes("sogou")
+                  ? "Web（Sogou）"
+                  : "Web（Yahoo!）";
+    return `🔎 ${where}：${word}`;
+  } catch {
+    return url;
+  }
+}
+
 function JobRow({
   job,
   onResume,
@@ -921,7 +1046,7 @@ function JobRow({
         }`}
       />
       <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left" title="この URL の結果だけ表示">
-        <span className="block truncate font-semibold">{job.url.replace(/^https?:\/\//, "")}</span>
+        <span className="block truncate font-semibold">{job.settings?.hunt ? huntLabel(job.url) : job.url.replace(/^https?:\/\//, "")}</span>
         <span className={`block truncate ${job.status === "error" ? "text-red-500" : "text-neutral-400"}`}>
           {status} ・ {found}件{trouble && job.status !== "error" ? ` ・ ${trouble}` : ""}
         </span>
