@@ -859,7 +859,7 @@ export async function* crawl(
      */
     const thumbOnly = (open: string = url, label?: string) => {
       if (!wantsVideo || !item.thumb || item.root || events.some((e) => e.type === "gated")) return;
-      if (options.hunt && !label) return;
+      if (options.gofileOnly && !label) return;
       const video = gifVideoFromThumb(item.thumb) || item.preview;
       const title = label ? (item.title ? `${item.title}（${label}）` : label) : item.title;
       events.push({ type: "gated", url: open, thumb: item.thumb, title, duration: item.duration, video: video || undefined });
@@ -877,7 +877,7 @@ export async function* crawl(
      */
     const gated = (message: string) => {
       // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
-      if (options.hunt) return fail(message);
+      if (options.gofileOnly || (options.hunt && !item.thumb)) return fail(message);
       if (isTwihubListApi(url) || isTwihubList(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
@@ -1035,7 +1035,7 @@ export async function* crawl(
       const ref = { id: tweetId, thumb: item.thumb, duration: item.duration };
       const got = embedded ? await playLinkMedia([{ ...ref, url }], item.from ?? url) : await tweetMedia([ref]);
       // Gofile 探しでは、投稿の動画は出さない（投稿の文にある Gofile のリンクだけを読む）
-      const items = got.filter((m) => !seenMedia.has(m) && !options.hunt);
+      const items = got.filter((m) => !seenMedia.has(m) && !options.gofileOnly);
       if (tweet || items.length) {
         for (const m of items) seenMedia.add(m);
         const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 12000), jar);
@@ -1243,7 +1243,7 @@ export async function* crawl(
       // ブラウザの中から読んだページも対象外（1 枚 30 秒かかるので、速く読める利点がなくなる）
       const elsewhere = extracted.gofile.length > 0 || extracted.tweets.length > 0 || extracted.playLinks.length > 0;
       const guessRender =
-        wantsVideo && !options.hunt && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
+        wantsVideo && !options.gofileOnly && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
         !lite &&
@@ -1363,7 +1363,7 @@ export async function* crawl(
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
         // Gofile 探しでは、Gofile の中身だけを集める
-        .filter((m) => !options.hunt || m.format === "Gofile")
+        .filter((m) => !options.gofileOnly || m.format === "Gofile")
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
@@ -1548,7 +1548,7 @@ export async function* crawl(
       }
       queue.splice(i, 1);
       queuedByUrl.delete(q.url);
-      if (options.hunt) continue;
+      if (options.gofileOnly || (options.hunt && !q.thumb)) continue;
       const video = (q.thumb && gifVideoFromThumb(q.thumb)) || q.preview;
       gatedPages++;
       yield { type: "gated", url: q.url, thumb: q.thumb, title: q.title, duration: q.duration, video: video || undefined };

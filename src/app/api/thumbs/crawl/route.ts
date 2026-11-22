@@ -31,6 +31,7 @@ export async function POST(request: Request) {
     exclude?: unknown;
     robots?: unknown;
     hunt?: unknown;
+    gofileOnly?: unknown;
     gofileToken?: unknown;
     resume?: unknown;
   };
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
     render: (body.render === "always" || body.render === "off" ? body.render : "auto") as CrawlOptions["render"],
     robots: body.robots !== false,
     hunt: body.hunt === true,
+    gofileOnly: body.gofileOnly === true,
     gofileToken: typeof body.gofileToken === "string" && /^[A-Za-z0-9]{10,128}$/.test(body.gofileToken.trim()) ? body.gofileToken.trim() : undefined,
   };
   const resume = parseResume(body.resume);
