@@ -2,6 +2,7 @@ import "server-only";
 import { AD_FRAME_RE, VIDEO_URL_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
 import { mediaKey, SeenMedia, variantKey } from "./dedupe";
 import { isExcluded, isItemExcluded } from "./exclude";
+import { fetchInBrowser } from "./browserSession";
 import { checkInBrowser, RenderDeferred, renderPage, type Rendered } from "./render";
 import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
@@ -980,6 +981,21 @@ export async function* crawl(
         }
       }
 
+      /** ブラウザで開いたままのページの中から読んだ（速い方法。ページの表示はしていない） */
+      let sessionRead = false;
+      if (blocked && !unreachable && options.render !== "off") {
+        // 普通の読み込みを断られた（Cloudflare の「人間か確かめる」ページなど）。
+        // まず、ブラウザで 1 ページ開いたままにして、その中から読む（1 枚ずつ表示し直すより、ずっと速い）
+        const got = await fetchInBrowser(finalUrl, signal);
+        if (got && got.status < 400 && got.html.length > 200) {
+          html = got.html;
+          finalUrl = got.finalUrl;
+          sessionRead = true;
+          blocked = null;
+          // このサイトは、次からは普通の読み込みを試さずに、この方法で読む
+          browserOnly.add(pageOrigin);
+        }
+      }
       if (blocked) {
         // 普通の読み込みを断られたので、本物のブラウザで開き直す（ブラウザなら通すサイトが多い）
         const known = browserOnly.has(pageOrigin) || browserPassed.has(pageOrigin);
@@ -1042,15 +1058,18 @@ export async function* crawl(
       const guess = guessRenders.get(pageOrigin) ?? { tries: 0, hits: 0 };
       const looksLikeVideoPage =
         !!item.root || (item.prio ?? 0) >= 2 || VIDEO_URL_RE.test(finalUrl) || PLAYERISH_RE.test(html.slice(0, 400000));
+      // 動画の置き場所がわかっているページ（Gofile・X の投稿・再生リンク）は、開き直しても増えないので対象外。
+      // ブラウザの中から読んだページも対象外（1 枚 30 秒かかるので、速く読める利点がなくなる）
+      const elsewhere = extracted.gofile.length > 0 || extracted.tweets.length > 0 || extracted.playLinks.length > 0;
       const guessRender =
-        wantsVideo && !anyVideo && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
+        wantsVideo && !anyVideo && !elsewhere && !sessionRead && looksLikeVideoPage && (guess.hits > 0 || guess.tries < MAX_GUESS_RENDERS);
       const wantRender =
         !r &&
         !lite &&
         (options.render === "always" ||
           (options.render === "auto" &&
             ((extracted.clientRendered && poor) ||
-              (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0) ||
+              (wantsVideo && (extracted.playerHint || frameHint) && trustedVideos === 0 && !elsewhere && (!sessionRead || !!item.root)) ||
               (entrance && !extracted.redirect) ||
               guessRender)));
       if (wantRender && guessRender) {
