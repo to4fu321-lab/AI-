@@ -19,6 +19,8 @@ interface Job {
   /** 取れなかった理由などの補足 */
   note?: string;
   settings?: CrawlSettings;
+  /** 最後に受け取った途中経過。止まったときは「続きから」でここから再開する */
+  resume?: CrawlState;
 }
 
 type Filter = "all" | "image" | "video";
@@ -107,7 +109,10 @@ export function ThumbsApp() {
     if (!loaded.current) return;
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: items.slice(0, MAX_ITEMS), jobs }));
+        // 途中経過は大きいので、新しい 5 件のジョブ分だけ保存する
+        let kept = 0;
+        const slimJobs = jobs.map((j) => (j.resume && kept++ < 5 ? j : { ...j, resume: undefined }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ items: items.slice(0, MAX_ITEMS), jobs: slimJobs }));
       } catch {
         /* 容量オーバーなどは無視 */
       }
@@ -133,21 +138,31 @@ export function ThumbsApp() {
   }, []);
 
   const startJob = useCallback(
-    async (url: string, override?: CrawlSettings) => {
-      const settings: CrawlSettings = override ?? { depth, maxPages, maxPagination, crossSite, render, kinds };
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }) => {
+      let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds };
+      // ページ数の上限で打ち切ったものを続けるときは、同じページ数だけ上限を足す
+      if (existing?.job.truncated && existing.job.resume) {
+        settings = { ...settings, maxPages: Math.min(1000, existing.job.resume.pages + settings.maxPages) };
+      }
+      const id = existing?.job.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const controller = new AbortController();
       controllers.current.set(id, controller);
-      setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
-      let pageCount = 0;
-      let foundCount = 0;
+      if (existing) {
+        updateJob(id, { status: "running", message: undefined, note: undefined, truncated: false, settings });
+      } else {
+        setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
+      }
+      let pageCount = existing?.job.pages ?? 0;
+      let foundCount = existing?.found ?? 0;
       const startedAt = Date.now();
-      recordHistory({ url, at: startedAt, pages: 0, found: 0, settings });
+      recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
 
       try {
         // サーバーは 1 回に動ける時間に上限があるので、「続き」が返ってきたら送り返して再開してもらう。
         // 通信が途中で切れたら、同じところから最大 3 回までやり直す
-        let current: CrawlState | undefined;
+        let current: CrawlState | undefined = existing?.job.resume;
+        /** 届いた中で一番新しい途中経過（再接続はここから） */
+        let latest: CrawlState | undefined = current;
         let retries = 0;
         for (;;) {
           let next: CrawlState | undefined;
@@ -183,8 +198,12 @@ export function ThumbsApp() {
                 } else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
                 else if (event.type === "done") {
                   finished = true;
-                  updateJob(id, { status: "done", truncated: event.truncated });
-                } else if (event.type === "continue") next = event.state;
+                  updateJob(id, { status: "done", truncated: event.truncated, resume: event.state });
+                } else if (event.type === "continue" || event.type === "checkpoint") {
+                  if (event.type === "continue") next = event.state;
+                  latest = event.state;
+                  updateJob(id, { resume: event.state });
+                }
                 else if (event.type === "note") updateJob(id, { note: event.message });
                 else if (event.type === "media") {
                   foundCount += event.items.length;
@@ -204,7 +223,8 @@ export function ThumbsApp() {
             retries++;
             updateJob(id, { message: `通信が切れたので再接続しています（${retries}/3）` });
             await new Promise((r) => setTimeout(r, 2000 * retries));
-            continue; // 同じ途中経過からやり直す（重複した画像は一覧に二重に入らない）
+            current = latest;
+            continue; // 最後の途中経過からやり直す（重複した画像は一覧に二重に入らない）
           }
           if (retries) updateJob(id, { message: undefined });
           retries = 0;
@@ -221,6 +241,14 @@ export function ThumbsApp() {
       }
     },
     [depth, maxPages, maxPagination, crossSite, render, kinds, updateJob, recordHistory],
+  );
+
+  const resumeJob = useCallback(
+    (job: Job) => {
+      if (controllers.current.has(job.id)) return;
+      void startJob(job.url, job.settings, { job, found: items.filter((i) => i.jobId === job.id).length });
+    },
+    [startJob, items],
   );
 
   const onSubmit = (e: React.FormEvent) => {
@@ -412,6 +440,7 @@ export function ThumbsApp() {
                 active={jobFilter === job.id}
                 onSelect={() => setJobFilter(jobFilter === job.id ? null : job.id)}
                 onStop={() => stopJob(job.id)}
+                onResume={() => resumeJob(job)}
                 saved={sites.some((s) => s.url === job.url)}
                 canSave={sites.length < MAX_SITES}
                 onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds })}
@@ -493,6 +522,7 @@ function EmptyState() {
 
 function JobRow({
   job,
+  onResume,
   found,
   saved,
   canSave,
@@ -503,6 +533,7 @@ function JobRow({
   onRemove,
 }: {
   job: Job;
+  onResume: () => void;
   found: number;
   saved: boolean;
   canSave: boolean;
@@ -550,6 +581,16 @@ function JobRow({
       >
         {saved ? "★" : "☆"}
       </button>
+      {(job.status === "stopped" || job.status === "error" || (job.status === "done" && job.truncated && job.resume)) && (
+        <button
+          type="button"
+          onClick={onResume}
+          className="shrink-0 rounded-full bg-fuchsia-500 px-2.5 py-1 font-semibold text-white"
+          title={job.resume ? "止まったところから再開" : "最初からやり直す"}
+        >
+          ▶ {job.resume ? "続きから" : "やり直す"}
+        </button>
+      )}
       {job.status === "running" ? (
         <button type="button" onClick={onStop} className="shrink-0 rounded-full bg-neutral-100 px-2.5 py-1 font-semibold dark:bg-neutral-800">
           停止

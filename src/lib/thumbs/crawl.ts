@@ -189,6 +189,9 @@ async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: n
     .map((m) => (m.unverified ? { ...m, unverified: undefined } : m));
 }
 
+/** 途中経過の記録を送る間隔 */
+const CHECKPOINT_MS = 8000;
+
 /** 途中経過を送り返してもらうときの大きさの上限（巨大なデータを送りつけられないように） */
 export const MAX_QUEUE = 5000;
 export const MAX_SEEN = 20000;
@@ -236,6 +239,7 @@ export async function* crawl(
   /** 時間切れで次の回に回すページ */
   const deferred: QueueItem[] = [];
   let renderStarts = 0;
+  let lastCheckpoint = Date.now();
 
   const visit = async (url: string, depth: number): Promise<CrawlEvent[]> => {
     const events: CrawlEvent[] = [];
@@ -377,6 +381,11 @@ export async function* crawl(
         yield e;
       }
     }
+    // 数秒おきに途中経過を記録として送る（画面を閉じたり止めたりしても、ここから再開できる）
+    if (Date.now() - lastCheckpoint > CHECKPOINT_MS && queue.length) {
+      lastCheckpoint = Date.now();
+      yield { type: "checkpoint", state: { queue: [...queue], seen: [...seenPages], pages, paginationUsed } };
+    }
     if (deferred.length) {
       // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
       pages -= deferred.length;
@@ -385,5 +394,12 @@ export async function* crawl(
       return;
     }
   }
-  yield { type: "done", pages, media: mediaCount, truncated: queue.length > 0 };
+  const truncated = queue.length > 0;
+  yield {
+    type: "done",
+    pages,
+    media: mediaCount,
+    truncated,
+    state: truncated ? { queue, seen: [...seenPages], pages, paginationUsed } : undefined,
+  };
 }
