@@ -68,6 +68,25 @@ export async function GET(request: Request) {
       for (let k = 0; k < 4; k++) say(`fetch-from-post-tab#${i} ${await inPage(o.p, posts[i++])}`);
       await o.p.close().catch(() => {});
     }
+    if (plan === "E") {
+      // 投稿ページを新しいタブで開いて、何もせずに待つ。題名が変わる（確認が済む）までの時間を測る
+      const o = await open(posts[i++]);
+      say(`newtab ${o.status} 「${o.title}」`);
+      let passedAt = 0;
+      while (Date.now() - t0 < 100000) {
+        await sleep(3000);
+        const title = (await o.p.title().catch(() => "?")).slice(0, 30);
+        const frames = o.p.frames().length;
+        if (!/just a moment|お待ち/i.test(title)) {
+          passedAt = Date.now() - t0;
+          say(`PASSED 「${title}」 url=${o.p.url().slice(0, 80)}`);
+          break;
+        }
+        if (Math.round((Date.now() - t0) / 3000) % 4 === 0) say(`waiting 「${title}」 frames=${frames}`);
+      }
+      if (passedAt) for (let k = 0; k < 4; k++) say(`fetch#${i} ${await inPage(o.p, posts[i++])}`);
+      await o.p.close().catch(() => {});
+    }
     const cookies = (await browser.cookies()).filter((c) => /twihub/.test(c.domain)).map((c) => c.name);
     say(`cookies ${cookies.join(",")}`);
     await first.p.close().catch(() => {});
