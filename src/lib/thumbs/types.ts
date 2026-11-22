@@ -59,10 +59,11 @@ export type CrawlEvent =
   | { type: "skip"; url: string; reason: string }
   | { type: "note"; url: string; message: string }
   /**
-   * サイトが「人間かどうかの確認」を求める・自動アクセスを断るので、読めなかったページ。
+   * サイトが「人間かどうかの確認」を求める・自動アクセスを断るので読めなかったページ、
+   * または読めたが動画を取り出せなかったページ（サムネイルだけでも見せる）。
    * 画面は、そのページを本人のブラウザで開くボタンを出す（サイト自体にアクセスしてもらう）
    */
-  | { type: "gated"; url: string; thumb?: string; title?: string; duration?: number; video?: string }
+  | { type: "gated"; url: string; thumb?: string; title?: string; duration?: number; video?: string; app?: string }
   | { type: "error"; url: string; message: string }
   | { type: "continue"; state: CrawlState }
   /** 途中経過の記録（数秒おき）。止まったときに画面がここから再開できる */
@@ -114,6 +115,8 @@ export interface QueueItem {
   zone?: number;
   /** このページへのリンクのカードに出ていた再生時間（秒）。詳細ページの動画に引き継ぐ */
   duration?: number;
+  /** このページへのリンクのカードに書かれていた題名（サイトが付けた動画のタイトル）。詳細ページの動画に引き継ぐ */
+  title?: string;
   /** 一覧ページのカードにあったプレビュー動画（この詳細ページに本編が見つからなければ、代わりに出す） */
   preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */

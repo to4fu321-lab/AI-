@@ -172,6 +172,8 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (isHttpUrl(v.preview)) item.preview = v.preview;
     const duration = seconds(v.duration);
     if (duration) item.duration = duration;
+    const title = shortText(v.title, 120);
+    if (title) item.title = title;
     out.push(item);
   }
   return out;

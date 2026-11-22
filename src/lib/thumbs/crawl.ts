@@ -9,6 +9,7 @@ import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
+import { linkexFiles, linkexList, linkexPlan } from "./linkex";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
 import { CookieJar, FetchBlockedError, safeFetch, thumbsLog } from "./safeFetch";
@@ -236,9 +237,17 @@ async function verifyMedia(
  *    ただしサイト共通のロゴらしい画像は渡さない（呼ぶ側で判定）。
  * どちらもなければ、画面側で動画から 1 コマ取り出してサムネイルを作る。
  */
-function fillThumbs(media: MediaItem[], linkThumb: string | undefined, ogImage: string | undefined, linkDuration?: number) {
+function fillThumbs(
+  media: MediaItem[],
+  linkThumb: string | undefined,
+  ogImage: string | undefined,
+  linkDuration?: number,
+  linkTitle?: string,
+) {
   const videos = media.filter((m) => m.kind !== "image");
   if (videos.length === 0) return;
+  // 一覧のカードに書かれていた題名（サイトが付けた動画のタイトル）を、詳細ページの動画に付ける
+  if (linkTitle && videos.length <= 3) for (const v of videos) v.title = linkTitle;
   // 一覧のカードに出ていた再生時間は、詳細ページの動画が 1 本だけのときに付ける（何本もあると、どれの長さかわからない）
   if (linkDuration && videos.length === 1) videos[0].duration ??= linkDuration;
   for (const v of videos) {
@@ -441,10 +450,15 @@ export async function* crawl(
   };
   /** 送った画像・動画の中身の指紋（URL が違っても同じファイルなら 2 個目は出さない） */
   const seenPrints = new Set<string>(resume?.prints ?? []);
+  /** 中身が同じなので出さなかった数（「このページの動画は、もう出した動画だった」とわかるように） */
+  let samePrint = 0;
   const dropSamePrint = (items: MediaItem[]) =>
     items.filter((m) => {
       if (!m.fp) return true;
-      if (seenPrints.has(m.fp)) return false;
+      if (seenPrints.has(m.fp)) {
+        samePrint++;
+        return false;
+      }
       seenPrints.add(m.fp);
       return true;
     });
@@ -589,6 +603,12 @@ export async function* crawl(
   let robotsSkipped = 0;
   /** 確認を求められた・断られたので読めなかったページの数 */
   let gatedPages = 0;
+  /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
+  let thumbOnlyPages = 0;
+  /** アプリでしか再生できない動画（Linkex）として並べた数 */
+  let appOnly = 0;
+  /** 中身を読んだ Linkex の共有リンク */
+  const seenLinkex = new Set<string>();
   /** サイト・ページの種類ごとの、続けて確認を求められた回数 */
   const gatedStreak = new Map<string, number>();
   let lastError: string | null = null;
@@ -812,8 +832,19 @@ export async function* crawl(
     const rank = item.rank ?? depth;
     const zone = options.crossSite ? 0 : (item.zone ?? 0);
     const events: CrawlEvent[] = [];
+    /**
+     * 読めなかった・動画を取り出せなかったページでも、一覧のカードにサムネイルがあったなら、サムネイルだけでも並べる
+     * （タップでそのページを開く）。動画を探しているときだけ
+     */
+    const thumbOnly = () => {
+      if (!wantsVideo || !item.thumb || item.root || events.some((e) => e.type === "gated")) return;
+      const video = gifVideoFromThumb(item.thumb) || item.preview;
+      events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
+      thumbOnlyPages++;
+    };
     const fail = (message: string) => {
       lastError = message;
+      thumbOnly();
       events.push({ type: "error", url, message });
       return events;
     };
@@ -823,7 +854,7 @@ export async function* crawl(
      */
     const gated = (message: string) => {
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
-      events.push({ type: "gated", url, thumb: item.thumb, duration: item.duration, video: video || undefined });
+      events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
       gatedPages++;
       gatedStreak.set(gateKey(url), (gatedStreak.get(gateKey(url)) ?? 0) + 1);
       return fail(message);
@@ -856,6 +887,7 @@ export async function* crawl(
     const stuckCount = stuck.get(normalizePageUrl(url)) ?? 0;
     if (stuckCount >= 2) {
       lastError = "読むのに時間がかかりすぎるページがあり、飛ばしました";
+      thumbOnly();
       events.push({ type: "error", url, message: "読むのに時間がかかりすぎるため飛ばしました" });
       return events;
     }
@@ -866,7 +898,37 @@ export async function* crawl(
     // 入力したページ自体は、人がブラウザで開くのと同じなので常に読む。リンクを辿る先は robots.txt を守る
     if (!item.root && !(await allowed(url))) {
       robotsSkipped++;
+      thumbOnly();
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
+      return events;
+    }
+    // Linkex（共有リンク・まとめサイト linkex-douga）：Linkex は Web では動画を再生させない仕組みなので、
+    // 動画ファイルは取らずに、サムネイル・長さ・名前を「Linkex で開く」に並べる
+    const lx = wantsVideo ? linkexPlan(url) : null;
+    if (lx) {
+      try {
+        const list = lx.kind === "list" ? await linkexList(lx.api, signal) : { tokens: [lx.token], next: null };
+        let shown = 0;
+        let next = 0;
+        const worker = async () => {
+          while (next < list.tokens.length && Date.now() < deadline && !signal.aborted) {
+            const token = list.tokens[next++];
+            if (seenLinkex.has(token)) continue;
+            seenLinkex.add(token);
+            for (const f of await linkexFiles(token, signal).catch(() => [])) {
+              events.push({ type: "gated", url: f.url, thumb: f.thumb, duration: f.duration, title: f.name, app: "Linkex" });
+              shown++;
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, list.tokens.length) }, worker));
+        appOnly += shown;
+        events.push({ type: "page", url, depth, found: 0 });
+        if (list.next && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 1, 1)) paginationUsed++;
+        if (!shown && item.root) events.push({ type: "note", url, message: "Linkex の共有リンクに動画が見つかりませんでした（削除・期限切れの可能性があります）" });
+      } catch (err) {
+        return fail(`Linkex の一覧を読めませんでした（${err instanceof Error ? err.message.slice(0, 60) : String(err)}）`);
+      }
       return events;
     }
     // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
@@ -1206,7 +1268,11 @@ export async function* crawl(
       // （ロゴを付けるより、画面側で動画から本物のコマを取り出すほうがよい）
       if (ogImage) ogPages.set(ogImage, (ogPages.get(ogImage) ?? 0) + 1);
       const usableOg = ogImage && depth > 0 && (ogPages.get(ogImage) ?? 0) < 2 ? ogImage : undefined;
-      fillThumbs(pageMedia, item.thumb, usableOg, item.duration);
+      // 題名：一覧のカードの題名 → なければ、動画の詳細ページ（動画が少ないページ）のページ名
+      const pageName = depth > 0 || !links.some((l) => l.prio >= 2) ? extracted.title : undefined;
+      fillThumbs(pageMedia, item.thumb, usableOg, item.duration, item.title);
+      const pageVideos = pageMedia.filter((m) => m.kind !== "image");
+      if (pageName && pageVideos.length <= 3) for (const v of pageVideos) v.title ??= pageName;
 
       // すでに出した動画（URL の後ろの合言葉だけ違うもの・別のページで出したもの）は除く
       // 画質・形式違いのどれか 1 つでも出していたら、残りの違いも出さない
@@ -1231,6 +1297,7 @@ export async function* crawl(
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ
+      const sameBefore = samePrint;
       const verified = await verifyMedia(wanted, signal, Math.min(deadline, Date.now() + 12000), jar);
       const rest = verified.rest;
       if (rest.length) pending.push(...rest);
@@ -1245,7 +1312,7 @@ export async function* crawl(
           referer: item.from,
           thumb: item.thumb,
           format: formatOf(item.preview, "video"),
-          title: "プレビュー",
+          title: item.title ?? "プレビュー",
         };
         if (!seenMedia.has(stand)) {
           seenMedia.add(stand);
@@ -1293,6 +1360,16 @@ export async function* crawl(
       // - それ以外（別のサイト・階層の上限より先）：取っておき、動画が見つからないときに広げる
       // このページで何か見つかったか・動画らしいリンクがあったかを、ページの「形」ごとに覚える
       const promising = links.filter((l) => l.prio >= 2 && !pagination.has(l.url)).length;
+      // 動画が 1 本も取り出せなかったページ（一覧ページ・もう出した動画のページは除く）：カードのサムネイルだけでも並べる
+      if (
+        promising < LISTING_MIN_LINKS &&
+        samePrint === sameBefore &&
+        !fresh.some((m) => m.kind !== "image") &&
+        !rest.some((m) => m.kind !== "image") &&
+        !pageMedia.some((m) => m.kind !== "image" && !candidates.includes(m)) &&
+        (options.kinds === "video" || zone > 0 || fresh.length === 0)
+      )
+        thumbOnly();
       if (!item.root) {
         const got = options.kinds === "video" || zone > 0 ? fresh.some((m) => m.kind !== "image") : fresh.length > 0;
         const shape = shapeOf(url);
@@ -1314,12 +1391,18 @@ export async function* crawl(
         const within = depth < options.depth && !nav;
         if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
           enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl, link.preview);
-          const q = link.duration ? queuedByUrl.get(link.url) : undefined;
-          if (q) q.duration ??= link.duration;
+          const q = link.duration || link.title ? queuedByUrl.get(link.url) : undefined;
+          if (q) {
+            q.duration ??= link.duration;
+            q.title ??= link.title;
+          }
         } else if ((autoWiden || nav) && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
           hold(link.url, depth + 1, link.prio, link.thumb, z, finalUrl);
-          const r = link.duration ? reservedByKey.get(normalizePageUrl(link.url)) : undefined;
-          if (r) r.duration ??= link.duration;
+          const r = link.duration || link.title ? reservedByKey.get(normalizePageUrl(link.url)) : undefined;
+          if (r) {
+            r.duration ??= link.duration;
+            r.title ??= link.title;
+          }
         }
       }
     } catch (err) {
@@ -1357,6 +1440,21 @@ export async function* crawl(
       queuedByUrl.delete(q.url);
       yield { type: "skip", url: q.url, reason: "同じ形のページを何度読んでも見つからなかったので飛ばしました" };
     }
+    // 同じサイトの同じ種類のページが続けて「人間かどうかの確認」を求められているなら、残りは読まずに「サイトで開く」に並べる。
+    // 読んでいないので、読むページ数の上限には数えない（一覧に 100 件あれば 100 件とも並ぶ）
+    for (let i = 0; i < queue.length; ) {
+      const q = queue[i];
+      if (q.root || (gatedStreak.get(gateKey(q.url)) ?? 0) < GATED_STREAK || isExcluded(q.url, options.exclude)) {
+        i++;
+        continue;
+      }
+      queue.splice(i, 1);
+      queuedByUrl.delete(q.url);
+      const video = (q.thumb && gifVideoFromThumb(q.thumb)) || q.preview;
+      gatedPages++;
+      yield { type: "gated", url: q.url, thumb: q.thumb, title: q.title, duration: q.duration, video: video || undefined };
+    }
+    if (!queue.length) continue;
     if (progress) progress.safe = snapshot();
     const batch = queue.splice(0, Math.min(CONCURRENCY, options.maxPages - pages));
     for (const b of batch) {
@@ -1457,7 +1555,14 @@ export async function* crawl(
     const gatedNote = gatedPages
       ? `「人間かどうかの確認」を求められた・自動アクセスを断られたページが ${gatedPages} 件ありました。下の「サイトで開く」から、サイトを直接開いて見てください`
       : null;
-    const finalNote = (found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote);
+    const appNote = appOnly
+      ? `Linkex の動画 ${appOnly} 本を並べました。Linkex は Web では再生できない仕組み（アプリでのみ再生）のため、タップで Linkex を開きます`
+      : null;
+    const thumbNote = thumbOnlyPages
+      ? `動画を取り出せなかったページ ${thumbOnlyPages} 件は、サムネイルだけ並べました。タップするとそのページを開きます`
+      : null;
+    const finalNote =
+      appNote ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;
