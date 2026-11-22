@@ -408,7 +408,7 @@ function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
  * こういうリンクを辿ると、読むページ数の上限をすぐ使い切ってしまうので辿らない
  */
 const JUNK_PATH_RE =
-  /(?:^|\/)(?:log-?in|log-?out|sign-?in|sign-?up|sign-?out|register|registration|join|account|accounts|settings?|config|preferences?|mypage|my|password|reset|forgot|auth|oauth|sso|privacy(?:-policy)?|policy|policies|terms(?:-of-(?:use|service))?|tos|legal|disclaimer|dmca|copyright|contact(?:-us)?|inquiry|about(?:-us)?|company|faq|help|support|guide|sitemap|rss|atom|cart|checkout|subscribe|subscription|pricing|plans?|upgrade|advertise|advertising|careers?|jobs|press|lang|language|share|report|notifications?|messages?|inbox|wp-admin|wp-login\.php|cdn-cgi)(?:[/.?#]|$)/i;
+  /(?:^|\/)(?:log-?in|log-?out|sign-?in|sign-?up|sign-?out|register|registration|join|account|accounts|settings?|config|preferences?|mypage|my|password|reset|forgot|auth|oauth|sso|privacy(?:-policy)?|policy|policies|terms(?:-of-(?:use|service))?|tos|legal|disclaimer|dmca|copyright|contact(?:-us)?|inquiry|about(?:-us)?|company|faq|help|support|guide|sitemap|rss|atom|cart|checkout|subscribe|subscription|pricing|plans?|upgrade|advertise|advertising|careers?|jobs|press|lang|language|share|report|downloader|notifications?|messages?|inbox|wp-admin|wp-login\.php|cdn-cgi)(?:[/.?#]|$)/i;
 const JUNK_QUERY_RE = /[?&](?:lang|hl|locale|sort|order|orderby|share|replytocom|redirect|redirect_to|return_?to|returnurl|next|action=(?:login|register|logout))=/i;
 const JUNK_TEXT_RE =
   /^(?:ログイン|ログアウト|新規登録|会員登録|無料登録|無料会員登録|サインイン|サインアップ|設定|各種設定|アカウント|マイページ|お問い合わせ|問い合わせ|利用規約|規約|プライバシー|プライバシーポリシー|個人情報保護方針|個人情報|運営会社|会社概要|運営者情報|ヘルプ|よくある質問|サイトマップ|広告掲載|広告について|免責事項|著作権|お知らせ|login|log in|logout|sign in|sign up|register|settings|account|contact|contact us|terms|privacy|privacy policy|help|faq|about|about us|language|日本語|english|dmca)$/i;
@@ -745,7 +745,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         "download" in t.attrs ||
         DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
-      if (!download && !thumb && isJunkLink(url, info?.text)) continue;
+      // 動画のない仕組みのページ（ログイン・設定・保存ツールなど）は、「保存する」と書いてあっても辿らない
+      if (!thumb && isJunkLink(url, download ? undefined : info?.text)) continue;
       addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration);
     }
   }

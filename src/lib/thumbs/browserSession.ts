@@ -6,9 +6,10 @@ import { assertPublicUrl, thumbsLog } from "./safeFetch";
 /**
  * ブラウザのページを 1 枚開いたままにして、その中から読み込む（サイトごと）。
  *
- * - Cloudflare などが、このアプリのサーバーからの普通の読み込みを断るサイト（「人間か確かめる」ページを返す）。
- *   本物のブラウザなら確認を通れるので、通ったページの中から同じサイトのほかのページを読む。
- *   ページを 1 枚ずつ表示し直す（1 枚 30 秒）より、ずっと速い（1 枚 1 秒以下）
+ * - このアプリのサーバーからの普通の読み込みは断るが、本物のブラウザなら普通に開けるサイト。
+ *   開いたページの中から同じサイトのほかのページを読む。ページを 1 枚ずつ表示し直す（1 枚 30 秒）より、ずっと速い。
+ *   サイトが「人間かどうかの確認」（チェックを入れる画面など）を求めてきたページは、読めなかったものとして扱う
+ *   （人が自分で通るためのものなので、通り抜けようとはしない）
  * - Gofile のように、サイト自身のスクリプトが作る合言葉がないと答えない API。
  *   サイトのページの中で、サイト自身のスクリプトに合言葉を作らせて問い合わせる
  */
@@ -177,12 +178,9 @@ export async function fetchInBrowser(url: string, signal: AbortSignal): Promise<
   });
 }
 
-async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
-  const { page } = session;
-  if (page.isClosed() || signal.aborted) return null;
-  session.at = Date.now();
-  const began = Date.now();
-  const out = (await Promise.race([
+/** ページの中から読み込む（12 秒で打ち切り） */
+async function fetchFromPage(page: Page, url: string): Promise<Read | null> {
+  return (await Promise.race([
     page.evaluate(async (target: string) => {
       try {
         const res = await fetch(target, { credentials: "include", redirect: "follow", headers: { accept: "text/html,application/xhtml+xml" } });
@@ -195,28 +193,24 @@ async function readInSession(session: Session, origin: string, url: string, sign
     }, url),
     sleep(12000).then(() => null),
   ])) as Read | null;
-  const challenged = !out || out.status === 0 || out.status === 403 || out.status === 503 || isChallengeHtml(out.html);
-  if (out && !challenged) {
-    thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
-    if (new URL(out.finalUrl).origin !== origin) return null;
-    return out;
-  }
-  // ページ自体を移動して、確認を通り抜ける
-  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
-  const until = Date.now() + 15000;
-  while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) await sleep(600);
-  const stuck = await page.evaluate(CHALLENGE).catch(() => true);
-  const html = stuck ? "" : await page.content().catch(() => "");
-  const finalUrl = page.url();
+}
+
+async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
+  const { page } = session;
+  if (page.isClosed() || signal.aborted) return null;
   session.at = Date.now();
-  thumbsLog(
-    `session 移動 ${stuck ? "確認を通れず" : "通過"} ${Date.now() - began}ms（最初の読み込み ${out ? out.status : "時間切れ"}）HTTP ${res?.status() ?? "-"} html=${html.length} ${url.slice(0, 100)}`,
-  );
-  if (stuck || !html) return null;
-  try {
-    if (new URL(finalUrl).origin !== origin) return null;
-  } catch {
-    return null;
+  const began = Date.now();
+  const out = await fetchFromPage(page, url);
+  if (out && out.status >= 200 && out.status < 400 && !isChallengeHtml(out.html) && out.html.length > 200) {
+    thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
+    try {
+      return new URL(out.finalUrl).origin === origin ? out : null;
+    } catch {
+      return null;
+    }
   }
-  return { status: 200, html: html.slice(0, 3_000_000), finalUrl };
+  // サイトが「人間かどうかの確認」を求めている。これは人が自分で通るためのものなので、通り抜けようとはしない。
+  // このページは読めなかったものとして返す
+  thumbsLog(`session 確認ページ ${Date.now() - began}ms HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
+  return { status: 403, html: "", finalUrl: url };
 }
