@@ -8,7 +8,7 @@ import { checkMedia } from "./probe";
 import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
-import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
+import { isTwihubList, isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
@@ -860,7 +860,7 @@ export async function* crawl(
      */
     const gated = (message: string) => {
       // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
-      if (isTwihubListApi(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
+      if (isTwihubListApi(url) || isTwihubList(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
       gatedPages++;
@@ -1393,7 +1393,10 @@ export async function* crawl(
       if (zone < 2) {
         for (const link of pagination) {
           if (paginationUsed >= options.maxPagination) break;
-          if (enqueue(link, depth, rank + 1, 1, undefined, zone)) paginationUsed++;
+          // twihub のほかのランキングの一覧は、投稿ページより先に読む（投稿ページで「人間かどうかの確認」を
+          // 何度か求められると、その後は一覧ページまで断られるようになるため）
+          const first = isTwihubList(link);
+          if (enqueue(link, depth, first ? rank : rank + 1, first ? 9 : 1, undefined, zone)) paginationUsed++;
         }
       }
       // 普通のリンクは 1 階層下として辿る（サムネイル付き・動画らしいリンクが先）
