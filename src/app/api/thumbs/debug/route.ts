@@ -68,6 +68,16 @@ export async function GET(request: Request) {
       for (let k = 0; k < 4; k++) say(`fetch-from-post-tab#${i} ${await inPage(o.p, posts[i++])}`);
       await o.p.close().catch(() => {});
     }
+    if (plan === "G" || plan === "H") {
+      // スクリプトの動かないページ（robots.txt）を開いて、その中から投稿ページを読む。G：3 秒おき / H：続けて
+      const base = await open("https://twihub.link/robots.txt");
+      say(`open robots ${base.status}`);
+      for (let k = 0; k < (plan === "G" ? 14 : 20); k++) {
+        say(`fetch#${i} ${await inPage(base.p, posts[i++ % posts.length])}`);
+        if (plan === "G") await sleep(3000);
+      }
+      await base.p.close().catch(() => {});
+    }
     if (plan === "F") {
       // 確認ページの種類を調べる（自動で済む種類か、人がチェックを入れる種類か）
       const html = await first.p
