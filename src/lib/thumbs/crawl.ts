@@ -996,7 +996,7 @@ export async function* crawl(
         if (got && got.status >= 400 && browserOnly.has(pageOrigin)) {
           // このサイトのほかのページは読めているのに、このページだけ確認がかかっている。
           // 1 枚ずつ表示し直しても通らない（20 秒以上かかる）ので、このページは飛ばす
-          return fail(`サイトがこのページへの自動アクセスを断っています（${blocked}）`);
+          return fail("サイトが「人間かどうかの確認」を求めているため、このページは読めません");
         }
         if (got && got.status < 400 && got.html.length > 200) {
           html = got.html;

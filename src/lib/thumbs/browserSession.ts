@@ -6,9 +6,10 @@ import { assertPublicUrl, thumbsLog } from "./safeFetch";
 /**
  * ブラウザのページを 1 枚開いたままにして、その中から読み込む（サイトごと）。
  *
- * - Cloudflare などが、このアプリのサーバーからの普通の読み込みを断るサイト（「人間か確かめる」ページを返す）。
- *   本物のブラウザなら確認を通れるので、通ったページの中から同じサイトのほかのページを読む。
- *   ページを 1 枚ずつ表示し直す（1 枚 30 秒）より、ずっと速い（1 枚 1 秒以下）
+ * - このアプリのサーバーからの普通の読み込みは断るが、本物のブラウザなら普通に開けるサイト。
+ *   開いたページの中から同じサイトのほかのページを読む。ページを 1 枚ずつ表示し直す（1 枚 30 秒）より、ずっと速い。
+ *   サイトが「人間かどうかの確認」（チェックを入れる画面など）を求めてきたページは、読めなかったものとして扱う
+ *   （人が自分で通るためのものなので、通り抜けようとはしない）
  * - Gofile のように、サイト自身のスクリプトが作る合言葉がないと答えない API。
  *   サイトのページの中で、サイト自身のスクリプトに合言葉を作らせて問い合わせる
  */
@@ -18,8 +19,6 @@ interface Session {
   at: number;
   /** このページを使う処理を 1 つずつ順番に行うための列（読み込みの途中でページを移動すると、ほかの読み込みが壊れるため） */
   queue: Promise<unknown>;
-  /** 「人間か確かめる」ページを通れなかったとき、次に試してよい時刻（それまでは、待たずにあきらめる） */
-  stuckUntil?: number;
 }
 
 const sessions = new Map<string, Promise<Session | null>>();
@@ -201,77 +200,17 @@ async function readInSession(session: Session, origin: string, url: string, sign
   if (page.isClosed() || signal.aborted) return null;
   session.at = Date.now();
   const began = Date.now();
-  const passed = (r: Read | null): boolean => !!r && r.status >= 200 && r.status < 400 && !isChallengeHtml(r.html) && r.html.length > 200;
-  const sameSite = (r: Read) => {
-    try {
-      return new URL(r.finalUrl).origin === origin;
-    } catch {
-      return false;
-    }
-  };
-  let out = await fetchFromPage(page, url);
-  if (out && passed(out)) {
+  const out = await fetchFromPage(page, url);
+  if (out && out.status >= 200 && out.status < 400 && !isChallengeHtml(out.html) && out.html.length > 200) {
     thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
-    return sameSite(out) ? out : null;
-  }
-  // 「人間か確かめる」ページが返ってきた。開いているページの裏で動いている確認（スクリプト）は、
-  // ページを開いてから数秒で済むことが多い。ページは移動せずに（移動すると確認がやり直しになる）、
-  // 少し待ちながら読み込みを試す。さっき別のページで待っても駄目だったばかりなら、待たない
-  const patient = !(session.stuckUntil && Date.now() < session.stuckUntil);
-  const waitUntil = Date.now() + (patient ? 3000 : 0);
-  let polls = 0;
-  while (Date.now() < waitUntil && !signal.aborted && !page.isClosed()) {
-    await sleep(1500);
-    polls++;
-    out = await fetchFromPage(page, url).catch(() => null);
-    if (out && passed(out)) {
-      session.at = Date.now();
-      session.stuckUntil = undefined;
-      thumbsLog(`session 待って通過 ${Date.now() - began}ms（${polls} 回目）html=${out.html.length} ${url.slice(0, 100)}`);
-      return sameSite(out) ? out : null;
+    try {
+      return new URL(out.finalUrl).origin === origin ? out : null;
+    } catch {
+      return null;
     }
   }
-  if (!patient) {
-    thumbsLog(`session 確認ページ ${Date.now() - began}ms HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
-    return { status: 403, html: "", finalUrl: url };
-  }
-  // ページ自体をその URL へ移動して、確認ページに確認を済ませてもらう（最大 60 秒）。
-  // 済んだかどうかは、ページが本物に変わったか・中からの読み込みが通るようになったかで見る
-  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
-  const navUntil = Date.now() + 60000;
-  let n = 0;
-  while (Date.now() < navUntil && !signal.aborted && !page.isClosed()) {
-    await sleep(2000);
-    n++;
-    const title = await page.title().catch(() => "?");
-    const waiting = await page.evaluate(CHALLENGE).catch(() => true);
-    const names = await page
-      .browser()
-      .cookies()
-      .then((list) => list.filter((c) => origin.includes(c.domain.replace(/^\./, ""))).map((c) => c.name))
-      .catch(() => [] as string[]);
-    if (n <= 3 || n % 5 === 0) {
-      thumbsLog(`session 確認待ち ${Math.round((Date.now() - began) / 1000)}秒 題名「${title.slice(0, 30)}」 確認中=${waiting} Cookie=${names.join(",").slice(0, 120)}`);
-    }
-    if (!waiting) {
-      const html = await page.content().catch(() => "");
-      if (html.length > 200 && !isChallengeHtml(html)) {
-        session.at = Date.now();
-        session.stuckUntil = undefined;
-        thumbsLog(`session 移動して通過 ${Date.now() - began}ms HTTP ${res?.status() ?? "-"} html=${html.length} ${url.slice(0, 100)}`);
-        return page.url().startsWith(origin) ? { status: 200, html: html.slice(0, 3_000_000), finalUrl: page.url() } : null;
-      }
-    }
-    out = await fetchFromPage(page, url).catch(() => null);
-    if (out && passed(out)) {
-      session.at = Date.now();
-      session.stuckUntil = undefined;
-      thumbsLog(`session 確認が済んだ ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
-      return sameSite(out) ? out : null;
-    }
-  }
-  // 以降 30 秒は、ほかのページで断られても待たない（1 ページごとに待つと時間を使い切るため）
-  session.stuckUntil = Date.now() + 30000;
-  thumbsLog(`session 確認を通れず ${Date.now() - began}ms HTTP ${res?.status() ?? "-"} ${url.slice(0, 100)}`);
+  // サイトが「人間かどうかの確認」を求めている。これは人が自分で通るためのものなので、通り抜けようとはしない。
+  // このページは読めなかったものとして返す
+  thumbsLog(`session 確認ページ ${Date.now() - began}ms HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
   return { status: 403, html: "", finalUrl: url };
 }
