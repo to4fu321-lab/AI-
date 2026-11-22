@@ -26,6 +26,7 @@ export async function POST(request: Request) {
     maxPagination?: unknown;
     crossSite?: unknown;
     render?: unknown;
+    kinds?: unknown;
     resume?: unknown;
   };
   try {
@@ -47,12 +48,13 @@ export async function POST(request: Request) {
     maxPages: clamp(body.maxPages, 1, 1000, 100),
     maxPagination: clamp(body.maxPagination, 0, 50, 50),
     crossSite: body.crossSite === true,
+    kinds: (body.kinds === "video" || body.kinds === "image" ? body.kinds : "all") as CrawlOptions["kinds"],
     render: (body.render === "always" || body.render === "off" ? body.render : "auto") as CrawlOptions["render"],
   };
   const resume = parseResume(body.resume);
-  // ブラウザで開くと 1 ページに最大 35 秒ほどかかるので、上限の 40 秒前には区切って続きを画面に預ける
+  // ブラウザ表示（最大 35 秒）と動画の確認（最大 15 秒）が区切りの直前に始まっても収まるよう、上限の 70 秒前で区切る
   // （THUMBS_CHUNK_MS はテストで区切りを短くするためのもの。本番では設定しない）
-  const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 40) * 1000;
+  const chunkMs = Number(process.env.THUMBS_CHUNK_MS) || (maxDuration - 70) * 1000;
   const deadline = Date.now() + chunkMs;
   const encoder = new TextEncoder();
   const abort = new AbortController();

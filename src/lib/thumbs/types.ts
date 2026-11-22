@@ -48,6 +48,8 @@ export interface CrawlOptions {
    * auto: JavaScript で描くページで画像がほとんど取れないときだけ / always: 毎回 / off: 使わない
    */
   render: "auto" | "always" | "off";
+  /** 取得する種類：すべて / 動画のみ / 画像のみ */
+  kinds: "all" | "video" | "image";
 }
 
 export interface QueueItem {

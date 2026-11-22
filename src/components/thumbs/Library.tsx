@@ -8,6 +8,8 @@ export interface CrawlSettings {
   crossSite: boolean;
   /** 古い保存データにはないので省略可（なければ auto） */
   render?: "auto" | "always" | "off";
+  /** 古い保存データにはないので省略可（なければ all） */
+  kinds?: "all" | "video" | "image";
 }
 
 export interface HistoryEntry {
@@ -29,6 +31,8 @@ export const MAX_HISTORY = 50;
 
 export function describeSettings(s: CrawlSettings): string {
   const parts = [s.depth === 0 ? "このページのみ" : `${s.depth}階層`];
+  if (s.kinds === "video") parts.unshift("動画のみ");
+  if (s.kinds === "image") parts.unshift("画像のみ");
   if (s.maxPagination > 0) parts.push(`ページ送り${s.maxPagination}`);
   if (s.crossSite) parts.push("他サイトも");
   if (s.render === "always") parts.push("ブラウザ");
