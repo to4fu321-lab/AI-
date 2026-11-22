@@ -149,6 +149,10 @@ export interface CrawlState {
   prints?: string[];
   /** 見つけたが出さなかった動画の数 [ファイルがない, サイトに断られた] */
   dropped?: [number, number];
+  /** 動画が見つからなかったページの「形」と、その数（同じ形のページは読まなくなる） */
+  barren?: [string, number][];
+  /** 動画が見つかったページの「形」 */
+  fruitful?: string[];
   /** サイトから渡された Cookie（ドメイン, "a=b; c=d"） */
   cookies?: [string, string][];
 }

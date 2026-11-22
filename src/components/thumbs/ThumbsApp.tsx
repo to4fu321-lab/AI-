@@ -516,7 +516,7 @@ export function ThumbsApp() {
   }, [shown]);
 
   return (
-    <div className="min-h-screen bg-neutral-50 pb-16 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+    <div className="min-h-screen bg-neutral-50 pb-16 text-neutral-900 [color-scheme:light] dark:bg-neutral-950 dark:text-neutral-100 dark:[color-scheme:dark]">
       <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-950/90">
         <div className="mx-auto max-w-6xl px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
           <div className="mb-2 flex items-center justify-between">
@@ -543,7 +543,7 @@ export function ThumbsApp() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="https://example.com/gallery/"
-              className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-[16px] outline-none focus:border-fuchsia-400 focus:bg-white dark:border-neutral-700 dark:bg-neutral-900"
+              className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-[16px] text-neutral-900 caret-fuchsia-500 outline-none placeholder:text-neutral-400 focus:border-fuchsia-400 focus:bg-white dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus:bg-neutral-950"
             />
             <button
               type="submit"
@@ -556,7 +556,7 @@ export function ThumbsApp() {
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類
-              <select value={kinds} onChange={(e) => setKinds(e.target.value as "all" | "video" | "image")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+              <select value={kinds} onChange={(e) => setKinds(e.target.value as "all" | "video" | "image")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                 <option value="all">すべて</option>
                 <option value="video">動画のみ</option>
                 <option value="image">画像のみ</option>
@@ -564,7 +564,7 @@ export function ThumbsApp() {
             </label>
             <label className="flex items-center gap-1.5">
               下の階層
-              <select value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+              <select value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                 {[0, 1, 2, 3, 5, 10, 15, 20].map((n) => (
                   <option key={n} value={n}>
                     {n === 0 ? "辿らない" : `${n}階層`}
@@ -574,7 +574,7 @@ export function ThumbsApp() {
             </label>
             <label className="flex items-center gap-1.5">
               ページ送り
-              <select value={maxPagination} onChange={(e) => setMaxPagination(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+              <select value={maxPagination} onChange={(e) => setMaxPagination(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                 {[0, 10, 30, 50].map((n) => (
                   <option key={n} value={n}>
                     {n === 0 ? "しない" : `${n}ページまで`}
@@ -584,7 +584,7 @@ export function ThumbsApp() {
             </label>
             <label className="flex items-center gap-1.5">
               全体で最大
-              <select value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+              <select value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                 {[30, 100, 300, 1000].map((n) => (
                   <option key={n} value={n}>
                     {n}ページ
@@ -594,7 +594,7 @@ export function ThumbsApp() {
             </label>
             <label className="flex items-center gap-1.5">
               ブラウザで開く
-              <select value={render} onChange={(e) => setRender(e.target.value as "auto" | "always" | "off")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 dark:border-neutral-700 dark:bg-neutral-900">
+              <select value={render} onChange={(e) => setRender(e.target.value as "auto" | "always" | "off")} className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100">
                 <option value="auto">自動</option>
                 <option value="always">常に（遅い）</option>
                 <option value="off">使わない</option>

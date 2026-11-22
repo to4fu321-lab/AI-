@@ -177,6 +177,13 @@ function parseResume(value: unknown): CrawlState | undefined {
     : undefined;
   return {
     queue: parseQueue(v.queue, MAX_QUEUE),
+    barren: Array.isArray(v.barren)
+      ? v.barren
+          .filter((b): b is [string, number] => Array.isArray(b) && typeof b[0] === "string" && b[0].length < 200 && typeof b[1] === "number")
+          .slice(0, 500)
+          .map(([k, n]) => [k, clamp(n, 0, 1000, 0)] as [string, number])
+      : undefined,
+    fruitful: Array.isArray(v.fruitful) ? v.fruitful.filter((f): f is string => typeof f === "string" && f.length < 200).slice(0, 500) : undefined,
     seen,
     pages: clamp(v.pages, 0, 1000, 0),
     paginationUsed: clamp(v.paginationUsed, 0, 50, 0),

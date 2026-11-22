@@ -225,7 +225,7 @@ function ExcludeList({
             autoCapitalize="off"
             autoCorrect="off"
             placeholder="example.com"
-            className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-[16px] outline-none focus:border-fuchsia-400 dark:border-neutral-700 dark:bg-neutral-950"
+            className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 focus:border-fuchsia-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:placeholder:text-neutral-500"
           />
           <button type="submit" className="shrink-0 rounded-full bg-neutral-900 px-3 py-1.5 font-bold text-white dark:bg-white dark:text-neutral-900">
             追加
