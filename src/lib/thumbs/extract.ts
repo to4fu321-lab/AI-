@@ -224,6 +224,8 @@ export interface LinkCandidate {
   preview?: string;
   /** リンクのカードに出ていた再生時間（秒） */
   duration?: number;
+  /** リンクのカードに書かれていた題名（サイトが付けた動画のタイトル） */
+  title?: string;
   /**
    * 優先度。4: サムネイル付きで動画らしい / 3: サムネイル付き / 2: 動画らしい（再生時間・URL など）/
    * 1: タップで移動する仕掛け（onclick・data-href）/ 0: 普通のリンク
@@ -371,7 +373,30 @@ function previewInside(inner: string, base: string): string | undefined {
 }
 
 /** <a> ごとに、中のサムネイルと「動画らしさ」を調べる */
-type AnchorInfo = { thumb?: string; videoish: boolean; text: string; preview?: string; duration?: number };
+type AnchorInfo = { thumb?: string; videoish: boolean; text: string; preview?: string; duration?: number; title?: string; titles?: string[] };
+
+/** 題名として使える文字か（数字・記号・再生時間だけのもの、短すぎるものは使わない） */
+function asTitle(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const s = raw
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (s.length < 4 || /^https?:\/\//i.test(s)) return undefined;
+  // 文字（かな・漢字・英字）が 3 文字以上あること（「1.6万」「No.20」「12,345 views」のような数だけのものを除く）
+  const letters = s.replace(/[\d\s.,:;!?%#&()\[\]{}<>+\-_/\\|'"`~^*=@$、。・「」『』（）【】…ー万千回件位分秒時間再生views?]/gi, "");
+  if (letters.length < 3) return undefined;
+  return s.slice(0, 120);
+}
+
+/** リンクのカードの題名の候補：画像の alt → title 属性 → aria-label → 中の文字 の順 */
+function cardTitles(attrs: Record<string, string>, inner: string, text: string): string[] {
+  const alt = /<img\b[^>]*\salt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(inner);
+  const out = [alt ? decodeEntities(alt[1] ?? alt[2] ?? "") : undefined, attrs.title, attrs["aria-label"], text]
+    .map(asTitle)
+    .filter((t): t is string => !!t);
+  return [...new Set(out)];
+}
 function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
   const out = new Map<string, AnchorInfo>();
   for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
@@ -398,8 +423,13 @@ function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
       text: `${prev?.text ?? ""} ${text}`.slice(0, 200),
       preview: prev?.preview ?? preview,
       duration: prev?.duration ?? duration,
+      titles: [...(prev?.titles ?? []), ...cardTitles(attrs, inner, text)].slice(0, 8),
     });
   }
+  // 同じ題名がいくつものリンクに付いていたら、題名ではなく決まり文句（「動画を見る」「Tweet thumbnail」など）なので使わない
+  const counts = new Map<string, number>();
+  for (const a of out.values()) for (const t of new Set(a.titles)) counts.set(t, (counts.get(t) ?? 0) + 1);
+  for (const a of out.values()) a.title = a.titles?.find((t) => (counts.get(t) ?? 0) < 3);
   return out;
 }
 
@@ -667,15 +697,16 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   // --- 4. <a href> : メディアへの直リンク、YouTube へのリンク、辿る候補のページ ---
   const anchors = analyzeAnchors(markup, base);
   const links = new Map<string, LinkCandidate>();
-  const addLink = (url: string, prio: number, thumb?: string, preview?: string, duration?: number) => {
+  const addLink = (url: string, prio: number, thumb?: string, preview?: string, duration?: number, title?: string) => {
     const prev = links.get(url);
-    if (!prev || prio > prev.prio || (!prev.thumb && thumb) || (!prev.preview && preview) || (!prev.duration && duration)) {
+    if (!prev || prio > prev.prio || (!prev.thumb && thumb) || (!prev.preview && preview) || (!prev.duration && duration) || (!prev.title && title)) {
       links.set(url, {
         url,
         prio: Math.max(prio, prev?.prio ?? 0),
         thumb: prev?.thumb ?? thumb,
         preview: prev?.preview ?? preview,
         duration: prev?.duration ?? duration,
+        title: prev?.title ?? title,
       });
     }
   };
@@ -747,7 +778,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
       // 動画のない仕組みのページ（ログイン・設定・保存ツールなど）は、「保存する」と書いてあっても辿らない
       if (!thumb && isJunkLink(url, download ? undefined : info?.text)) continue;
-      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration);
+      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration, info?.title);
     }
   }
 
@@ -769,7 +800,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const preview = previewInside(`${m[2]}>${m[3]}`, base);
     const videoish = VIDEO_URL_RE.test(url) || DURATION_RE.test(stripTags(m[3])) || !!preview;
     if (!thumb && isJunkLink(url)) continue;
-    addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb, preview);
+    addLink(url, thumb ? (videoish ? 4 : 3) : videoish ? 2 : 1, thumb, preview, undefined, cardTitles(parseAttrs(m[2]), m[3], stripTags(m[3]))[0]);
   }
   for (const m of markup.matchAll(/\sdata-(?:href|link|permalink|detail-url|url)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) {
     const url = resolveUrl(decodeEntities(m[1] ?? m[2]), base);

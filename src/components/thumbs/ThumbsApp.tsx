@@ -156,7 +156,8 @@ export function ThumbsApp() {
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [jobFilter, setJobFilter] = useState<string | null>(null);
-  const [viewer, setViewer] = useState<number | null>(null);
+  // 拡大表示しているもの（id で覚える。新しいものが上に足されても、見ているものが入れ替わらないように）
+  const [viewerId, setViewerId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [sites, setSites] = useState<SavedSite[]>([]);
@@ -340,7 +341,8 @@ export function ThumbsApp() {
                     (j.gated ?? []).some((g) => g.url === event.url)
                       ? {}
                       : {
-                          gated: [...(j.gated ?? []), { url: event.url, thumb: event.thumb, duration: event.duration, video: event.video, title: event.title, app: event.app }].slice(
+                          // 新しく見つけたものを上に
+                          gated: [{ url: event.url, thumb: event.thumb, duration: event.duration, video: event.video, title: event.title, app: event.app }, ...(j.gated ?? [])].slice(
                             0,
                             MAX_GATED,
                           ),
@@ -366,7 +368,8 @@ export function ThumbsApp() {
                       // サーバーがリンク切れでないと確かめたもの。受け取った時刻を印にする
                       fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined });
                     }
-                    return fresh.length || list.length !== prev.length ? [...list, ...fresh].slice(-MAX_ITEMS) : prev;
+                    // 新しく見つけたものを上に並べる
+                    return fresh.length || list.length !== prev.length ? [...fresh, ...list].slice(0, MAX_ITEMS) : prev;
                   });
                 }
               }
@@ -547,6 +550,9 @@ export function ThumbsApp() {
       ),
     [shown, filter, jobFilter],
   );
+  const viewerIndex = viewerId ? visible.findIndex((i) => i.id === viewerId) : -1;
+  const viewer = viewerIndex >= 0 ? viewerIndex : null;
+  const setViewer = (index: number | null) => setViewerId(index === null ? null : (visible[index]?.id ?? null));
   const counts = useMemo(() => {
     const scoped = jobFilter ? shown.filter((i) => i.jobId === jobFilter) : shown;
     const video = scoped.filter(isVideoLike).length;
@@ -804,16 +810,17 @@ export function ThumbsApp() {
         <LoadMore jobs={jobs} running={running} onMore={resumeJob} />
       </main>
 
-      {viewer !== null && visible[viewer] && (
+      {viewer !== null && (
         <Viewer
           items={visible}
           index={viewer}
           onIndex={setViewer}
           onClose={() => setViewer(null)}
           onBroken={(id) => {
+            // 外したら次を表示する。最後の 1 件を外したときは、1 つ前（なければ閉じる）
+            const nextItem = visible[viewer + 1] ?? visible[viewer - 1];
+            setViewerId(nextItem ? nextItem.id : null);
             hideItem(id);
-            // 最後の 1 件を外したときは、1 つ前を表示する（なければ閉じる）
-            if (viewer >= visible.length - 1) setViewer(visible.length > 1 ? visible.length - 2 : null);
           }}
           onExclude={(host) => {
             if (!confirm(`${host} を除外リストに追加して、一覧から消しますか？\n（次からこのサイトは取得しません）`)) return;
@@ -1215,8 +1222,12 @@ function Thumb({
           {formatDuration(duration)}
         </span>
       ) : null}
-      {large && item.title && (
-        <span className="pointer-events-none absolute inset-x-0 bottom-0 line-clamp-2 bg-gradient-to-t from-black/80 to-transparent px-2 pb-6 pt-6 text-left text-xs font-semibold text-white">
+      {!small && (large || video) && item.title && (
+        <span
+          className={`pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent text-left font-semibold text-white ${
+            large ? "line-clamp-2 px-2 pb-6 pt-6 text-xs" : "line-clamp-1 px-1.5 pb-5 pt-4 text-[10px]"
+          }`}
+        >
           {item.title}
         </span>
       )}

@@ -32,8 +32,9 @@ export function twihubNextFromHtml(html: string, pageUrl: string): string | null
   const u = new URL(pageUrl);
   if (u.pathname !== "/posts" && u.pathname !== "/") return null;
   const m = /hasMore:true,nextCursor:"([^"]{4,120})"/.exec(html);
-  if (!m) return null;
-  const type = u.searchParams.get("type") ?? /type:"([a-z0-9]+)"/i.exec(html)?.[1] ?? "realtime";
+  // トップページは一覧を HTML に入れず、後から読み込む。最初から窓口に聞く
+  if (!m) return u.pathname === "/" ? `${u.origin}/api/v1/posts?type=realtime&limit=40` : null;
+  const type = u.searchParams.get("type") ?? "realtime";
   return `${u.origin}/api/v1/posts?${new URLSearchParams({ type, limit: "40", cursor: m[1] })}`;
 }
 
