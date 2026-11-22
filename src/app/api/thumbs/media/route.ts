@@ -90,6 +90,15 @@ export async function GET(request: Request) {
   let kind = isVagueType(type) ? null : kindFromContentType(type);
   if (!kind && !part) {
     const sniffed = await sniffMime(target, referer, request.signal);
+    if (sniffed && /mpegurl/i.test(sniffed) && upstream.status === 200) {
+      // 拡張子も種類の名乗りもない配信の目次（.txt・.jpg などに見せかけたもの）。中の URL を中継経由に書き換える
+      const bytes = await readHead(upstream, MAX_PLAYLIST_BYTES);
+      if (looksLikePlaylist(bytes)) {
+        out.set("content-type", "application/vnd.apple.mpegurl");
+        out.set("cache-control", "no-store");
+        return new Response(rewritePlaylist(new TextDecoder().decode(bytes), finalUrl, referer), { status: 200, headers: out });
+      }
+    }
     if (sniffed) {
       kind = sniffed.startsWith("image/") ? "image" : "video";
       out.set("content-type", sniffed);

@@ -1,5 +1,6 @@
 import "server-only";
-import type { Browser, HTTPRequest } from "puppeteer-core";
+import type { Browser, Frame, HTTPRequest, HTTPResponse, Page } from "puppeteer-core";
+import { isAdUrl } from "./adblock";
 import { extensionOf, kindFromContentType, kindFromUrl } from "./extract";
 import { assertPublicUrl } from "./safeFetch";
 
@@ -13,6 +14,13 @@ import { assertPublicUrl } from "./safeFetch";
  * - Vercel 上では @sparticuz/chromium（サーバー用に小さくした Chromium）を使う
  * - 手元で試すときは CHROMIUM_PATH にブラウザの場所を入れる
  * - ブラウザが出すすべての通信も、内部ネットワーク宛てでないか確かめる（SSRF 対策）
+ *
+ * 動画を探すときは、人が見るときと同じ手順を踏む：
+ *   1. 広告・計測の通信は最初から止める（広告動画を飛ばして本編が読み込まれる。新しいウィンドウの広告も開かせない）
+ *   2. 年齢確認・「広告をスキップ」「動画へ進む」などの入口・中間ページを、待ち時間（カウントダウン）を待って先へ進む
+ *   3. 画面を覆う広告の板を取り除き、再生ボタン・サムネイル・プレーヤーの真ん中を「本物の指のタップ」で押す
+ *      （1 回目のタップは広告に取られることが多いので、動画が読み込まれるまで最大 3 回押し直す）
+ *   4. その間にブラウザが受け取った動画の URL を集める（本体は読まない）
  */
 
 const USER_AGENT =
@@ -64,6 +72,8 @@ function releaseTab() {
 export interface NetworkMedia {
   url: string;
   kind: "image" | "video";
+  /** URL からは形式がわからないもの（拡張子のない HLS の目次など）の形式 */
+  format?: string;
   /** その通信を出したページ（iframe の中のプレーヤーなら、そのプレーヤーのページ） */
   referer?: string;
 }
@@ -90,52 +100,181 @@ const MAX_FRAMES = 5;
 const MAX_FRAME_HTML = 1.5 * 1024 * 1024;
 
 /**
- * ページ（と iframe の中）で、動画を再生させる。
- * - <video> は音を消して play()
- * - よくある動画プレーヤーの再生ボタンを、最大 3 個まで押す
- * 別のページへ移動するリンクは押さない（移動自体も止めてある）
- * ビルド時の変換の影響を受けないよう、ブラウザに渡すコードは文字列で持つ
+ * 新しいページを開く前に仕込む。広告が新しいウィンドウ（ポップアップ・ポップアンダー）を開こうとしても、
+ * 何も開かずに「開いたふり」だけ返す（開いたウィンドウを確かめる広告スクリプトが止まらないように）
  */
-const PRESS_PLAY = `(() => {
+const BEFORE_LOAD = `(() => {
+  try {
+    const fake = { closed: false, close() { this.closed = true; }, focus() {}, blur() {}, postMessage() {}, location: { href: "" }, document: { write() {}, close() {} } };
+    Object.defineProperty(window, "open", { value: () => fake, configurable: true });
+  } catch (e) {}
+})()`;
+
+/** <video> を音を消して再生させる（読み込みを始めさせる） */
+const PLAY_VIDEOS = `(() => {
   for (const v of Array.from(document.querySelectorAll("video"))) {
-    v.muted = true;
-    const p = v.play();
-    if (p && p.catch) p.catch(() => {});
+    try {
+      v.muted = true;
+      const p = v.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
   }
+})()`;
+
+/**
+ * 画面を覆っている広告の板（全面を覆う固定表示の要素）を取り除く。
+ * プレーヤー自体（動画・iframe を中に持つもの、名前に player / video を含むもの）は残す
+ */
+const REMOVE_OVERLAYS = `(() => {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const playerish = /player|video|vjs|jwplayer|jw-|plyr|dplayer|artplayer|flowplayer|fp-|mejs|clappr|fluid_/i;
+  let removed = 0;
+  for (const el of Array.from(document.querySelectorAll("body *"))) {
+    if (removed >= 20) break;
+    const cs = getComputedStyle(el);
+    if (cs.position !== "fixed" && !(cs.position === "absolute" && Number(cs.zIndex) >= 1000)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width * r.height < vw * vh * 0.4) continue;
+    if (el.querySelector("video, audio, canvas") || playerish.test((el.id || "") + " " + (typeof el.className === "string" ? el.className : ""))) continue;
+    const frames = Array.from(el.querySelectorAll("iframe"));
+    if (frames.some((f) => f.getBoundingClientRect().width > 300 && !/ad|banner|pop/i.test(f.src + f.id + f.className))) continue;
+    const z = Number(cs.zIndex) || 0;
+    const text = (el.innerText || "").trim();
+    const adLike = z >= 100 || Number(cs.opacity) < 0.1 || el.querySelector("a[target=_blank]") || text.length < 400;
+    if (!adLike) continue;
+    el.remove();
+    removed++;
+  }
+  // 広告を出している間、画面のスクロールを止めているサイトがあるので戻す
+  if (removed) {
+    document.documentElement.style.overflow = "auto";
+    if (document.body) document.body.style.overflow = "auto";
+  }
+  return removed;
+})()`;
+
+/**
+ * 押す候補（広告のスキップ・再生ボタン・サムネイル・プレーヤーの真ん中）に印（data-thumbs-play="番号"）を付け、数を返す。
+ * 押すのはブラウザの外から「本物のタップ」で行う（スクリプトの click() は無視するプレーヤーや、
+ * 人が押したかを確かめる広告・プレーヤーがあるため）
+ */
+const MARK_PLAY = `(() => {
+  for (const el of Array.from(document.querySelectorAll("[data-thumbs-play]"))) el.removeAttribute("data-thumbs-play");
+  const picked = [];
+  const seen = new Set();
+  const visible = (el, min) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < min || r.height < min) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) > 0.05;
+  };
+  const navigates = (el) => {
+    const a = el.closest && el.closest("a[href]");
+    return a && !/^(#|javascript:)/i.test(a.getAttribute("href") || "");
+  };
+  const pick = (el) => {
+    if (picked.length >= 4 || seen.has(el)) return;
+    seen.add(el);
+    picked.push(el);
+  };
+  const label = (el) => (el.innerText || el.getAttribute("aria-label") || el.title || el.value || "").trim();
+  const clickable = "button, [role=button], a, div, span, input[type=button], input[type=submit]";
+  // 1. 広告の「スキップ」「閉じる」
+  for (const el of Array.from(document.querySelectorAll(clickable))) {
+    const t = label(el);
+    if (t.length <= 20 && /^(skip( ad| ads)?\\s*[›»>]*|広告をスキップ|スキップ\\s*[›»>]*|close ad|広告を閉じる)$/i.test(t) && visible(el, 8)) pick(el);
+  }
+  // 2. よくある動画プレーヤーの大きな再生ボタン
   const selectors = [
     ".vjs-big-play-button", ".jw-display-icon-container", ".jw-icon-display", ".plyr__control--overlaid",
-    ".fp-play", ".mejs__overlay-button", ".dplayer-mobile-play", ".art-control-play",
-    "[class*='play-button']", "[class*='playbutton']", "[class*='btn-play']", "[class*='play-btn']",
-    "button[aria-label*='play' i]", "button[aria-label*='再生']", "button[title*='play' i]", "[class*='play']",
+    ".fp-play", ".fp-ui", ".mejs__overlay-button", ".dplayer-mobile-play", ".art-control-play", ".fluid_initial_play",
+    ".ytp-large-play-button", ".play-wrapper", "[class*='big-play']", "[class*='play-button']", "[class*='playbutton']",
+    "[class*='btn-play']", "[class*='play-btn']", "[class*='play_btn']", "[class*='playBtn']", "[id*='play-button']",
+    "button[aria-label*='play' i]", "button[aria-label*='再生']", "button[title*='play' i]", "[class*='play-icon']",
   ];
-  let clicked = 0;
-  // 名前に手がかりのない独自プレーヤー：「▶」「再生」「Play」と書かれたボタンや、
-  // プレーヤーらしい部品（id・class に player / video）の中のボタンも押す
-  const labelled = Array.from(document.querySelectorAll("button, [role=button], a[href^='#'], a[href^='javascript'], div[onclick], span[onclick]"))
-    .filter((el) => /^\s*(▶|►|⏵|▷|再生|再生する|play|play video|watch)\s*$/i.test((el.innerText || el.getAttribute("aria-label") || el.title || "").trim()));
-  const inPlayer = Array.from(document.querySelectorAll("[id*='player' i] button, [class*='player' i] button, [id*='video' i] button, [class*='video' i] button"));
-  for (const el of [...labelled, ...inPlayer]) {
-    if (clicked >= 3) break;
-    const r = el.getBoundingClientRect();
-    if (r.width < 10 || r.height < 10) continue;
-    el.click();
-    clicked++;
-  }
   for (const sel of selectors) {
     let els = [];
     try { els = Array.from(document.querySelectorAll(sel)); } catch (e) { continue; }
-    for (const el of els) {
-      if (clicked >= 3) return clicked;
-      const r = el.getBoundingClientRect();
-      if (r.width < 10 || r.height < 10) continue;
-      const a = el.closest("a[href]");
-      if (a && !/^(#|javascript:)/i.test(a.getAttribute("href") || "")) continue;
-      el.click();
-      clicked++;
+    for (const el of els) if (visible(el, 10) && !navigates(el)) pick(el);
+  }
+  // 3. 「▶」「再生」「Play」と書かれたボタン
+  for (const el of Array.from(document.querySelectorAll(clickable))) {
+    if (/^\\s*(▶|►|⏵|▷|再生|再生する|動画を再生|play|play video|play now|watch|watch now)\\s*$/i.test(label(el)) && visible(el, 10) && !navigates(el)) pick(el);
+  }
+  // 4. 押すと動画に変わるサムネイル（ポスター画像）、プレーヤーの部品、大きな動画・iframe の真ん中
+  const big = Array.from(document.querySelectorAll(
+    "video, iframe, [class*='poster' i], [class*='thumb' i], [class*='preview' i], [class*='cover' i], [id*='player' i], [class*='player' i], [class*='video' i]"
+  )).filter((el) => visible(el, 120) && !navigates(el) && !(el.tagName === "IFRAME" && /ad|banner|pop/i.test(el.src + el.id + el.className)));
+  big.sort((a, b) => {
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const score = (el, r) => r.width * r.height * (el.tagName === "VIDEO" || el.tagName === "IFRAME" ? 2 : 1);
+    return score(b, rb) - score(a, ra);
+  });
+  for (const el of big.slice(0, 2)) pick(el);
+  picked.forEach((el, i) => el.setAttribute("data-thumbs-play", String(i)));
+  return picked.length;
+})()`;
+
+/**
+ * 「広告をスキップ」「動画へ進む」「続ける」などの中間ページを先へ進む。
+ * 押せるボタンがあれば印を付けて "click"、カウントダウン中なら "wait"、中間ページでなければ "none"
+ */
+const FIND_CONTINUE = `(() => {
+  for (const el of Array.from(document.querySelectorAll("[data-thumbs-next]"))) el.removeAttribute("data-thumbs-next");
+  const text = ((document.body && document.body.innerText) || "").slice(0, 20000);
+  if (document.querySelector("video")) return "none";
+  const interstitial = /skip ad|広告をスキップ|スキップして|秒後|秒お待ち|\\d+\\s*seconds?|please wait|お待ちください|リダイレクト|redirecting|continue to|get link|移動します|advertisement/i.test(text);
+  if (!interstitial) return "none";
+  const yes = /^(skip( ad)?|広告をスキップ|スキップ|continue|continue to (video|site|link|watch)|続ける|動画を見る|動画へ|動画ページへ|動画へ進む|再生ページへ|視聴する|今すぐ視聴|click here to (continue|watch|proceed)|get link|go to link|proceed( to video)?|次へ進む|watch video)\\s*[›»>→]*$/i;
+  for (const el of Array.from(document.querySelectorAll("a, button, [role=button], input[type=button], input[type=submit], div[onclick], span[onclick]"))) {
+    const t = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim();
+    if (!t || t.length > 30 || !yes.test(t)) continue;
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    if (r.width < 8 || r.height < 8 || cs.visibility === "hidden" || cs.display === "none" || el.disabled || cs.pointerEvents === "none") continue;
+    el.setAttribute("data-thumbs-next", "1");
+    return "click";
+  }
+  return /\\d{1,2}\\s*(秒|seconds?|sec)|please wait|お待ちください/i.test(text) ? "wait" : "none";
+})()`;
+
+/** 本物のタップ（駄目ならマウスのクリック、それも駄目ならスクリプトのクリック）で押す */
+async function tapElement(frame: Frame, selector: string): Promise<boolean> {
+  const handle = await frame.$(selector).catch(() => null);
+  if (!handle) return false;
+  try {
+    const within = <T,>(p: Promise<T>) => Promise.race([p, sleep(2500).then(() => Promise.reject(new Error("timeout")))]);
+    try {
+      await within(handle.tap());
+    } catch {
+      try {
+        await within(handle.click({ delay: 40 }));
+      } catch {
+        await handle.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+      }
+    }
+    return true;
+  } finally {
+    await handle.dispose().catch(() => {});
+  }
+}
+
+/** ページと iframe の中で、再生ボタンなどを押す。押した数を返す */
+async function pressPlay(page: Page): Promise<number> {
+  let pressed = 0;
+  for (const frame of page.frames()) {
+    if (frame.detached || pressed >= 6) continue;
+    const n = Number(await frame.evaluate(MARK_PLAY).catch(() => 0)) || 0;
+    for (let i = 0; i < n && pressed < 6; i++) {
+      if (await tapElement(frame, `[data-thumbs-play="${i}"]`)) {
+        pressed++;
+        await sleep(300);
+      }
     }
   }
-  return clicked;
-})()`;
+  for (const frame of page.frames()) if (!frame.detached) await frame.evaluate(PLAY_VIDEOS).catch(() => {});
+  return pressed;
+}
 
 /**
  * 年齢確認などの入口ページで「はい・ENTER・18歳以上」のボタンを押す。
@@ -158,6 +297,10 @@ const PASS_GATE = `(() => {
   }
   return false;
 })()`;
+
+/** ダウンロードさせる返事（Content-Disposition: attachment）の、ファイル名が動画か */
+const attachmentIsVideo = (disposition: string | undefined) =>
+  !!disposition && /attachment|filename/i.test(disposition) && kindFromUrl(`https://x/${/filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(disposition)?.[1] ?? ""}`) === "video";
 
 /** 動画そのものではなく、配信用に細かく切った断片（一覧に出すと大量のゴミになる） */
 const isSegment = (url: string, type: string | undefined) =>
@@ -224,27 +367,44 @@ export async function renderPage(
 
     /** 最初の表示が終わったら true。その後のページ移動（再生ボタンのつもりがリンクだった等）は止める */
     let loaded = false;
+    /** 中間ページの「次へ」を押している間だけ、ページの移動を許す */
+    let allowNav = false;
+    const startedAt = Date.now();
+    /** 再生ボタンを押し直すのは、この時刻まで（1 回の実行時間の上限を越えないように） */
+    const playUntil = startedAt + timeoutMs + 20000;
     const frameUrlOf = (req: HTTPRequest) => {
       const f = req.frame();
       const u = f?.url();
       return u && /^https?:/.test(u) ? u : undefined;
     };
-    // 広告などで新しいウィンドウが開いたらすぐ閉じる
+    const record = (m: NetworkMedia) => {
+      if (isAdUrl(m.url) || (m.referer && isAdUrl(m.referer))) return;
+      network.set(m.url, m);
+    };
+    // 広告などで新しいウィンドウ・タブが開いたらすぐ閉じる
     page.on("popup", (p) => void p?.close().catch(() => {}));
+    await page.evaluateOnNewDocument(BEFORE_LOAD).catch(() => {});
 
     await page.setRequestInterception(true);
     page.on("request", (req: HTTPRequest) => {
       void (async () => {
         const reqUrl = req.url();
         if (!(await isAllowed(reqUrl))) return req.abort("blockedbyclient").catch(() => {});
-        if (loaded && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
-          return req.abort("aborted").catch(() => {});
-        }
+        // 広告・計測の通信は止める（プレーヤーは広告を飛ばして本編へ進む）
+        if (isAdUrl(reqUrl) && reqUrl !== url) return req.abort("blockedbyclient").catch(() => {});
         const type = req.resourceType();
+        if (req.isNavigationRequest()) {
+          // ダウンロードボタンなどで動画ファイルそのものへ移動しようとしたら、URL だけ記録して読まない
+          if (kindFromUrl(reqUrl) === "video" && reqUrl !== url) {
+            record({ url: reqUrl, kind: "video", referer: frameUrlOf(req) ?? page.url() });
+            return req.abort("aborted").catch(() => {});
+          }
+          if (loaded && !allowNav && req.frame() === page.mainFrame()) return req.abort("aborted").catch(() => {});
+        }
         // 動画本体やフォントは読まない（URL だけ記録する）。通信量と時間の節約
         if (type === "media") {
           if (!reqUrl.startsWith("blob:") && !isSegment(reqUrl, undefined)) {
-            network.set(reqUrl, { url: reqUrl, kind: kindFromUrl(reqUrl) === "image" ? "image" : "video", referer: frameUrlOf(req) });
+            record({ url: reqUrl, kind: kindFromUrl(reqUrl) === "image" ? "image" : "video", referer: frameUrlOf(req) });
           }
           return req.abort("aborted").catch(() => {});
         }
@@ -252,6 +412,19 @@ export async function renderPage(
         return req.continue().catch(() => {});
       })();
     });
+    /** 中身を確かめている途中の返事（拡張子のない配信の目次など）。結果を返す前に待つ */
+    const peeks = new Set<Promise<void>>();
+    const peek = (res: HTTPResponse, resUrl: string, referer: string | undefined) => {
+      const job = (async () => {
+        const body = await Promise.race([res.buffer(), sleep(3000).then(() => null)]).catch(() => null);
+        if (!body) return;
+        const head = body.subarray(0, 64).toString("latin1").replace(/^﻿/, "").trimStart();
+        if (head.startsWith("#EXTM3U")) record({ url: resUrl, kind: "video", format: "M3U8", referer });
+        else if (/<MPD[\s>]/.test(body.subarray(0, 512).toString("latin1"))) record({ url: resUrl, kind: "video", format: "MPD", referer });
+      })();
+      peeks.add(job);
+      void job.finally(() => peeks.delete(job));
+    };
     page.on("response", (res) => {
       const resUrl = res.url();
       if (!/^https?:/.test(resUrl)) return;
@@ -263,14 +436,30 @@ export async function renderPage(
       if (res.status() >= 400) return;
       const type = headers["content-type"];
       if (isSegment(resUrl, type)) return;
+      const referer = frameUrlOf(req);
       // 種類の名乗りが違っていても、プレーヤーが読み込んだ .m3u8 / .mp4 は動画として記録する
       const fetched = req.resourceType() === "xhr" || req.resourceType() === "fetch";
-      const kind = kindFromContentType(type ?? null) ?? (fetched && kindFromUrl(resUrl) === "video" ? "video" : null);
-      if (!kind) return;
+      // 「ダウンロード用」として返された動画ファイル（ファイル保存サービスのダウンロードボタンの先など）
+      const attachment = attachmentIsVideo(headers["content-disposition"]);
+      const kind = kindFromContentType(type ?? null) ?? ((fetched && kindFromUrl(resUrl) === "video") || attachment ? "video" : null);
+      if (!kind) {
+        // 拡張子も種類の名乗りもない、配信の目次（HLS・DASH）を、中身の先頭で見分ける
+        const size = Number(headers["content-length"]);
+        if (
+          fetched &&
+          res.status() === 200 &&
+          !/json|javascript|css|html|image|font|woff|svg|protobuf|grpc/i.test(type ?? "") &&
+          !(size > 2 * 1024 * 1024) &&
+          peeks.size < 40
+        ) {
+          peek(res, resUrl, referer);
+        }
+        return;
+      }
       // アイコンなどの小さな画像（1.5KB 未満）は除く
       const size = Number(headers["content-length"]);
       if (kind === "image" && Number.isFinite(size) && size > 0 && size < 1500) return;
-      network.set(resUrl, { url: resUrl, kind, referer: frameUrlOf(res.request()) });
+      record({ url: resUrl, kind, referer });
     });
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs }).catch(async (err) => {
@@ -282,28 +471,54 @@ export async function renderPage(
       await sleep(500);
       await page.waitForNetworkIdle({ idleTime: 600, timeout: 8000 }).catch(() => {});
     }
+    // 「広告をスキップ」「動画へ進む」などの中間ページ。カウントダウンが終わるのを待って押す（最大 2 回・12 秒）
+    if (options.play) {
+      const until = Date.now() + 12000;
+      let clicks = 0;
+      while (!signal.aborted && clicks < 2 && Date.now() < until) {
+        const state = await page.evaluate(FIND_CONTINUE).catch(() => "none");
+        if (state === "none") break;
+        if (state === "wait") {
+          await sleep(1500);
+          continue;
+        }
+        allowNav = true;
+        const tapped = await tapElement(page.mainFrame(), "[data-thumbs-next]");
+        clicks++;
+        await sleep(800);
+        await page.waitForNetworkIdle({ idleTime: 600, timeout: 8000 }).catch(() => {});
+        allowNav = false;
+        if (!tapped) break;
+      }
+    }
     // 下までスクロールして、遅延読み込みの画像を出させる
     for (let i = 0; i < 8 && !signal.aborted; i++) {
-      const atBottom = await page.evaluate(() => {
-        window.scrollBy(0, window.innerHeight * 1.5);
-        return window.innerHeight + window.scrollY >= document.body.scrollHeight - 10;
-      });
+      const atBottom = await page
+        .evaluate(() => {
+          window.scrollBy(0, window.innerHeight * 1.5);
+          return window.innerHeight + window.scrollY >= document.body.scrollHeight - 10;
+        })
+        .catch(() => true);
       await sleep(350);
       if (atBottom) break;
     }
     await page.waitForNetworkIdle({ idleTime: 600, timeout: 5000 }).catch(() => {});
     loaded = true;
 
-    // 再生ボタンを押して、動画の読み込みを始めさせる（読み込まれた動画の URL は通信の記録に残る）
+    // 再生ボタンを押して、動画の読み込みを始めさせる（読み込まれた動画の URL は通信の記録に残る）。
+    // 1 回目のタップは広告の板に取られることが多いので、動画が読み込まれるまで最大 3 回押し直す
     if (options.play && !signal.aborted) {
-      let pressed = 0;
-      for (const frame of page.frames()) {
-        pressed += Number(await frame.evaluate(PRESS_PLAY).catch(() => 0)) || 0;
-      }
-      if (pressed > 0 || network.size === 0) {
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      const videoCount = () => [...network.values()].filter((n) => n.kind === "video").length;
+      for (let round = 0; round < 3 && !signal.aborted && Date.now() < playUntil; round++) {
+        const before = videoCount();
+        for (const frame of page.frames()) if (!frame.detached) await frame.evaluate(REMOVE_OVERLAYS).catch(() => 0);
+        const pressed = await pressPlay(page);
         await page.waitForNetworkIdle({ idleTime: 800, timeout: 6000 }).catch(() => {});
+        if (videoCount() > before || pressed === 0) break;
       }
     }
+    if (peeks.size) await Promise.race([Promise.all([...peeks]), sleep(3000)]);
 
     const html = await page.content();
     const frames: { url: string; html: string }[] = [];

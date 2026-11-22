@@ -1,4 +1,7 @@
 import type { MediaItem } from "./types";
+import { parseClock, parseIsoDuration } from "./duration";
+import { hostedFile } from "./filehost";
+import { isAdUrl } from "./adblock";
 
 /**
  * HTML からメディア（画像・動画）と、辿る候補のリンクを取り出す。
@@ -208,6 +211,8 @@ export interface LinkCandidate {
   thumb?: string;
   /** リンクのカードにあったプレビュー動画（詳細ページの本編と同じ動画の短い版。本編が見つかれば出さない） */
   preview?: string;
+  /** リンクのカードに出ていた再生時間（秒） */
+  duration?: number;
   /**
    * 優先度。4: サムネイル付きで動画らしい / 3: サムネイル付き / 2: 動画らしい（再生時間・URL など）/
    * 1: タップで移動する仕掛け（onclick・data-href）/ 0: 普通のリンク
@@ -340,8 +345,9 @@ function previewInside(inner: string, base: string): string | undefined {
 }
 
 /** <a> ごとに、中のサムネイルと「動画らしさ」を調べる */
-function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: string; videoish: boolean; text: string; preview?: string }> {
-  const out = new Map<string, { thumb?: string; videoish: boolean; text: string; preview?: string }>();
+type AnchorInfo = { thumb?: string; videoish: boolean; text: string; preview?: string; duration?: number };
+function analyzeAnchors(markup: string, base: string): Map<string, AnchorInfo> {
+  const out = new Map<string, AnchorInfo>();
   for (const m of markup.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
     const attrs = parseAttrs(m[1]);
     const url = resolveUrl(attrs.href, base);
@@ -355,12 +361,17 @@ function analyzeAnchors(markup: string, base: string): Map<string, { thumb?: str
       DURATION_RE.test(text) ||
       VIDEO_URL_RE.test(url) ||
       (!!thumb && VIDEO_CLASS_RE.test(`${attrs.class ?? ""} ${inner.slice(0, 2000)}`));
+    // カードに出ている再生時間（12:34）。日時（2024/01/02 12:34）と取り違えないよう、日付らしい文字があれば使わない
+    const clock = /\d{4}[/.\-年]\d{1,2}/.test(text) ? undefined : parseClock(text);
+    const dataDuration = /\sdata-(?:duration|length|time)\s*=\s*["']([^"']+)["']/i.exec(inner)?.[1];
+    const duration = clock ?? parseIsoDuration(dataDuration);
     const prev = out.get(url);
     out.set(url, {
       thumb: prev?.thumb ?? thumb,
       videoish: (prev?.videoish ?? false) || videoish || !!preview,
       text: `${prev?.text ?? ""} ${text}`.slice(0, 200),
       preview: prev?.preview ?? preview,
+      duration: prev?.duration ?? duration,
     });
   }
   return out;
@@ -421,43 +432,44 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const pageTitle = titleMatch ? decodeEntities(titleMatch[1]).trim().slice(0, 200) : undefined;
 
   const found = new Map<string, MediaItem>();
-  const add = (item: Omit<MediaItem, "id" | "pageUrl">) => {
+  const add = (item: Omit<MediaItem, "id" | "pageUrl">): MediaItem => {
     const id = item.src;
     const existing = found.get(id);
     if (existing) {
       // 既にあるなら、足りない情報（サムネ・タイトル）だけ補う
       existing.thumb ??= item.thumb;
       existing.title ??= item.title;
+      existing.duration ??= item.duration;
       // どこか 1 か所でも確かな出どころ（<video> など）があれば確認済み扱い
       if (!item.unverified) existing.unverified = undefined;
-      return;
+      if (!item.guess) existing.guess = undefined;
+      return existing;
     }
-    found.set(id, { ...item, id, pageUrl });
+    const created = { ...item, id, pageUrl };
+    found.set(id, created);
+    return created;
   };
 
-  const addEmbed = (url: string, title?: string) => {
+  /** 埋め込み動画・共有ファイルとして足せたら、その 1 件を返す（足せなければ null） */
+  const addEmbed = (url: string, title?: string): MediaItem | null => {
     const yt = youtubeId(url);
     if (yt) {
-      add({
+      return add({
         kind: "embed",
         src: `https://www.youtube-nocookie.com/embed/${yt}`,
         thumb: `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`,
         format: "YouTube",
         title,
       });
-      return true;
     }
     const vm = vimeoId(url);
-    if (vm) {
-      add({ kind: "embed", src: `https://player.vimeo.com/video/${vm}`, format: "Vimeo", title });
-      return true;
-    }
+    if (vm) return add({ kind: "embed", src: `https://player.vimeo.com/video/${vm}`, format: "Vimeo", title });
     const other = otherEmbed(url);
-    if (other) {
-      add({ kind: "embed", src: other.src, format: other.format, thumb: other.thumb, title });
-      return true;
-    }
-    return false;
+    if (other) return add({ kind: "embed", src: other.src, format: other.format, thumb: other.thumb, title });
+    // ファイル保存サービスの共有リンク（Google ドライブ・Dropbox など）は、ファイルそのものの URL に書き換える
+    const hosted = hostedFile(url);
+    if (hosted) return add({ kind: "video", src: hosted.src, thumb: hosted.thumb, format: hosted.service, title, unverified: true, guess: !hosted.sure });
+    return null;
   };
 
   // script / style / コメントの中身はタグとして読まない（誤検出を防ぐ）。ただし後で URL 探しには使う
@@ -476,6 +488,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   // --- 1. OGP / Twitter カード（ページの代表サムネイル） ---
   let ogImage: string | undefined;
   let ogVideo: string | undefined;
+  /** ページの代表動画の長さ（<meta property="video:duration" content="秒">） */
+  let metaDuration: number | undefined;
   let redirect: string | undefined;
   for (const t of tags) {
     if (t.name !== "meta") continue;
@@ -485,7 +499,11 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       if (url && url !== pageUrl) redirect ??= url;
       continue;
     }
-    const key = (t.attrs.property || t.attrs.name || "").toLowerCase();
+    const key = (t.attrs.property || t.attrs.name || t.attrs.itemprop || "").toLowerCase();
+    if (/^(?:og:video:duration|video:duration|duration)$/.test(key)) {
+      metaDuration ??= parseIsoDuration(t.attrs.content);
+      continue;
+    }
     const url = resolveUrl(t.attrs.content, base);
     if (!url) continue;
     if (["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"].includes(key)) {
@@ -570,7 +588,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       if (!url || addEmbed(url, t.attrs.title)) continue;
       const kind = kindFromUrl(url);
       if (kind === "video") add({ kind, src: url, format: formatOf(url, kind), unverified: true });
-      else if (!kind && isPageLikeUrl(url) && url !== pageUrl && !AD_FRAME_RE.test(url)) frames.add(url);
+      else if (!kind && isPageLikeUrl(url) && url !== pageUrl && !AD_FRAME_RE.test(url) && !isAdUrl(url)) frames.add(url);
     } else if (t.name === "link") {
       const rel = (t.attrs.rel || "").toLowerCase();
       if (rel === "image_src") {
@@ -583,17 +601,32 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   // --- 4. <a href> : メディアへの直リンク、YouTube へのリンク、辿る候補のページ ---
   const anchors = analyzeAnchors(markup, base);
   const links = new Map<string, LinkCandidate>();
-  const addLink = (url: string, prio: number, thumb?: string, preview?: string) => {
+  const addLink = (url: string, prio: number, thumb?: string, preview?: string, duration?: number) => {
     const prev = links.get(url);
-    if (!prev || prio > prev.prio || (!prev.thumb && thumb) || (!prev.preview && preview)) {
-      links.set(url, { url, prio: Math.max(prio, prev?.prio ?? 0), thumb: prev?.thumb ?? thumb, preview: prev?.preview ?? preview });
+    if (!prev || prio > prev.prio || (!prev.thumb && thumb) || (!prev.preview && preview) || (!prev.duration && duration)) {
+      links.set(url, {
+        url,
+        prio: Math.max(prio, prev?.prio ?? 0),
+        thumb: prev?.thumb ?? thumb,
+        preview: prev?.preview ?? preview,
+        duration: prev?.duration ?? duration,
+      });
     }
   };
   for (const t of tags) {
     if (t.name !== "a") continue;
     const url = resolveUrl(t.attrs.href, base);
     if (!url) continue;
-    if (addEmbed(url, t.attrs.title)) continue;
+    const added = addEmbed(url, t.attrs.title);
+    if (added) {
+      // 一覧のカードのサムネイル・再生時間を、埋め込み動画・共有ファイルにも付ける
+      const info = anchors.get(url);
+      if (info) {
+        if (added.kind === "video") added.thumb ??= info.thumb;
+        added.duration ??= info.duration;
+      }
+      continue;
+    }
     const kind = kindFromUrl(url);
     if (kind) {
       const info = anchors.get(url);
@@ -601,6 +634,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         kind,
         src: url,
         thumb: kind === "video" ? info?.thumb : undefined,
+        duration: kind === "video" ? info?.duration : undefined,
         format: formatOf(url, kind),
         title: t.attrs.title,
         unverified: kind === "video",
@@ -615,7 +649,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         "download" in t.attrs ||
         DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
-      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview);
+      addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration);
     }
   }
 
@@ -762,6 +796,12 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     const main = found.get(ogVideo);
     if (main && !main.thumb) main.thumb = ogImage;
   }
+  // ページの代表動画の長さは、代表動画（なければ、ページにただ 1 本ある動画）に付ける
+  if (metaDuration) {
+    const vids = [...found.values()].filter((m) => m.kind !== "image");
+    const main = (ogVideo && found.get(ogVideo)) || (vids.length === 1 ? vids[0] : undefined);
+    if (main) main.duration ??= metaDuration;
+  }
 
   // スクリプトで別のページへ飛ばすだけのページ（location.href = "…"）
   if (!redirect) {
@@ -794,8 +834,9 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   return {
     clientRendered,
     playerHint,
-    media: [...found.values()],
-    links: [...links.values()],
+    // 広告の配信元の画像・動画（バナー・広告動画）と、広告へのリンクは除く
+    media: [...found.values()].filter((m) => !isAdUrl(m.src)),
+    links: [...links.values()].filter((l) => !isAdUrl(l.url)),
     pagination,
     frames: frameList.slice(0, 6),
     ogImage,
@@ -805,13 +846,13 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   };
 }
 
-type AddFn = (item: Omit<MediaItem, "id" | "pageUrl">) => void;
+type AddFn = (item: Omit<MediaItem, "id" | "pageUrl">) => MediaItem;
 
 function walkJsonLd(
   node: unknown,
   base: string,
   add: AddFn,
-  addEmbed: (url: string, title?: string) => boolean,
+  addEmbed: (url: string, title?: string) => MediaItem | null,
   depth = 0,
 ): void {
   if (depth > 8 || node == null) return;
@@ -833,8 +874,13 @@ function walkJsonLd(
     const thumb = resolveUrl(str(obj.thumbnailUrl) ?? str(obj.thumbnail), base) ?? undefined;
     const content = resolveUrl(str(obj.contentUrl), base);
     const embed = resolveUrl(str(obj.embedUrl), base);
-    if (content) add({ kind: "video", src: content, thumb, format: formatOf(content, "video") ?? "動画", title: name });
-    else if (embed && !addEmbed(embed, name)) add({ kind: "embed", src: embed, thumb, format: "埋め込み", title: name });
+    const duration = parseIsoDuration(str(obj.duration));
+    if (content) add({ kind: "video", src: content, thumb, format: formatOf(content, "video") ?? "動画", title: name, duration });
+    else if (embed) {
+      const added = addEmbed(embed, name) ?? add({ kind: "embed", src: embed, thumb, format: "埋め込み", title: name });
+      added.duration ??= duration;
+      added.thumb ??= thumb;
+    }
   } else if (/ImageObject/i.test(type)) {
     const content = resolveUrl(str(obj.contentUrl) ?? str(obj.url), base);
     if (content) add({ kind: "image", src: content, format: formatOf(content, "image"), title: name });

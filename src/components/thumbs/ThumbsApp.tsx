@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
-import { getVideoThumb, peekVideoThumb } from "./videoThumb";
+import { getVideoDuration, getVideoThumb, peekVideoDuration, peekVideoThumb } from "./videoThumb";
+import { formatDuration } from "@/lib/thumbs/duration";
 import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
@@ -34,6 +35,12 @@ const STORAGE_KEY = "thumbs:v1";
 /** 履歴と登録サイトは「すべて消す」をしても残すので、別の場所に保存する */
 const LIBRARY_KEY = "thumbs:library:v1";
 const MAX_ITEMS = 5000;
+/** 一覧の見た目（サムネイルの大きさ・形）の保存場所 */
+const VIEW_KEY = "thumbs:view:v1";
+/** サムネイルの大きさ（1 枚の最小の幅 px）。画面の幅に合わせて、入るだけ並べる */
+const TILE_SIZES = [56, 76, 100, 130, 170, 220, 300, 420, 640];
+const DEFAULT_TILE = 2;
+type Shape = "square" | "wide";
 
 class ServerError extends Error {
   constructor(public status: number) {
@@ -137,6 +144,8 @@ export function ThumbsApp() {
   const [sites, setSites] = useState<SavedSite[]>([]);
   const [excludes, setExcludes] = useState<string[]>([]);
   const [now, setNow] = useState(0);
+  const [tile, setTile] = useState(DEFAULT_TILE);
+  const [shape, setShape] = useState<Shape>("square");
   const controllers = useRef(new Map<string, AbortController>());
   // 取得中にリストを変えても、次の通信から最新のリストが使われるよう ref にも持つ
   const excludesRef = useRef<string[]>([]);
@@ -158,6 +167,9 @@ export function ThumbsApp() {
       if (Array.isArray(library?.history)) setHistory(library.history);
       if (Array.isArray(library?.sites)) setSites(library.sites.slice(0, MAX_SITES));
       if (Array.isArray(library?.excludes)) setExcludes(library.excludes.slice(0, MAX_EXCLUDES));
+      const view = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
+      if (typeof view?.tile === "number") setTile(Math.min(TILE_SIZES.length - 1, Math.max(0, Math.round(view.tile))));
+      if (view?.shape === "wide" || view?.shape === "square") setShape(view.shape);
     } catch {
       /* ignore */
     }
@@ -205,6 +217,14 @@ export function ThumbsApp() {
       /* ignore */
     }
   }, [history, sites, excludes]);
+  useEffect(() => {
+    if (!loaded.current) return;
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ tile, shape }));
+    } catch {
+      /* ignore */
+    }
+  }, [tile, shape]);
 
   /** 履歴の先頭に入れる（同じ URL があれば置き換え） */
   const recordHistory = useCallback((entry: HistoryEntry) => {
@@ -395,6 +415,58 @@ export function ThumbsApp() {
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
+  /** 画面で調べた再生時間を、一覧に覚えさせる（保存されるので、次からは調べ直さない） */
+  const setDuration = useCallback(
+    (id: string, duration: number) =>
+      setItems((l) => l.map((i) => (i.id === id && !i.duration ? { ...i, duration: Math.round(duration * 10) / 10 } : i))),
+    [],
+  );
+
+  // --- サムネイルの大きさ：ボタン・スライダー・2 本指のピンチ（スマホ）・Ctrl + ホイール（パソコンのトラックパッドのピンチ）---
+  const gridRef = useRef<HTMLUListElement>(null);
+  const pinch = useRef<{ dist: number; tile: number } | null>(null);
+  const resize = useCallback((delta: number) => setTile((t) => Math.min(TILE_SIZES.length - 1, Math.max(0, t + delta))), []);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    let wheel = 0;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      wheel += e.deltaY;
+      if (Math.abs(wheel) > 40) {
+        resize(wheel < 0 ? 1 : -1);
+        wheel = 0;
+      }
+    };
+    // iPhone の Safari は、2 本指の操作でページ全体を拡大してしまうので止める
+    const stopZoom = (e: Event) => e.preventDefault();
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2) e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", stopZoom);
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", stopZoom);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+  }, [resize, items.length]);
+  const touchDist = (t: React.TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const onGridTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) pinch.current = { dist: touchDist(e.touches), tile };
+  };
+  const onGridTouchMove = (e: React.TouchEvent) => {
+    if (!pinch.current || e.touches.length !== 2) return;
+    // 指を 1.35 倍広げるごとに 1 段大きく、縮めるごとに 1 段小さく
+    const steps = Math.round(Math.log(touchDist(e.touches) / pinch.current.dist) / Math.log(1.35));
+    const next = Math.min(TILE_SIZES.length - 1, Math.max(0, pinch.current.tile + steps));
+    if (next !== tile) setTile(next);
+  };
+  const onGridTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length < 2) pinch.current = null;
+  };
 
   // --- リンク切れを最初から出さない ---
   // 表示するのは「最近リンク切れでないと確かめたもの」だけ。
@@ -578,7 +650,7 @@ export function ThumbsApp() {
         )}
 
         {items.length > 0 && (
-          <div className="mt-3 flex gap-2 py-1">
+          <div className="mt-3 flex flex-wrap items-center gap-2 py-1">
             {(
               [
                 ["all", "すべて"],
@@ -599,15 +671,73 @@ export function ThumbsApp() {
                 {label} <span className="opacity-60">{counts[value]}</span>
               </button>
             ))}
+            <div className="ml-auto flex items-center gap-1.5 text-xs text-neutral-500" title="一覧の大きさ（スマホは 2 本指のピンチ、パソコンは Ctrl + ホイールでも変えられます）">
+              <button
+                type="button"
+                onClick={() => setShape(shape === "square" ? "wide" : "square")}
+                aria-label={shape === "square" ? "横長（16:9）で表示" : "正方形で表示"}
+                title={shape === "square" ? "横長（16:9）で表示" : "正方形で表示"}
+                className="h-7 rounded-full bg-neutral-200/70 px-2.5 font-bold dark:bg-neutral-800"
+              >
+                {shape === "square" ? "⬜" : "▭"}
+              </button>
+              <button
+                type="button"
+                onClick={() => resize(-1)}
+                disabled={tile === 0}
+                aria-label="小さく（たくさん並べる）"
+                className="h-7 w-7 rounded-full bg-neutral-200/70 text-base font-bold disabled:opacity-30 dark:bg-neutral-800"
+              >
+                −
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={TILE_SIZES.length - 1}
+                value={tile}
+                onChange={(e) => setTile(Number(e.target.value))}
+                aria-label="サムネイルの大きさ"
+                className="w-20 accent-fuchsia-500 sm:w-28"
+              />
+              <button
+                type="button"
+                onClick={() => resize(1)}
+                disabled={tile === TILE_SIZES.length - 1}
+                aria-label="大きく"
+                className="h-7 w-7 rounded-full bg-neutral-200/70 text-base font-bold disabled:opacity-30 dark:bg-neutral-800"
+              >
+                ＋
+              </button>
+            </div>
           </div>
         )}
 
         {items.length === 0 && jobs.length === 0 && <EmptyState />}
 
-        <ul className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+        <ul
+          ref={gridRef}
+          onTouchStart={onGridTouchStart}
+          onTouchMove={onGridTouchMove}
+          onTouchEnd={onGridTouchEnd}
+          onTouchCancel={onGridTouchEnd}
+          // 2 本指のピンチをページの拡大ではなく、一覧の大きさの変更に使う（1 本指のスクロールはそのまま）
+          style={{
+            gridTemplateColumns: `repeat(auto-fill, minmax(min(${TILE_SIZES[tile]}px, 100%), 1fr))`,
+            touchAction: "pan-x pan-y",
+          }}
+          className={`mt-2 grid ${tile <= 1 ? "gap-1" : "gap-1.5"}`}
+        >
           {visible.map((item, index) => (
             <li key={item.id}>
-              <Thumb item={item} onOpen={() => setViewer(index)} onBroken={hideItem} />
+              <Thumb
+                item={item}
+                shape={shape}
+                large={TILE_SIZES[tile] >= 220}
+                small={tile <= 1}
+                onOpen={() => setViewer(index)}
+                onBroken={hideItem}
+                onDuration={setDuration}
+              />
             </li>
           ))}
         </ul>
@@ -659,7 +789,10 @@ function EmptyState() {
         <li>・サイトが自動アクセスを断るときや、年齢確認の入口があるときは、ブラウザで開き直して進みます</li>
         <li>・JavaScript で画像を後から出すサイトは、自動でブラウザで開いて集めます（少し時間がかかります）</li>
         <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
-        <li>・🎬 は動画、🖼 は画像。タップで再生・拡大、ダウンロードもできます</li>
+        <li>・🎬 は動画、🖼 は画像。右下の数字は動画の長さ。タップで再生・拡大、ダウンロードもできます</li>
+        <li>・一覧の大きさは右上の − ＋ で変えられます（スマホは 2 本指でピンチ、パソコンは Ctrl + ホイールでも）</li>
+        <li>・Google ドライブ・Dropbox・OneDrive などの共有リンクも、そのまま入れれば動画を取り出します</li>
+        <li>・広告は自動で止め、再生ボタンや「広告をスキップ」も自動で押して、奥にある動画を探します</li>
         <li>・サムネイルのない動画は、動画から 1 コマ取り出してサムネイルを作ります（この端末に保存）</li>
         <li>・一覧はこの端末のブラウザに保存されます</li>
       </ul>
@@ -761,7 +894,26 @@ function JobRow({
  *   失敗したらサーバー中継で再挑戦。画像がそれでも駄目なら一覧から外す
  * - サムネイルのない動画（または読み込めなかった動画）は、画面に見えたら動画から 1 コマ取り出して作る
  */
-function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onBroken: (id: string) => void }) {
+function Thumb({
+  item,
+  shape,
+  large,
+  small,
+  onOpen,
+  onBroken,
+  onDuration,
+}: {
+  item: Item;
+  shape: Shape;
+  /** 大きく表示しているとき（題名も出す） */
+  large: boolean;
+  /** 小さく表示しているとき（印を小さくする） */
+  small: boolean;
+  onOpen: () => void;
+  onBroken: (id: string) => void;
+  /** 画面で再生時間がわかったとき */
+  onDuration: (id: string, duration: number) => void;
+}) {
   const imageSrc = item.kind === "image" ? item.src : item.thumb;
   const [attempt, setAttempt] = useState(0);
   const [imgFailed, setImgFailed] = useState(false);
@@ -770,11 +922,13 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
   const ref = useRef<HTMLButtonElement>(null);
   const video = isVideoLike(item);
   const needCapture = item.kind === "video" && !isHls(item) && (!imageSrc || imgFailed) && captured === undefined;
+  /** サーバーが長さを調べられなかった動画は、画面で調べる（埋め込み動画は調べられない） */
+  const needDuration = item.kind === "video" && !item.duration;
   const proxied = proxyUrl(item);
 
   // 画面に入ったら（少し手前から）作り始める。一度見えたら覚えておく
   useEffect(() => {
-    if (!needCapture || visible) return;
+    if (!(needCapture || needDuration) || visible) return;
     const el = ref.current;
     if (!el) return;
     const io = new IntersectionObserver(
@@ -788,7 +942,25 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [needCapture, visible]);
+  }, [needCapture, needDuration, visible]);
+
+  // 長さ：1 コマを作るときにわかればそれを使い、なければ動画の最初の情報だけ読んで調べる
+  const report = useRef(onDuration);
+  useEffect(() => {
+    report.current = onDuration;
+  });
+  useEffect(() => {
+    if (!needDuration || !visible || needCapture) return;
+    let alive = true;
+    const known = peekVideoDuration(item.src);
+    const job = known !== undefined ? Promise.resolve(known) : getVideoDuration(item.src, proxied, isHls(item));
+    void job.then((d) => {
+      if (alive && d) report.current(item.id, d);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [needDuration, visible, needCapture, item, proxied]);
 
   useEffect(() => {
     if (!needCapture || !visible) return;
@@ -800,6 +972,8 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
       alive = false;
     };
   }, [needCapture, visible, item.src, proxied]);
+
+  const duration = item.duration ?? (item.kind === "video" ? (peekVideoDuration(item.src) ?? undefined) : undefined);
 
   const onError = () => {
     if (attempt === 0) setAttempt(1);
@@ -844,24 +1018,33 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
       ref={ref}
       type="button"
       onClick={onOpen}
-      className="group relative block aspect-square w-full overflow-hidden rounded-lg bg-neutral-200 active:scale-[0.97] dark:bg-neutral-800"
+      className={`group relative block w-full overflow-hidden rounded-lg bg-neutral-200 active:scale-[0.97] dark:bg-neutral-800 ${
+        shape === "wide" ? "aspect-video" : "aspect-square"
+      }`}
     >
       {media}
       <span
-        className={`absolute left-1 top-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold text-white shadow ${
-          video ? "bg-red-500/90" : "bg-sky-500/90"
-        }`}
+        className={`absolute left-1 top-1 rounded-md font-bold text-white shadow ${
+          small ? "px-1 text-[8px]" : "px-1.5 py-0.5 text-[10px]"
+        } ${video ? "bg-red-500/90" : "bg-sky-500/90"}`}
       >
-        {video ? "🎬 動画" : "🖼 画像"}
+        {small ? (video ? "🎬" : "🖼") : video ? "🎬 動画" : "🖼 画像"}
       </span>
-      {item.format && (
-        <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-white">
+      {item.format && !small && (
+        <span className="absolute bottom-1 left-1 max-w-[60%] truncate rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-white">
           {item.format}
         </span>
       )}
-      {video && (
-        <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm">▶</span>
+      {duration ? (
+        <span
+          className={`absolute bottom-1 right-1 rounded bg-black/75 font-bold tabular-nums text-white ${small ? "px-1 text-[9px]" : "px-1.5 py-0.5 text-[11px]"}`}
+        >
+          {formatDuration(duration)}
+        </span>
+      ) : null}
+      {large && item.title && (
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 line-clamp-2 bg-gradient-to-t from-black/80 to-transparent px-2 pb-6 pt-6 text-left text-xs font-semibold text-white">
+          {item.title}
         </span>
       )}
     </button>
@@ -1100,6 +1283,7 @@ function Viewer({
         <span className="rounded-md bg-white/10 px-2 py-1 font-semibold">
           {item.kind === "image" ? "🖼 画像" : "🎬 動画"}
           {item.format ? ` ・ ${item.format}` : ""}
+          {item.duration ? ` ・ ${formatDuration(item.duration)}` : ""}
         </span>
         <span className="opacity-60">
           {index + 1} / {items.length}
