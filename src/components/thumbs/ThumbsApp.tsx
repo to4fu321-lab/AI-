@@ -322,7 +322,12 @@ export function ThumbsApp() {
                 else if (event.type === "note") updateJob(id, { note: event.message });
                 else if (event.type === "media") {
                   foundCount += event.items.length;
-                  setItems((list) => {
+                  setItems((prev) => {
+                    // 以前に取得して「確認できず非表示」のまま残っているものが、いま確認済みで届いたものと同じなら、
+                    // 古いほうを捨てる（残しておくと、新しく届いたものが「もうある」と見なされて、ずっと表示されない）
+                    const arriving = new SeenMedia(event.items.filter((i) => i.checked));
+                    const stamp = Date.now();
+                    const list = prev.filter((i) => isFresh(i, stamp) || !arriving.has(i));
                     // 同じ動画（URL の後ろだけ違う・画質違い）は 2 個入れない
                     const known = new SeenMedia(list);
                     const ids = new Set(list.map((i) => i.id));
@@ -334,7 +339,7 @@ export function ThumbsApp() {
                       // サーバーがリンク切れでないと確かめたもの。受け取った時刻を印にする
                       fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined });
                     }
-                    return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
+                    return fresh.length || list.length !== prev.length ? [...list, ...fresh].slice(-MAX_ITEMS) : prev;
                   });
                 }
               }

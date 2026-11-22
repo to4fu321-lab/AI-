@@ -18,6 +18,8 @@ interface Session {
   at: number;
   /** このページを使う処理を 1 つずつ順番に行うための列（読み込みの途中でページを移動すると、ほかの読み込みが壊れるため） */
   queue: Promise<unknown>;
+  /** 「人間か確かめる」ページを通れなかったとき、次に試してよい時刻（それまでは、待たずにあきらめる） */
+  stuckUntil?: number;
 }
 
 const sessions = new Map<string, Promise<Session | null>>();
@@ -201,11 +203,14 @@ async function readInSession(session: Session, origin: string, url: string, sign
     if (new URL(out.finalUrl).origin !== origin) return null;
     return out;
   }
-  // ページ自体を移動して、確認を通り抜ける
+  // さっき確認を通れなかったばかりなら、待たずにあきらめる（1 ページごとに何十秒も待たないように）
+  if (session.stuckUntil && Date.now() < session.stuckUntil) return null;
+  // ページ自体を移動して、確認を通り抜ける。確認には 20〜30 秒かかることがあるので、40 秒まで待つ
   const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
-  const until = Date.now() + 15000;
+  const until = Date.now() + 40000;
   while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) await sleep(600);
   const stuck = await page.evaluate(CHALLENGE).catch(() => true);
+  session.stuckUntil = stuck ? Date.now() + 60000 : undefined;
   const html = stuck ? "" : await page.content().catch(() => "");
   const finalUrl = page.url();
   session.at = Date.now();
