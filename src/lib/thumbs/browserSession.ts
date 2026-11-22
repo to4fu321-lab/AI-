@@ -218,7 +218,7 @@ async function readInSession(session: Session, origin: string, url: string, sign
   // ページを開いてから数秒で済むことが多い。ページは移動せずに（移動すると確認がやり直しになる）、
   // 少し待ちながら読み込みを試す。さっき別のページで待っても駄目だったばかりなら、待たない
   const patient = !(session.stuckUntil && Date.now() < session.stuckUntil);
-  const waitUntil = Date.now() + (patient ? 14000 : 0);
+  const waitUntil = Date.now() + (patient ? 3000 : 0);
   let polls = 0;
   while (Date.now() < waitUntil && !signal.aborted && !page.isClosed()) {
     await sleep(1500);
@@ -231,9 +231,47 @@ async function readInSession(session: Session, origin: string, url: string, sign
       return sameSite(out) ? out : null;
     }
   }
-  // このページは、ページを開かないと通れない確認がかかっている（サイトの一部のページだけにかかることがある）。
-  // 以降 20 秒は、ほかのページで断られても待たない（1 ページごとに待つと時間を使い切るため）
-  session.stuckUntil = Date.now() + 20000;
-  thumbsLog(`session 確認ページ ${Date.now() - began}ms（${polls} 回待った）HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
+  if (!patient) {
+    thumbsLog(`session 確認ページ ${Date.now() - began}ms HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
+    return { status: 403, html: "", finalUrl: url };
+  }
+  // ページ自体をその URL へ移動して、確認ページに確認を済ませてもらう（最大 60 秒）。
+  // 済んだかどうかは、ページが本物に変わったか・中からの読み込みが通るようになったかで見る
+  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
+  const navUntil = Date.now() + 60000;
+  let n = 0;
+  while (Date.now() < navUntil && !signal.aborted && !page.isClosed()) {
+    await sleep(2000);
+    n++;
+    const title = await page.title().catch(() => "?");
+    const waiting = await page.evaluate(CHALLENGE).catch(() => true);
+    const names = await page
+      .browser()
+      .cookies()
+      .then((list) => list.filter((c) => origin.includes(c.domain.replace(/^\./, ""))).map((c) => c.name))
+      .catch(() => [] as string[]);
+    if (n <= 3 || n % 5 === 0) {
+      thumbsLog(`session 確認待ち ${Math.round((Date.now() - began) / 1000)}秒 題名「${title.slice(0, 30)}」 確認中=${waiting} Cookie=${names.join(",").slice(0, 120)}`);
+    }
+    if (!waiting) {
+      const html = await page.content().catch(() => "");
+      if (html.length > 200 && !isChallengeHtml(html)) {
+        session.at = Date.now();
+        session.stuckUntil = undefined;
+        thumbsLog(`session 移動して通過 ${Date.now() - began}ms HTTP ${res?.status() ?? "-"} html=${html.length} ${url.slice(0, 100)}`);
+        return page.url().startsWith(origin) ? { status: 200, html: html.slice(0, 3_000_000), finalUrl: page.url() } : null;
+      }
+    }
+    out = await fetchFromPage(page, url).catch(() => null);
+    if (out && passed(out)) {
+      session.at = Date.now();
+      session.stuckUntil = undefined;
+      thumbsLog(`session 確認が済んだ ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
+      return sameSite(out) ? out : null;
+    }
+  }
+  // 以降 30 秒は、ほかのページで断られても待たない（1 ページごとに待つと時間を使い切るため）
+  session.stuckUntil = Date.now() + 30000;
+  thumbsLog(`session 確認を通れず ${Date.now() - began}ms HTTP ${res?.status() ?? "-"} ${url.slice(0, 100)}`);
   return { status: 403, html: "", finalUrl: url };
 }
