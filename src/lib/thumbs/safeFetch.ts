@@ -177,6 +177,23 @@ export class CookieJar {
   }
 }
 
+/**
+ * 動作の記録（Vercel のログに出る）。本番でだけ起きる不具合の原因を調べるためのもの。
+ * 出すのは「相手のサイトの返事」（URL・ステータス・種類・かかった時間）だけ。Cookie や合言葉は出さない。
+ * 多くなりすぎないよう、1 分あたり 300 行まで
+ */
+let logWindow = 0;
+let logCount = 0;
+export function thumbsLog(message: string) {
+  const minute = Math.floor(Date.now() / 60000);
+  if (minute !== logWindow) {
+    logWindow = minute;
+    logCount = 0;
+  }
+  if (logCount++ < 300) console.log(`[thumbs] ${message}`);
+}
+const brief = (u: string) => u.replace(/^https?:\/\//, "").replace(/([?&](?:token|wt|key|sig|signature|auth)=)[^&]+/gi, "$1…").slice(0, 110);
+
 /** リダイレクトを手動で辿り、毎回接続先を検査する fetch。最終的な URL も返す。 */
 export async function safeFetch(raw: string, opts: SafeFetchOptions = {}): Promise<{ res: Response; url: string }> {
   const timeout = new AbortController();
@@ -187,6 +204,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions = {}): Promi
   (timer as { unref?: () => void }).unref?.();
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout.signal]) : timeout.signal;
   let current = raw;
+  const began = Date.now();
   try {
     for (let hop = 0; hop <= 8; hop++) {
       const url = await assertPublicUrl(current);
@@ -210,10 +228,19 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions = {}): Promi
         continue;
       }
       if (opts.streamBody) clearTimeout(timer);
+      // うまくいった画像・動画の読み込みは記録しない（数が多い）。ページ・データと、失敗は記録する
+      const type = res.headers.get("content-type") ?? "";
+      if (!(res.ok || res.status === 206) || /html|json|mpegurl|text\/plain/i.test(type)) {
+        const blockedBy = res.headers.get("cf-mitigated") ? ` cf=${res.headers.get("cf-mitigated")}` : "";
+        const server = res.headers.get("server") ? ` server=${res.headers.get("server")}` : "";
+        thumbsLog(`fetch ${res.status} ${Date.now() - began}ms ${type.split(";")[0]}${blockedBy}${res.ok ? "" : server} ${brief(url.toString())}${hop ? ` (転送 ${hop} 回)` : ""}`);
+      }
       return { res, url: url.toString() };
     }
   } catch (err) {
     clearTimeout(timer);
+    const e = err as { name?: string; message?: string; cause?: { code?: string } };
+    if (e?.name !== "AbortError") thumbsLog(`fetch 失敗 ${Date.now() - began}ms ${e?.name ?? ""} ${e?.cause?.code ?? e?.message ?? ""} ${brief(current)}`);
     throw err;
   }
   clearTimeout(timer);

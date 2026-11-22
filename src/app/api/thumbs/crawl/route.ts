@@ -1,7 +1,7 @@
 import { guardApi } from "@/lib/access/locks";
 import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { crawl, type CrawlProgress, markStuck, MAX_PENDING, MAX_PRINTS, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
-import { assertPublicUrl, FetchBlockedError } from "@/lib/thumbs/safeFetch";
+import { assertPublicUrl, FetchBlockedError, thumbsLog } from "@/lib/thumbs/safeFetch";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "@/lib/thumbs/types";
 
 export const runtime = "nodejs";
@@ -78,7 +78,21 @@ export async function POST(request: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
+      // 動作の記録：この回に何が起きたかを、最後に 1 行にまとめる
+      const tally = { pages: 0, media: 0, videos: 0, skips: 0, errors: [] as string[], notes: [] as string[], end: "" };
+      thumbsLog(
+        `start ${raw.slice(0, 120)} depth=${options.depth} kinds=${options.kinds} render=${options.render} cross=${options.crossSite} robots=${options.robots}` +
+          ` gofileToken=${options.gofileToken ? "あり" : "なし"} resume=${resume ? `queue ${resume.queue.length}・pages ${resume.pages}` : "なし"}`,
+      );
       const send = (e: CrawlEvent) => {
+        if (e.type === "page") tally.pages++;
+        else if (e.type === "media") {
+          tally.media += e.items.length;
+          tally.videos += e.items.filter((m) => m.kind !== "image").length;
+        } else if (e.type === "skip") tally.skips++;
+        else if (e.type === "error") tally.errors.push(`${e.message.slice(0, 80)} @ ${e.url.slice(0, 70)}`);
+        else if (e.type === "note") tally.notes.push(e.message.slice(0, 300));
+        else if (e.type === "continue" || e.type === "done") tally.end = e.type;
         if (!closed) controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
       };
       const close = () => {
@@ -95,6 +109,7 @@ export async function POST(request: Request) {
           if (closed) return;
           const now = Date.now();
           const running = [...progress.inFlight];
+          thumbsLog(`時間切れの手前で区切りました。読んでいたページ：${running.map(([u, at]) => `${u.slice(0, 80)}（${Math.round((now - at) / 1000)}秒）`).join(" / ") || "なし"}`);
           const slow = running.filter(([, at]) => now - at > 20000).map(([u]) => u);
           const base = progress.safe ?? resume;
           if (base) send({ type: "continue", state: markStuck(base, slow.length ? slow : running.map(([u]) => u)) });
@@ -116,6 +131,11 @@ export async function POST(request: Request) {
       } finally {
         clearTimeout(hardStop);
         close();
+        thumbsLog(
+          `end ${tally.end || (abort.signal.aborted ? "中断" : "?")} ${Date.now() - startedAt}ms pages=${tally.pages} media=${tally.media} videos=${tally.videos} skips=${tally.skips}` +
+            ` errors=${tally.errors.length}${tally.errors.length ? `［${tally.errors.slice(0, 6).join(" ｜ ")}］` : ""}` +
+            `${tally.notes.length ? ` notes［${tally.notes.slice(-3).join(" ｜ ")}］` : ""}`,
+        );
       }
     },
     cancel() {
