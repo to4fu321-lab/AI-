@@ -8,8 +8,13 @@ export interface MediaItem {
   src: string;
   /** 一覧に出すサムネイル。動画でポスター画像がない場合は省略 */
   thumb?: string;
-  /** 見つかったページ */
+  /** 見つかったページ（「元ページ」で開く場所） */
   pageUrl: string;
+  /**
+   * 再生・保存のときに Referer として名乗るページ。iframe の中のプレーヤーで見つけた動画は
+   * そのプレーヤーのページでないと再生を断られることがあるため、pageUrl と別に持つ
+   */
+  referer?: string;
   /** 拡張子などから判定した形式（JPG, PNG, GIF, MP4, M3U8, YouTube ...） */
   format?: string;
   /** alt やタイトルなどの説明 */
@@ -59,7 +64,17 @@ export interface CrawlOptions {
 
 export interface QueueItem {
   url: string;
+  /** 入力ページからリンクを何回辿ったか（「下の階層」の上限に使う） */
   depth: number;
+  /**
+   * 読む順番の段（小さいほど先）。ページ送りも 1 段進めるので、
+   * 「一覧 1 ページ目 → その詳細ページ → 一覧 2 ページ目 → …」の順に交互に読める
+   */
+  rank?: number;
+  /** 同じ段の中での優先度（大きいほど先）。サムネイル付きリンク・動画らしいリンクが上 */
+  prio?: number;
+  /** このページへのリンクに付いていたサムネイル（詳細ページの動画のサムネイルに引き継ぐ） */
+  thumb?: string;
 }
 
 /**
