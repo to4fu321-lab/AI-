@@ -48,7 +48,13 @@ async function probe(
     const n = kind === "video" ? 376 : 64;
     const headers: Record<string, string> = { range: `bytes=0-${n - 1}`, accept: kind === "video" ? "video/*,*/*;q=0.5" : "image/*,*/*;q=0.5" };
     if (referer) headers.referer = referer;
-    const { res } = await safeFetch(url, { headers, timeoutMs: 8000, signal, jar });
+    let { res } = await safeFetch(url, { headers, timeoutMs: 8000, signal, jar });
+    if (res.status !== 200 && res.status !== 206 && res.status !== 404 && res.status !== 410) {
+      // ダウンロード用の仕組み（download.php など）には、部分取得（Range）を頼むとエラーを返すものがある。頼まずに読み直す
+      await res.body?.cancel().catch(() => {});
+      delete headers.range;
+      ({ res } = await safeFetch(url, { headers, timeoutMs: 8000, signal, jar }));
+    }
     if (res.status !== 200 && res.status !== 206) {
       await res.body?.cancel().catch(() => {});
       return transientStatus(res.status) ? "unknown" : "no";

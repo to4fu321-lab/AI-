@@ -113,6 +113,7 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     const zone = clamp(v.zone, 0, 2, 0);
     if (zone) item.zone = zone;
     if (v.root === true) item.root = true;
+    if (isHttpUrl(v.from)) item.from = v.from;
     out.push(item);
   }
   return out;

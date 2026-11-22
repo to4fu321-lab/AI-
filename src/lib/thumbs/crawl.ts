@@ -5,6 +5,7 @@ import { isExcluded, isItemExcluded } from "./exclude";
 import { RenderDeferred, renderPage, type Rendered } from "./render";
 import { checkMedia } from "./probe";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
+import { mediaMime, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
@@ -337,7 +338,7 @@ export async function* crawl(
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
 
-  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string, zone = 0, root = false) => {
+  const enqueue = (url: string, depth: number, rank: number, prio: number, thumb?: string, zone = 0, root = false, from?: string) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) {
@@ -356,13 +357,14 @@ export async function* crawl(
     const entry: QueueItem = { url, depth, rank, prio, thumb };
     if (zone) entry.zone = zone;
     if (root) entry.root = true;
+    if (from) entry.from = from;
     queue.push(entry);
     queuedByUrl.set(url, entry);
     return true;
   };
 
   /** 今は辿らないリンクを取っておく（動画が見つからないときに、ここから範囲を広げる） */
-  const hold = (url: string, depth: number, prio: number, thumb: string | undefined, zone: number) => {
+  const hold = (url: string, depth: number, prio: number, thumb: string | undefined, zone: number, from?: string) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return;
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) return;
@@ -374,7 +376,7 @@ export async function* crawl(
       return;
     }
     if (reserve.length >= MAX_RESERVE) return;
-    const entry: QueueItem = { url, depth, prio, thumb, zone };
+    const entry: QueueItem = { url, depth, prio, thumb, zone, from };
     reserve.push(entry);
     reservedByKey.set(key, entry);
   };
@@ -396,7 +398,7 @@ export async function* crawl(
       if ((videos > 0 || promising) && (reserve[0].prio ?? 0) < 2) break;
       const c = reserve.shift()!;
       reservedByKey.delete(normalizePageUrl(c.url));
-      if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, c.zone ?? 0)) added++;
+      if (enqueue(c.url, c.depth, lastRank + 1, c.prio ?? 0, c.thumb, c.zone ?? 0, false, c.from)) added++;
     }
     widened += added;
     return added;
@@ -539,7 +541,8 @@ export async function* crawl(
                 id: finalUrl,
                 kind: directKind,
                 src: finalUrl,
-                pageUrl: finalUrl,
+                pageUrl: item.from ?? finalUrl,
+                referer: item.from,
                 thumb: directKind === "video" ? item.thumb : undefined,
                 format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
                 // いま実際に読めたので、リンク切れではない
@@ -556,8 +559,31 @@ export async function* crawl(
               return events;
             }
             if (type && !/html|xml|text\/plain/i.test(type)) {
-              await res.body?.cancel();
-              events.push({ type: "skip", url, reason: `ページではありません（${type.split(";")[0]}）` });
+              // ページでも、画像・動画と名乗ってもいない（「ダウンロード用」など）。先頭の中身が動画・画像なら、それ自体を 1 件にする
+              const mime = mediaMime(await readHead(res, 512));
+              const sniffed = mime?.startsWith("image/") ? "image" : mime ? "video" : null;
+              if (!sniffed || (sniffed === "image" && (zone > 0 || options.kinds === "video")) || (sniffed === "video" && !wantsVideo)) {
+                events.push({ type: "skip", url, reason: `ページではありません（${type.split(";")[0]}）` });
+                return events;
+              }
+              const direct: MediaItem = {
+                id: finalUrl,
+                kind: sniffed,
+                src: finalUrl,
+                pageUrl: item.from ?? finalUrl,
+                referer: item.from,
+                thumb: sniffed === "video" ? item.thumb : undefined,
+                format: mime!.split("/")[1].replace(/^x-/, "").replace("quicktime", "MOV").replace("jpeg", "JPG").toUpperCase(),
+                checked: true,
+              };
+              if (seenMedia.has(direct)) {
+                events.push({ type: "page", url: finalUrl, depth, found: 0 });
+                return events;
+              }
+              seenMedia.add(direct);
+              found++;
+              if (sniffed === "video") videos++;
+              events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
               return events;
             }
             html = await readLimited(res, MAX_HTML_BYTES);
@@ -755,9 +781,9 @@ export async function* crawl(
         const z = options.crossSite ? 0 : zoneOf(link.url, home);
         const within = depth < options.depth;
         if (within && (z === 0 || (z === 1 && wantsVideo && link.prio >= 2))) {
-          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z);
+          enqueue(link.url, depth + 1, rank + 1, link.prio, link.thumb, z, false, finalUrl);
         } else if (autoWiden && depth < options.depth + WIDEN_EXTRA_DEPTH && (zone < 2 || link.prio >= 2)) {
-          hold(link.url, depth + 1, link.prio, link.thumb, z);
+          hold(link.url, depth + 1, link.prio, link.thumb, z, finalUrl);
         }
       }
     } catch (err) {
