@@ -461,10 +461,22 @@ export function ThumbsApp() {
       `https://search.yahoo.co.jp/search?p=${q(`"gofile.io/d/" ${kw}`)}`,
       `https://search.yahoo.co.jp/search?p=${q(`gofile ${kw || "動画"} 掲示板`)}`,
       `https://www.bing.com/search?q=${q(`"gofile.io/d/" ${kw}`)}`,
+      // 5ちゃんねるのスレッド検索・はてなブックマークの本文検索（掲示板・まとめ記事を探す）
+      `https://find.5ch.net/search?q=${q(`gofile ${kw}`)}`,
+      `https://b.hatena.ne.jp/q/${q(`gofile ${kw}`)}?target=text&sort=recent`,
+      // 海外の検索（韓国・チェコ・中国。日本の検索に出ない掲示板・まとめが見つかることがある）
+      `https://search.naver.com/search.naver?query=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://search.seznam.cz/?q=${q(`"gofile.io/d/" ${kw}`)}`,
+      `https://www.sogou.com/web?query=${q(`"gofile.io/d/" ${kw}`)}`,
     ];
     const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true };
     setFormError(null);
-    for (const u of urls) void startJob(u, settings);
+    // 一度に全部は走らせない（サーバーと Gofile に負担がかかる）。3 つずつ、終わったら次を始める
+    let next = 0;
+    const worker = async () => {
+      while (next < urls.length) await startJob(urls[next++], settings);
+    };
+    for (let i = 0; i < 3; i++) void worker();
   };
 
   /** 除外リストに追加し、すでに一覧にある該当の画像・動画も消す */
@@ -916,8 +928,23 @@ function EmptyState() {
 function huntLabel(url: string): string {
   try {
     const u = new URL(url);
-    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? "").replace(/"/g, "");
-    const where = u.pathname.startsWith("/realtime") ? "X の投稿" : u.hostname.includes("bing") ? "Web（Bing）" : "Web（Yahoo!）";
+    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? decodeURIComponent(u.pathname.replace(/^\/q\//, ""))).replace(/"/g, "");
+    const h = u.hostname;
+    const where = u.pathname.startsWith("/realtime")
+      ? "X の投稿"
+      : h.includes("bing")
+        ? "Web（Bing）"
+        : h.includes("5ch")
+          ? "5ちゃんねる"
+          : h.includes("hatena")
+            ? "はてなブックマーク"
+            : h.includes("naver")
+              ? "Web（Naver）"
+              : h.includes("seznam")
+                ? "Web（Seznam）"
+                : h.includes("sogou")
+                  ? "Web（Sogou）"
+                  : "Web（Yahoo!）";
     return `🔎 Gofile 探し・${where}：${word}`;
   } catch {
     return url;

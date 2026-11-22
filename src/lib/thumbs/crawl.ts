@@ -162,7 +162,7 @@ const GATED_STREAK = 3;
 const HUNT_PAGES_PER_SITE = 12;
 /** Gofile 探しで辿らないサイト（道具・解析・辞書・検索など。Gofile の動画を紹介する場所ではない） */
 const HUNT_SKIP_RE =
-  /(?:^|\.)(?:github\.com|gitlab\.com|pypi\.org|npmjs\.com|stackoverflow\.com|virustotal\.com|pulsedive\.com|criminalip\.io|urlscan\.io|hybrid-analysis\.com|scribd\.com|wikipedia\.org|facebook\.com|google\.com|microsoft\.com|bing\.com|yahoo\.co\.jp|yahoo\.com|gopeed\.com|chromewebstore\.google\.com|apple\.com|trustpilot\.com|scamadviser\.com|similarweb\.com)$/i;
+  /(?:^|\.)(?:github\.com|gitlab\.com|pypi\.org|npmjs\.com|stackoverflow\.com|virustotal\.com|pulsedive\.com|criminalip\.io|urlscan\.io|hybrid-analysis\.com|scribd\.com|wikipedia\.org|facebook\.com|google\.com|microsoft\.com|bing\.com|yahoo\.co\.jp|yahoo\.com|naver\.com|seznam\.cz|sogou\.com|qq\.com|tencent\.com|csdn\.net|alternativeto\.net|any\.run|docsbot\.ai|yarnpkg\.com|gopeed\.com|chromewebstore\.google\.com|apple\.com|trustpilot\.com|scamadviser\.com|similarweb\.com)$/i;
 /** Linkex のサイト（入力したのがこれらのときだけ、Linkex の一覧を読む） */
 const LINKEX_SITE_RE = /(?:^|\.)(?:linkex-douga\.com|l2e\.click|linkex\.io)$/i;
 /**
@@ -1461,7 +1461,8 @@ export async function* crawl(
         if (options.hunt) {
           let own = false;
           try {
-            own = home.sites.includes(siteOf(new URL(link.url).hostname));
+            // （5ちゃんねるのスレッド検索は、結果のスレッドも同じサイトにあるので、スレッドは辿る）
+            own = home.sites.includes(siteOf(new URL(link.url).hostname)) && !/\/read\.cgi\//.test(link.url);
           } catch {
             continue;
           }
