@@ -42,7 +42,7 @@ async function launch(): Promise<Browser> {
 }
 
 /** ブラウザの起動は数秒かかるので、同じサーバー上では使い回す */
-async function getBrowser(): Promise<Browser> {
+export async function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
     browserPromise = launch().then((b) => {
       b.on("disconnected", () => (browserPromise = null));
