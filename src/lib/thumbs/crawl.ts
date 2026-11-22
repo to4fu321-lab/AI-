@@ -571,6 +571,8 @@ export async function* crawl(
   const guessRenders = new Map<string, { tries: number; hits: number }>();
   let lastCheckpoint = Date.now();
   let robotsSkipped = 0;
+  /** 確認を求められた・断られたので読めなかったページの数 */
+  let gatedPages = 0;
   let lastError: string | null = null;
   let noted = false;
 
@@ -797,6 +799,12 @@ export async function* crawl(
       events.push({ type: "error", url, message });
       return events;
     };
+    /** 確認を求められた・断られたページ。読めなかったことを伝え、画面に「サイトを開く」ボタンを出してもらう */
+    const gated = (message: string) => {
+      events.push({ type: "gated", url, thumb: item.thumb });
+      gatedPages++;
+      return fail(message);
+    };
     /**
      * リンク先がそのまま画像・動画ファイルだったとき、それ自体を 1 件にする。
      * ほかのものと同じく、確かめて中身の指紋を取り、同じファイルをもう出していれば出さない
@@ -996,7 +1004,7 @@ export async function* crawl(
         if (got && got.status >= 400 && browserOnly.has(pageOrigin)) {
           // このサイトのほかのページは読めているのに、このページだけ確認がかかっている。
           // 1 枚ずつ表示し直しても通らない（20 秒以上かかる）ので、このページは飛ばす
-          return fail("サイトが「人間かどうかの確認」を求めているため、このページは読めません");
+          return gated("サイトが「人間かどうかの確認」を求めているため、このページは読めません");
         }
         if (got && got.status < 400 && got.html.length > 200) {
           html = got.html;
@@ -1011,7 +1019,7 @@ export async function* crawl(
         // 普通の読み込みを断られたので、本物のブラウザで開き直す（ブラウザなら通すサイトが多い）
         const known = browserOnly.has(pageOrigin) || browserPassed.has(pageOrigin);
         if (options.render === "off" || lite || (!item.root && !known && blockedTries >= MAX_BLOCKED_TRIES)) {
-          return fail(`サイトが自動アクセスを断っています（${blocked}）`);
+          return unreachable ? fail(`サイトを開けませんでした（${blocked}）`) : gated(`サイトが自動アクセスを断っています（${blocked}）`);
         }
         try {
           r = await openInBrowser(finalUrl);
@@ -1022,11 +1030,11 @@ export async function* crawl(
             return events;
           }
           if (!known) blockedTries++;
-          return fail(unreachable ? `サイトを開けませんでした（${blocked}）` : `サイトが自動アクセスを断っています（${blocked}。ブラウザでも開けませんでした）`);
+          return unreachable ? fail(`サイトを開けませんでした（${blocked}）`) : gated(`サイトが自動アクセスを断っています（${blocked}。ブラウザでも開けませんでした）`);
         }
         if (r.status >= 400) {
           if (!known) blockedTries++;
-          return fail(`サイトが自動アクセスを断っています（HTTP ${r.status}。ブラウザで開いても同じでした）`);
+          return gated(`サイトが自動アクセスを断っています（HTTP ${r.status}。ブラウザで開いても同じでした）`);
         }
         // 一度通れたら、次のページはもらった Cookie で普通に読んでみる。それでも断られるサイトは、以降ずっとブラウザで開く
         if (browserPassed.has(pageOrigin)) browserOnly.add(pageOrigin);
@@ -1410,7 +1418,10 @@ export async function* crawl(
             : refusedVideos > 0
               ? droppedNote
               : null;
-    const finalNote = message ?? (noVideos ? xNote : null);
+    const gatedNote = gatedPages
+      ? `「人間かどうかの確認」を求められた・自動アクセスを断られたページが ${gatedPages} 件ありました。下の「サイトで開く」から、サイトを直接開いて見てください`
+      : null;
+    const finalNote = (found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote);
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   const truncated = queue.length > 0;
