@@ -201,71 +201,39 @@ async function readInSession(session: Session, origin: string, url: string, sign
   if (page.isClosed() || signal.aborted) return null;
   session.at = Date.now();
   const began = Date.now();
-  const out = await fetchFromPage(page, url);
-  const challenged = !out || out.status === 0 || out.status === 403 || out.status === 503 || isChallengeHtml(out.html);
-  if (out && !challenged) {
+  const passed = (r: Read | null): r is Read => !!r && r.status >= 200 && r.status < 400 && !isChallengeHtml(r.html) && r.html.length > 200;
+  const sameSite = (r: Read) => {
+    try {
+      return new URL(r.finalUrl).origin === origin;
+    } catch {
+      return false;
+    }
+  };
+  let out = await fetchFromPage(page, url);
+  if (passed(out)) {
     thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
-    if (new URL(out.finalUrl).origin !== origin) return null;
-    return out;
+    return sameSite(out) ? out : null;
   }
-  // さっき確認を通れなかったばかりなら、待たずにあきらめる（1 ページごとに何十秒も待たないように）
-  if (session.stuckUntil && Date.now() < session.stuckUntil) return null;
-  // 開いているページの中で、サイトの「人間か確かめる」仕組み（裏で動くスクリプト）が済むのを待つ。
-  // ページを移動すると確認がやり直しになるので、まずは移動せずに、数秒おきに読み込みを試す
-  const waitUntil = Date.now() + 45000;
+  // 「人間か確かめる」ページが返ってきた。開いているページの裏で動いている確認（スクリプト）は、
+  // ページを開いてから数秒で済むことが多い。ページは移動せずに（移動すると確認がやり直しになる）、
+  // 少し待ちながら読み込みを試す。さっき別のページで待っても駄目だったばかりなら、待たない
+  const patient = !(session.stuckUntil && Date.now() < session.stuckUntil);
+  const waitUntil = Date.now() + (patient ? 14000 : 0);
   let polls = 0;
   while (Date.now() < waitUntil && !signal.aborted && !page.isClosed()) {
-    await sleep(2500);
-    polls++;
-    const again = await fetchFromPage(page, url).catch(() => null);
-    if (again && again.status >= 200 && again.status < 400 && !isChallengeHtml(again.html) && again.html.length > 200) {
-      session.at = Date.now();
-      thumbsLog(`session 待って通過 ${Date.now() - began}ms（${polls} 回目）html=${again.html.length} ${url.slice(0, 100)}`);
-      try {
-        if (new URL(again.finalUrl).origin !== origin) return null;
-      } catch {
-        return null;
-      }
-      return again;
-    }
-  }
-  thumbsLog(`session 待っても通らず ${Date.now() - began}ms（${polls} 回）${url.slice(0, 100)}`);
-  // ページ自体を移動して、確認を通り抜ける。確認には 20〜30 秒かかることがあるので、40 秒まで待つ
-  const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
-  const until = Date.now() + 40000;
-  let tries = 0;
-  while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) {
     await sleep(1500);
-    // 確認ページが表示されたままでも、裏で確認が済んで、中からの読み込みが通るようになっていることがある。
-    // 数秒おきに試して、通ったらすぐそれを使う
-    if (++tries % 2 === 0) {
-      const again = await fetchFromPage(page, url).catch(() => null);
-      if (again && again.status >= 200 && again.status < 400 && !isChallengeHtml(again.html) && again.html.length > 200) {
-        session.at = Date.now();
-        session.stuckUntil = undefined;
-        thumbsLog(`session 確認が済んだ ${Date.now() - began}ms html=${again.html.length} ${url.slice(0, 100)}`);
-        try {
-          if (new URL(again.finalUrl).origin !== origin) return null;
-        } catch {
-          return null;
-        }
-        return again;
-      }
+    polls++;
+    out = await fetchFromPage(page, url).catch(() => null);
+    if (passed(out)) {
+      session.at = Date.now();
+      session.stuckUntil = undefined;
+      thumbsLog(`session 待って通過 ${Date.now() - began}ms（${polls} 回目）html=${out.html.length} ${url.slice(0, 100)}`);
+      return sameSite(out) ? out : null;
     }
   }
-  const stuck = await page.evaluate(CHALLENGE).catch(() => true);
-  session.stuckUntil = stuck ? Date.now() + 60000 : undefined;
-  const html = stuck ? "" : await page.content().catch(() => "");
-  const finalUrl = page.url();
-  session.at = Date.now();
-  thumbsLog(
-    `session 移動 ${stuck ? "確認を通れず" : "通過"} ${Date.now() - began}ms（最初の読み込み ${out ? out.status : "時間切れ"}）HTTP ${res?.status() ?? "-"} html=${html.length} ${url.slice(0, 100)}`,
-  );
-  if (stuck || !html) return null;
-  try {
-    if (new URL(finalUrl).origin !== origin) return null;
-  } catch {
-    return null;
-  }
-  return { status: 200, html: html.slice(0, 3_000_000), finalUrl };
+  // このページは、ページを開かないと通れない確認がかかっている（サイトの一部のページだけにかかることがある）。
+  // 以降 20 秒は、ほかのページで断られても待たない（1 ページごとに待つと時間を使い切るため）
+  session.stuckUntil = Date.now() + 20000;
+  thumbsLog(`session 確認ページ ${Date.now() - began}ms（${polls} 回待った）HTTP ${out?.status ?? "-"} ${url.slice(0, 100)}`);
+  return { status: 403, html: "", finalUrl: url };
 }

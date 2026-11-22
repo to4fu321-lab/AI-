@@ -745,7 +745,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
         "download" in t.attrs ||
         DOWNLOAD_TEXT_RE.test(info?.text ?? "") ||
         DOWNLOAD_URL_RE.test(new URL(url).pathname + new URL(url).search);
-      if (!download && !thumb && isJunkLink(url, info?.text)) continue;
+      // 動画のない仕組みのページ（ログイン・設定・保存ツールなど）は、「保存する」と書いてあっても辿らない
+      if (!thumb && isJunkLink(url, download ? undefined : info?.text)) continue;
       addLink(url, download ? 5 : thumb ? (videoish ? 4 : 3) : videoish ? 2 : 0, thumb, info?.preview, info?.duration);
     }
   }

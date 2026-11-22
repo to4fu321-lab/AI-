@@ -993,6 +993,11 @@ export async function* crawl(
         // 普通の読み込みを断られた（Cloudflare の「人間か確かめる」ページなど）。
         // まず、ブラウザで 1 ページ開いたままにして、その中から読む（1 枚ずつ表示し直すより、ずっと速い）
         const got = await fetchInBrowser(finalUrl, signal);
+        if (got && got.status >= 400 && browserOnly.has(pageOrigin)) {
+          // このサイトのほかのページは読めているのに、このページだけ確認がかかっている。
+          // 1 枚ずつ表示し直しても通らない（20 秒以上かかる）ので、このページは飛ばす
+          return fail(`サイトがこのページへの自動アクセスを断っています（${blocked}）`);
+        }
         if (got && got.status < 400 && got.html.length > 200) {
           html = got.html;
           finalUrl = got.finalUrl;
