@@ -9,6 +9,7 @@ import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { gifVideoFromThumb, tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
+import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
@@ -607,6 +608,8 @@ export async function* crawl(
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
+  /** まとめサイトに載っていたが、Gofile では消されていた・空だったフォルダの数 */
+  let goneGofile = 0;
   /** アプリでしか再生できない動画（Linkex）として並べた数 */
   let appOnly = 0;
   /** 中身を読んだ Linkex の共有リンク */
@@ -838,10 +841,11 @@ export async function* crawl(
      * 読めなかった・動画を取り出せなかったページでも、一覧のカードにサムネイルがあったなら、サムネイルだけでも並べる
      * （タップでそのページを開く）。動画を探しているときだけ
      */
-    const thumbOnly = () => {
+    const thumbOnly = (open: string = url, label?: string) => {
       if (!wantsVideo || !item.thumb || item.root || events.some((e) => e.type === "gated")) return;
       const video = gifVideoFromThumb(item.thumb) || item.preview;
-      events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
+      const title = label ? (item.title ? `${item.title}（${label}）` : label) : item.title;
+      events.push({ type: "gated", url: open, thumb: item.thumb, title, duration: item.duration, video: video || undefined });
       thumbOnlyPages++;
     };
     const fail = (message: string) => {
@@ -943,8 +947,32 @@ export async function* crawl(
     }
     // ファイル保存サービスの共有リンクそのものなら、ページを開かずファイルの直リンクを 1 件にする
     // Gofile の共有フォルダそのものなら、ページを開かず API で中身をもらう
+    // Gofile のまとめサイト gofile-douga：サイト自身の窓口から、Gofile の共有フォルダ・サムネイル・題名をもらう
+    // （画面を後から描くサイトなので、ふつうに読むと 1 ページごとにブラウザで開くことになり、とても遅い）
+    const gd = gofileDougaApi(url);
+    if (gd) {
+      try {
+        const list = await gofileDougaList(gd, signal);
+        for (const it of list.items) {
+          if (!enqueue(it.share, depth, rank + 1, 4, it.thumb, 0, false, it.page)) continue;
+          const q = queuedByUrl.get(it.share);
+          if (q && it.title) q.title = it.title;
+        }
+        events.push({ type: "page", url, depth, found: 0 });
+        if (list.next && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 2, 1)) paginationUsed++;
+        if (!list.items.length && item.root) events.push({ type: "note", url, message: "gofile-douga の一覧に Gofile のリンクが見つかりませんでした" });
+      } catch (err) {
+        return fail(`gofile-douga の一覧を読めませんでした（${err instanceof Error ? err.message.slice(0, 60) : String(err)}）`);
+      }
+      return events;
+    }
     const share = gofileId(url);
     if (share) {
+      // 区切りの時刻が近いときは、聞かずに次の回へ回す（聞けなかったのを「消されていた」と取り違えないように）
+      if (Date.now() > deadline - 3000) {
+        deferred.push(item);
+        return events;
+      }
       seenGofile.delete(share);
       const g = await gofileMedia([share]);
       const items = g.media
@@ -958,6 +986,11 @@ export async function* crawl(
       videos += ok.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url, depth, found: ok.length });
       if (ok.length) events.push({ type: "media", items: ok });
+      // まとめサイトのカードから来た Gofile のフォルダが、消されていた・空だった：サムネイルだけ並べる（タップでまとめサイトのページ）
+      if (!ok.length && !verified.rest.length && !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "")) {
+        if (item.thumb && !item.root) goneGofile++;
+        thumbOnly(item.from ?? url, /見つかりません/.test(g.error ?? "") ? "Gofile で削除済み" : "Gofile に中身なし");
+      }
       if (!ok.length && !verified.rest.length && item.root) {
         noted = true;
         events.push({
@@ -1567,7 +1600,9 @@ export async function* crawl(
     const appNote = appOnly
       ? `Linkex の動画 ${appOnly} 本を並べました。Linkex は Web では再生できない仕組み（アプリでのみ再生）のため、タップで Linkex を開きます`
       : null;
-    const thumbNote = thumbOnlyPages
+    const thumbNote = goneGofile
+      ? "Gofile で削除済み・中身なしのフォルダは、サムネイルだけ並べています（Gofile は消されるのが早いため、新しいリンクでも見られないことがあります）"
+      : thumbOnlyPages
       ? `動画を取り出せなかったページ ${thumbOnlyPages} 件は、サムネイルだけ並べました。タップするとそのページを開きます`
       : null;
     const finalNote =
