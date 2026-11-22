@@ -602,7 +602,9 @@ export async function* crawl(
             signal,
             jar,
             timeoutMs: 8000,
-            headers: { ...PAGE_HEADERS, referer: pageUrl, range: "bytes=0-0" },
+            // 行き先の動画サーバー（X など）は、ほかのサイトを Referer に名乗ると断る。サイトのリンクも
+            // 「Referer を送らない」指定なので、名乗らずに開く
+            headers: { ...PAGE_HEADERS, range: "bytes=0-0" },
           });
           await res.body?.cancel().catch(() => {});
           const type = res.headers.get("content-type");
@@ -613,6 +615,7 @@ export async function* crawl(
               kind: "video",
               src: target,
               pageUrl,
+              referer: /twimg\.com/.test(target) ? "https://x.com/" : undefined,
               thumb: ref.thumb,
               duration: ref.duration,
               format: /twimg\.com/.test(target) ? "X" : formatOf(target, "video"),
