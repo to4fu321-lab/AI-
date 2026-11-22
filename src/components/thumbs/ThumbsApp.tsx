@@ -16,6 +16,8 @@ interface Job {
   status: "running" | "done" | "error" | "stopped";
   pages: number;
   errors: number;
+  /** 読まずに飛ばしたページ数（robots.txt・除外リストなど） */
+  skips?: number;
   message?: string;
   truncated?: boolean;
   /** 取れなかった理由などの補足 */
@@ -82,6 +84,7 @@ export function ThumbsApp() {
   const [crossSite, setCrossSite] = useState(false);
   const [render, setRender] = useState<"auto" | "always" | "off">("auto");
   const [kinds, setKinds] = useState<"all" | "video" | "image">("all");
+  const [robots, setRobots] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -171,7 +174,7 @@ export function ThumbsApp() {
 
   const startJob = useCallback(
     async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }) => {
-      let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds };
+      let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots };
       // ページ数の上限で打ち切ったものを続けるときは、同じページ数だけ上限を足す
       if (existing?.job.truncated && existing.job.resume) {
         settings = { ...settings, maxPages: Math.min(1000, existing.job.resume.pages + settings.maxPages) };
@@ -228,6 +231,7 @@ export function ThumbsApp() {
                   pageCount++;
                   updateJob(id, (j) => ({ pages: j.pages + 1 }));
                 } else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
+                else if (event.type === "skip") updateJob(id, (j) => ({ skips: (j.skips ?? 0) + 1 }));
                 else if (event.type === "done") {
                   finished = true;
                   updateJob(id, { status: "done", truncated: event.truncated, resume: event.state });
@@ -274,7 +278,7 @@ export function ThumbsApp() {
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, render, kinds, updateJob, recordHistory],
+    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory],
   );
 
   const resumeJob = useCallback(
@@ -458,6 +462,10 @@ export function ThumbsApp() {
               />
               別のサイトへのリンクも辿る
             </label>
+            <label className="flex items-center gap-1.5" title="サイトが出している「自動で読まないで」という指定を守ります。入力したページ自体は常に読みます">
+              <input type="checkbox" checked={robots} onChange={(e) => setRobots(e.target.checked)} className="h-4 w-4 accent-fuchsia-500" />
+              robots.txt を守る
+            </label>
             {running && <span className="animate-pulse font-semibold text-fuchsia-500">取得中…</span>}
           </div>
         </div>
@@ -490,7 +498,7 @@ export function ThumbsApp() {
                 onResume={() => resumeJob(job)}
                 saved={sites.some((s) => s.url === job.url)}
                 canSave={sites.length < MAX_SITES}
-                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds })}
+                onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots })}
                 onRemove={() => removeJob(job.id)}
               />
             ))}
@@ -562,7 +570,9 @@ function EmptyState() {
         <li>・続けて別の URL を入れると、一覧にどんどん追加されます（改行区切りでまとめて入力も可）</li>
         <li>・「下の階層」を選ぶと、入力したページより下のページもリンクを辿って集めます（最大20階層）</li>
         <li>・「ページ送り」で、2ページ目・次へ などの続きのページも集めます（最大50ページ）</li>
-        <li>・「別のサイトへのリンクも辿る」にすると、リンク先の別サイトからも集めます</li>
+        <li>・動画が見つからないときは、自動でリンク先（同じサイトの別の場所・もっと下の階層・別のサイト）まで広げて動画を探します</li>
+        <li>・「別のサイトへのリンクも辿る」にすると、最初から別サイトの画像・動画も集めます</li>
+        <li>・サイトが自動アクセスを断るときや、年齢確認の入口があるときは、ブラウザで開き直して進みます</li>
         <li>・JavaScript で画像を後から出すサイトは、自動でブラウザで開いて集めます（少し時間がかかります）</li>
         <li>・取得した URL は履歴に残り、よく使うサイトは ☆ で 5 個まで登録できます</li>
         <li>・🎬 は動画、🖼 は画像。タップで再生・拡大、ダウンロードもできます</li>
@@ -604,6 +614,7 @@ function JobRow({
         : job.status === "stopped"
           ? `停止（${job.pages}ページ）`
           : `${job.pages}ページ${job.truncated ? "（上限で打ち切り）" : ""}`;
+  const trouble = [job.errors ? `読めず ${job.errors}` : "", job.skips ? `飛ばした ${job.skips}` : ""].filter(Boolean).join("・");
   return (
     <li
       className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs transition ${
@@ -620,9 +631,12 @@ function JobRow({
       <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left" title="この URL の結果だけ表示">
         <span className="block truncate font-semibold">{job.url.replace(/^https?:\/\//, "")}</span>
         <span className={`block truncate ${job.status === "error" ? "text-red-500" : "text-neutral-400"}`}>
-          {status} ・ {found}件
+          {status} ・ {found}件{trouble && job.status !== "error" ? ` ・ ${trouble}` : ""}
         </span>
-        {job.note && <span className="block truncate text-amber-600 dark:text-amber-400">⚠ {job.note}</span>}
+        {job.errors > 0 && job.status !== "error" && job.message && found === 0 && !job.note && (
+          <span className="line-clamp-2 text-amber-600 dark:text-amber-400">⚠ {job.message}</span>
+        )}
+        {job.note && <span className="line-clamp-3 text-amber-600 dark:text-amber-400">⚠ {job.note}</span>}
       </button>
       <button
         type="button"
@@ -770,6 +784,99 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
   );
 }
 
+/**
+ * 動画プレーヤー。再生できる方法を順番に試す。
+ *   1. 元のサイトから直接（このアプリの URL は相手に伝えない。ブラウザで直接開くのと同じ扱い）
+ *   2. 駄目ならこちらのサーバー経由（元ページを Referer として名乗る）
+ * 配信形式（HLS）は、iPhone ならそのまま、ほかのブラウザでは hls.js で再生する。
+ */
+function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => void; onStage: (stage: "direct" | "proxy") => void }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [stage, setStage] = useState<"direct" | "proxy">("direct");
+  /** 切り替える前に再生していた位置（切り替え後に続きから再生する） */
+  const resumeAt = useRef(0);
+  const giveUp = useRef(onGiveUp);
+  const stageChanged = useRef(onStage);
+  useEffect(() => {
+    giveUp.current = onGiveUp;
+    stageChanged.current = onStage;
+  });
+
+  useEffect(() => {
+    const v = ref.current;
+    if (!v) return;
+    let cancelled = false;
+    let started = false;
+    let player: { destroy: () => void } | null = null;
+    const url = stage === "direct" ? item.src : proxyUrl(item);
+    stageChanged.current(stage);
+
+    const fail = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (v.currentTime > 0) resumeAt.current = v.currentTime;
+      if (stage === "direct") setStage("proxy");
+      else giveUp.current();
+    };
+    const onMeta = () => {
+      started = true;
+      if (resumeAt.current > 0 && Number.isFinite(v.duration) && resumeAt.current < v.duration) v.currentTime = resumeAt.current;
+    };
+    const play = () => void v.play().catch(() => {});
+    // 直接の読み込みが、つながったまま進まないとき（相手が返事をしない）は、サーバー経由に切り替える。
+    // ブラウザが通信量の節約のために読み込みを待っているだけ（networkState が読み込み中でない）なら切り替えない
+    const watchdog =
+      stage === "direct"
+        ? setTimeout(() => !started && v.readyState === 0 && v.networkState === HTMLMediaElement.NETWORK_LOADING && fail(), 12000)
+        : undefined;
+    v.addEventListener("loadedmetadata", onMeta);
+    v.addEventListener("error", fail);
+
+    if (isHls(item) && !v.canPlayType("application/vnd.apple.mpegurl")) {
+      // iPhone 以外のブラウザは HLS をそのまま再生できないので、hls.js に任せる
+      void import("hls.js")
+        .then(({ default: Hls }) => {
+          if (cancelled) return;
+          if (!Hls.isSupported()) return fail();
+          const hls = new Hls({ enableWorker: true });
+          player = hls;
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (data.fatal) fail();
+          });
+          hls.on(Hls.Events.MANIFEST_PARSED, play);
+          hls.loadSource(url);
+          hls.attachMedia(v);
+        })
+        .catch(fail);
+    } else {
+      v.src = url;
+      v.load();
+      play();
+    }
+    return () => {
+      cancelled = true;
+      clearTimeout(watchdog);
+      v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("error", fail);
+      player?.destroy();
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+    };
+  }, [item, stage]);
+
+  return (
+    <video
+      ref={ref}
+      poster={item.thumb ?? peekVideoThumb(item.src) ?? undefined}
+      controls
+      autoPlay
+      playsInline
+      className="max-h-full max-w-full rounded-lg bg-black"
+    />
+  );
+}
+
 function Viewer({
   items,
   index,
@@ -785,6 +892,8 @@ function Viewer({
 }) {
   const item = items[index];
   const [useProxy, setUseProxy] = useState(false);
+  /** 動画をどこから読んでいるか（直接 / サーバー経由） */
+  const [stage, setStage] = useState<"direct" | "proxy">("direct");
   /** 再生・表示できなかった理由（サーバー経由でも駄目だったとき、調べて出す） */
   const [playError, setPlayError] = useState<string | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
@@ -822,7 +931,7 @@ function Viewer({
   const fileName = decodeURIComponent(new URL(item.src).pathname.split("/").pop() || "") || undefined;
 
   /** 直接もサーバー経由も駄目だったとき、サーバー経由で少しだけ取りに行って理由を調べる */
-  const diagnose = async () => {
+  const diagnose = useCallback(async () => {
     try {
       const res = await fetch(proxyUrl(item), { headers: { range: "bytes=0-1" } });
       if (!res.ok) {
@@ -839,7 +948,7 @@ function Viewer({
     } catch {
       setPlayError("通信できませんでした。電波の状態を確認してください。");
     }
-  };
+  }, [item]);
 
   let body: React.ReactNode;
   if (item.kind === "embed") {
@@ -854,22 +963,7 @@ function Viewer({
       />
     );
   } else if (item.kind === "video") {
-    body = (
-      <video
-        key={`${item.id}-${useProxy}`}
-        src={src}
-        poster={item.thumb ?? peekVideoThumb(item.src) ?? undefined}
-        controls
-        autoPlay
-        playsInline
-        onError={() => {
-          // まず元サイトから直接 → 駄目ならサーバー経由 → それも駄目なら理由を調べて表示
-          if (!useProxy && !isHls(item)) setUseProxy(true);
-          else void diagnose();
-        }}
-        className="max-h-full max-w-full rounded-lg bg-black"
-      />
-    );
+    body = <VideoPlayer key={item.id} item={item} onStage={setStage} onGiveUp={() => void diagnose()} />;
   } else {
     body = (
       // eslint-disable-next-line @next/next/no-img-element
@@ -941,13 +1035,20 @@ function Viewer({
         {playError && (
           <div className="whitespace-pre-line rounded-lg bg-red-500/20 px-3 py-2 text-xs text-red-200">
             ⚠ {playError}
-            <a href={item.src} target="_blank" rel="noopener noreferrer" className="mt-1 block font-semibold underline">
-              ▶ 動画を直接開く
-            </a>
           </div>
         )}
         {item.title && <p className="line-clamp-2 text-sm">{item.title}</p>}
-        <p className="truncate text-[11px] opacity-50">{hostOf(item.pageUrl)}</p>
+        <p className="flex items-center gap-2 text-[11px]">
+          <span className="min-w-0 truncate opacity-50">
+            {hostOf(item.pageUrl)}
+            {item.kind === "video" && stage === "proxy" && !playError ? " ・ サーバー経由で再生" : ""}
+          </span>
+          {item.kind === "video" && (
+            <a href={item.src} target="_blank" rel="noopener noreferrer" className="shrink-0 font-semibold underline opacity-80">
+              ▶ 動画を直接開く
+            </a>
+          )}
+        </p>
         <div className="flex gap-2">
           {canDownload ? (
             <a

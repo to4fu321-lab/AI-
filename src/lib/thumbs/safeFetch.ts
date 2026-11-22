@@ -78,32 +78,134 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   method?: "GET" | "HEAD";
+  /** サイトから渡された Cookie を覚えておき、次の通信で返す（Cookie がないと先へ進めないサイト用） */
+  jar?: CookieJar;
+  /**
+   * true なら、時間切れは「返事が届くまで」だけに使う。
+   * 動画の中継のように、返事が届いたあと長い時間かけて中身を流すときに使う
+   * （そうしないと、時間切れで中身が途中で切れる）
+   */
+  streamBody?: boolean;
+}
+
+/**
+ * Cookie の入れ物（クロール 1 回分）。
+ * 「最初のアクセスで Cookie を渡し、持っていなければ同じページへ送り返す」サイトや、
+ * 年齢確認の結果を Cookie で覚えるサイトを読み進められるようにする。
+ */
+export class CookieJar {
+  /** ドメイン → （名前 → 値） */
+  private store = new Map<string, Map<string, string>>();
+
+  constructor(saved?: [string, string][]) {
+    for (const [domain, line] of saved ?? []) {
+      const map = new Map<string, string>();
+      for (const part of line.split("; ")) {
+        const i = part.indexOf("=");
+        if (i > 0) map.set(part.slice(0, i), part.slice(i + 1));
+      }
+      if (map.size) this.store.set(domain, map);
+    }
+  }
+
+  /** 返事の Set-Cookie を覚える */
+  remember(url: URL, res: Response) {
+    const lines = res.headers.getSetCookie?.() ?? [];
+    for (const line of lines.slice(0, 30)) {
+      const [pair, ...attrs] = line.split(";");
+      const i = pair.indexOf("=");
+      if (i <= 0) continue;
+      const name = pair.slice(0, i).trim();
+      const value = pair.slice(i + 1).trim();
+      if (!name || value.length > 2000) continue;
+      // Domain 属性は、そのサイト自身の親ドメインのときだけ受け入れる
+      let domain = url.hostname;
+      for (const a of attrs) {
+        const m = /^\s*domain\s*=\s*\.?([\w.-]+)\s*$/i.exec(a);
+        const d = m?.[1].toLowerCase();
+        // 「.co.jp」のような広すぎる指定は受け入れない（3 文字以下の区切りだけでできたドメインは除く）
+        const tooBroad = !!d && d.split(".").every((label) => label.length <= 3);
+        if (d && d.includes(".") && !tooBroad && (url.hostname === d || url.hostname.endsWith(`.${d}`))) domain = d;
+      }
+      let map = this.store.get(domain);
+      if (!map) {
+        if (this.store.size >= 50) continue;
+        map = new Map();
+        this.store.set(domain, map);
+      }
+      const expired = attrs.some((a) => /^\s*max-age\s*=\s*(0|-\d+)\s*$/i.test(a)) || value === "" || value === "deleted";
+      if (expired) map.delete(name);
+      else if (map.size < 40 || map.has(name)) map.set(name, value);
+    }
+  }
+
+  /** ブラウザで開いたときに渡された Cookie を覚える */
+  put(domain: string, name: string, value: string) {
+    if (!domain || !name || value.length > 2000) return;
+    let map = this.store.get(domain);
+    if (!map) {
+      if (this.store.size >= 50) return;
+      map = new Map();
+      this.store.set(domain, map);
+    }
+    if (map.size < 40 || map.has(name)) map.set(name, value);
+  }
+
+  /** その URL へ送る Cookie ヘッダー（なければ undefined） */
+  headerFor(url: URL): string | undefined {
+    const parts: string[] = [];
+    for (const [domain, map] of this.store) {
+      if (url.hostname !== domain && !url.hostname.endsWith(`.${domain}`)) continue;
+      for (const [name, value] of map) parts.push(`${name}=${value}`);
+    }
+    return parts.length ? parts.join("; ") : undefined;
+  }
+
+  /** 続きの回へ渡せる形にする */
+  toJSON(): [string, string][] {
+    return [...this.store].map(([domain, map]) => [domain, [...map].map(([n, v]) => `${n}=${v}`).join("; ")] as [string, string]);
+  }
 }
 
 /** リダイレクトを手動で辿り、毎回接続先を検査する fetch。最終的な URL も返す。 */
 export async function safeFetch(raw: string, opts: SafeFetchOptions = {}): Promise<{ res: Response; url: string }> {
-  const timeout = AbortSignal.timeout(opts.timeoutMs ?? 15000);
-  const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+  const timeout = new AbortController();
+  const timer = setTimeout(
+    () => timeout.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+    opts.timeoutMs ?? 15000,
+  );
+  (timer as { unref?: () => void }).unref?.();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, timeout.signal]) : timeout.signal;
   let current = raw;
-  for (let hop = 0; hop <= 5; hop++) {
-    const url = await assertPublicUrl(current);
-    const res = await fetch(url, {
-      method: opts.method ?? "GET",
-      redirect: "manual",
-      signal,
-      headers: {
-        "user-agent": USER_AGENT,
-        "accept-language": "ja,en;q=0.8",
-        ...opts.headers,
-      },
-    });
-    const location = res.headers.get("location");
-    if (res.status >= 300 && res.status < 400 && location) {
-      await res.body?.cancel();
-      current = new URL(location, url).toString();
-      continue;
+  try {
+    for (let hop = 0; hop <= 8; hop++) {
+      const url = await assertPublicUrl(current);
+      const cookie = opts.jar?.headerFor(url);
+      const res = await fetch(url, {
+        method: opts.method ?? "GET",
+        redirect: "manual",
+        signal,
+        headers: {
+          "user-agent": USER_AGENT,
+          "accept-language": "ja,en;q=0.8",
+          ...(cookie ? { cookie } : {}),
+          ...opts.headers,
+        },
+      });
+      opts.jar?.remember(url, res);
+      const location = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && location) {
+        await res.body?.cancel();
+        current = new URL(location, url).toString();
+        continue;
+      }
+      if (opts.streamBody) clearTimeout(timer);
+      return { res, url: url.toString() };
     }
-    return { res, url: url.toString() };
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
   }
+  clearTimeout(timer);
   throw new FetchBlockedError("リダイレクトが多すぎます");
 }

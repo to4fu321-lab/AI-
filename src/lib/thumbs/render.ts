@@ -1,6 +1,6 @@
 import "server-only";
 import type { Browser, HTTPRequest } from "puppeteer-core";
-import { kindFromContentType, kindFromUrl } from "./extract";
+import { extensionOf, kindFromContentType, kindFromUrl } from "./extract";
 import { assertPublicUrl } from "./safeFetch";
 
 /**
@@ -75,6 +75,10 @@ export interface Rendered {
   network: NetworkMedia[];
   /** ページの中の iframe（外部の動画プレーヤーなど）の、表示後の HTML */
   frames: { url: string; html: string }[];
+  /** ページ本体の HTTP ステータス（403 などなら、ブラウザでも断られている） */
+  status: number;
+  /** 表示中にサイトから渡された Cookie（年齢確認の結果など）。以降の普通の読み込みでも使う */
+  cookies: { name: string; value: string; domain: string }[];
 }
 
 export interface RenderOptions {
@@ -121,6 +125,32 @@ const PRESS_PLAY = `(() => {
   return clicked;
 })()`;
 
+/**
+ * 年齢確認などの入口ページで「はい・ENTER・18歳以上」のボタンを押す。
+ * 年齢確認らしい文言があるページでだけ、短いラベルのボタン・リンクを 1 つ押す
+ */
+const PASS_GATE = `(() => {
+  const text = ((document.body && document.body.innerText) || "").slice(0, 20000);
+  if (!/年齢確認|年齢認証|18歳|18才|age.?verif|over 18|18 years|adults? only|18\\+|成人向け/i.test(text)) return false;
+  const yes = /^(はい|yes|enter|入場|入口|入る|同意|18歳以上|18才以上|i am 18|i'm 18|i am over 18|i am at least 18|agree|i agree|accept|continue|ok$|進む)/i;
+  const no = /いいえ|未満|exit|leave|退場|退出|出る|^no/i;
+  const els = Array.from(document.querySelectorAll("a, button, input[type=button], input[type=submit], [role=button], [onclick]"));
+  for (const el of els) {
+    const img = el.querySelector ? el.querySelector("img[alt]") : null;
+    const label = (el.innerText || el.value || el.getAttribute("aria-label") || (img && img.alt) || "").trim();
+    if (!label || label.length > 30 || !yes.test(label) || no.test(label)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    el.click();
+    return true;
+  }
+  return false;
+})()`;
+
+/** 動画そのものではなく、配信用に細かく切った断片（一覧に出すと大量のゴミになる） */
+const isSegment = (url: string, type: string | undefined) =>
+  ["ts", "m4s", "aac", "vtt", "key", "m4a"].includes(extensionOf(url)) || /mp2t|iso\.segment/i.test(type ?? "");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** タブの空き待ちの間に区切りの時刻を過ぎたときに投げる（ページは次の回に回す） */
@@ -157,6 +187,7 @@ export async function renderPage(
     await page.setExtraHTTPHeaders({ "accept-language": "ja,en;q=0.8" });
 
     const network = new Map<string, NetworkMedia>();
+    let status = 200;
     const hostOk = new Map<string, Promise<boolean>>();
     const isAllowed = (raw: string) => {
       let host: string;
@@ -200,7 +231,7 @@ export async function renderPage(
         const type = req.resourceType();
         // 動画本体やフォントは読まない（URL だけ記録する）。通信量と時間の節約
         if (type === "media") {
-          if (!reqUrl.startsWith("blob:")) {
+          if (!reqUrl.startsWith("blob:") && !isSegment(reqUrl, undefined)) {
             network.set(reqUrl, { url: reqUrl, kind: kindFromUrl(reqUrl) === "image" ? "image" : "video", referer: frameUrlOf(req) });
           }
           return req.abort("aborted").catch(() => {});
@@ -213,7 +244,16 @@ export async function renderPage(
       const resUrl = res.url();
       if (!/^https?:/.test(resUrl)) return;
       const headers = res.headers();
-      const kind = kindFromContentType(headers["content-type"] ?? null);
+      const req = res.request();
+      if (req.isNavigationRequest() && req.frame() === page.mainFrame() && res.status() >= 200 && (res.status() < 300 || res.status() >= 400)) {
+        status = res.status();
+      }
+      if (res.status() >= 400) return;
+      const type = headers["content-type"];
+      if (isSegment(resUrl, type)) return;
+      // 種類の名乗りが違っていても、プレーヤーが読み込んだ .m3u8 / .mp4 は動画として記録する
+      const fetched = req.resourceType() === "xhr" || req.resourceType() === "fetch";
+      const kind = kindFromContentType(type ?? null) ?? (fetched && kindFromUrl(resUrl) === "video" ? "video" : null);
       if (!kind) return;
       // アイコンなどの小さな画像（1.5KB 未満）は除く
       const size = Number(headers["content-length"]);
@@ -225,6 +265,11 @@ export async function renderPage(
       // 時間切れでも、そこまでに描けた分は使う
       if (!(err instanceof Error && err.name === "TimeoutError")) throw err;
     });
+    // 年齢確認などの入口ページなら「はい」を押して先へ進む
+    if (!signal.aborted && (await page.evaluate(PASS_GATE).catch(() => false))) {
+      await sleep(500);
+      await page.waitForNetworkIdle({ idleTime: 600, timeout: 8000 }).catch(() => {});
+    }
     // 下までスクロールして、遅延読み込みの画像を出させる
     for (let i = 0; i < 8 && !signal.aborted; i++) {
       const atBottom = await page.evaluate(() => {
@@ -257,7 +302,11 @@ export async function renderPage(
       const frameHtml = await f.content().catch(() => "");
       if (frameHtml) frames.push({ url: frameUrl, html: frameHtml.slice(0, MAX_FRAME_HTML) });
     }
-    return { html, finalUrl: page.url(), network: [...network.values()], frames };
+    const cookies = await browser
+      .cookies()
+      .then((list) => list.slice(0, 100).map((c) => ({ name: c.name, value: c.value, domain: c.domain.replace(/^\./, "") })))
+      .catch(() => []);
+    return { html, finalUrl: page.url(), network: [...network.values()], frames, status, cookies };
   } finally {
     signal.removeEventListener("abort", onAbort);
     try {

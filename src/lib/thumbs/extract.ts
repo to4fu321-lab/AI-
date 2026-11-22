@@ -183,11 +183,61 @@ export interface Extracted {
   /** ページの代表画像（og:image）。動画が少ないページでは、その動画のサムネイルに使う */
   ogImage?: string;
   title?: string;
+  /** 自動で別のページへ移動する指定（<meta http-equiv="refresh">、location.href = "…"）の行き先 */
+  redirect?: string;
+  /** 年齢確認などの「入口ページ」に見えるか（ブラウザで開いて「はい」を押す目安） */
+  gate: boolean;
+}
+
+/** 年齢確認・入口ページらしい文言 */
+const GATE_RE =
+  /年齢確認|年齢認証|18歳以上|18歳未満|18才以上|18才未満|あなたは18|age.?verification|are you (?:over |at least )?18|over 18|18 years|adults? only|i am 18|i'm 18/i;
+
+/**
+ * 読みにくくした JavaScript（eval(function(p,a,c,k,e,d){…}) の形式。動画プレーヤーの設定によく使われる）を元に戻す。
+ * 元に戻した文字列の中から、動画の URL を探すために使う
+ */
+function unpackScripts(html: string): string {
+  let out = "";
+  const re =
+    /eval\(function\(p,a,c,k,e,[dr]\)\{[\s\S]{0,2000}?\}\(\s*'((?:[^'\\]|\\[\s\S])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\[\s\S])*)'\.split\('\|'\)/g;
+  const DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const m of html.matchAll(re)) {
+    const radix = Number(m[2]);
+    if (radix < 2 || radix > 62) continue;
+    const words = m[4].split("|");
+    const payload = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+    const toIndex = (w: string) => {
+      let n = 0;
+      for (const ch of w) {
+        const d = DIGITS.indexOf(ch);
+        if (d < 0 || d >= radix) return -1;
+        n = n * radix + d;
+      }
+      return n;
+    };
+    out += "\n" + payload.replace(/\b\w+\b/g, (w) => words[toIndex(w)] || w);
+    if (out.length > 2_000_000) break;
+  }
+  return out;
+}
+
+/** 文字列を Base64 から元に戻す（失敗したら null） */
+function decodeBase64(raw: string): string | null {
+  try {
+    return atob(raw.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch {
+    return null;
+  }
 }
 
 /** 「動画の詳細ページらしい」URL */
 const VIDEO_URL_RE =
-  /\/(?:video|videos|movie|movies|watch|v|vod|play|player|embed|douga|clip|clips|stream|episode)(?:[/_\-.?]|$)|[?&](?:v|vid|video_?id|viewkey|movie_?id)=/i;
+  /\/(?:video|videos|movie|movies|watch|v|e|vod|play|player|embed|douga|clip|clips|stream|episode)(?:[/_\-.?]|$)|[?&](?:v|vid|video_?id|viewkey|movie_?id)=/i;
+
+/** 広告・計測・SNS ボタンなどの iframe（動画プレーヤーではないので中は読まない） */
+export const AD_FRAME_RE =
+  /doubleclick\.net|googlesyndication|googletagmanager|google\.com\/(?:recaptcha|maps)|gstatic\.com|facebook\.com\/(?:plugins|tr)|platform\.twitter\.com|twitter\.com\/widgets|disqus\.com|amazon-adsystem|adservice\.|\/\/ads?\d*\.|[./]adserver|exoclick|exosrv|juicyads|trafficjunky|popads|adsterra|i-mobile\.co\.jp|nend\.net/i;
 /** リンクの中の再生時間（12:34 / 1:02:03） */
 const DURATION_RE = /(?:^|[^\d:])\d{1,2}:\d{2}(?::\d{2})?(?:$|[^\d:])/;
 /** リンクの中の、動画のサムネイルらしい部品のクラス名 */
@@ -338,15 +388,22 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
 
   const tags = parseTags(
     markup,
-    new Set(["meta", "img", "source", "video", "a", "iframe", "embed", "object", "link", "image"]),
+    new Set(["meta", "img", "source", "video", "a", "iframe", "frame", "embed", "object", "link", "image"]),
   );
   const frames = new Set<string>();
 
   // --- 1. OGP / Twitter カード（ページの代表サムネイル） ---
   let ogImage: string | undefined;
   let ogVideo: string | undefined;
+  let redirect: string | undefined;
   for (const t of tags) {
     if (t.name !== "meta") continue;
+    if ((t.attrs["http-equiv"] ?? "").toLowerCase() === "refresh") {
+      const to = /^\s*\d*\s*[;,]\s*(?:url\s*=\s*)?["']?([^"']+)["']?\s*$/i.exec(t.attrs.content ?? "");
+      const url = to ? resolveUrl(to[1], base) : null;
+      if (url && url !== pageUrl) redirect ??= url;
+      continue;
+    }
     const key = (t.attrs.property || t.attrs.name || "").toLowerCase();
     const url = resolveUrl(t.attrs.content, base);
     if (!url) continue;
@@ -427,12 +484,12 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
       if (!url) continue;
       const kind = kindFromUrl(url) ?? (t.attrs.type?.startsWith("video") ? "video" : "image");
       add({ kind, src: url, format: formatOf(url, kind) });
-    } else if (t.name === "iframe" || t.name === "embed" || t.name === "object") {
+    } else if (t.name === "iframe" || t.name === "frame" || t.name === "embed" || t.name === "object") {
       const url = resolveUrl(t.attrs.src || t.attrs["data-src"] || t.attrs["data-lazy-src"] || t.attrs.data, base);
       if (!url || addEmbed(url, t.attrs.title)) continue;
       const kind = kindFromUrl(url);
       if (kind === "video") add({ kind, src: url, format: formatOf(url, kind), unverified: true });
-      else if (!kind && isPageLikeUrl(url) && url !== pageUrl) frames.add(url);
+      else if (!kind && isPageLikeUrl(url) && url !== pageUrl && !AD_FRAME_RE.test(url)) frames.add(url);
     } else if (t.name === "link") {
       const rel = (t.attrs.rel || "").toLowerCase();
       if (rel === "image_src") {
@@ -514,15 +571,51 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   }
 
   // --- 6. スクリプト内に書かれた動画ファイルの URL（JS で作られるプレーヤー対策） ---
-  const unescaped = html.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/");
-  for (const m of unescaped.matchAll(/https?:\/\/[^\s"'<>\\()]+?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),])/gi)) {
-    const url = resolveUrl(m[0], base);
-    if (url) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
+  // 読みにくくしたスクリプトは元に戻してから探す
+  const unescaped =
+    html.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/").replace(/\\u0026/g, "&") + unpackScripts(html).replace(/\\\//g, "/");
+  const addGuess = (raw: string) => {
+    const url = resolveUrl(decodeEntities(raw), base);
+    if (url && url !== pageUrl) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
+  };
+  for (const m of unescaped.matchAll(/https?:\/\/[^\s"'<>\\()]+?\.(?:mp4|m4v|webm|mov|m3u8)\/?(?:\?[^\s"'<>\\()]*)?(?=["'\s<>\\),]|$)/gi)) {
+    addGuess(m[0]);
   }
-  // 引用符で囲まれた相対パス・プロトコル省略の動画 URL（"/media/123.mp4"、'//cdn.example.com/a.m3u8' など）
-  for (const m of unescaped.matchAll(/["'`]((?:https?:)?\/[^"'`\s<>\\]*?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^"'`\s<>\\]*)?)["'`]/gi)) {
-    const url = resolveUrl(m[1], base);
-    if (url) add({ kind: "video", src: url, format: formatOf(url, "video"), unverified: true });
+  // 引用符で囲まれた相対パス・プロトコル省略の動画 URL（"/media/123.mp4"、'//cdn.example.com/a.m3u8'、"video/a.mp4" など）
+  for (const m of unescaped.matchAll(/["'`]((?:https?:)?\/?[^"'`\s<>\\:]*?\.(?:mp4|m4v|webm|mov|m3u8)(?:\?[^"'`\s<>\\]*)?)["'`]/gi)) {
+    addGuess(m[1]);
+  }
+  // URL の中に入れ子になった動画 URL（player.php?url=https%3A%2F%2F…mp4 など）
+  for (const m of unescaped.matchAll(/https?%3A%2F%2F[^"'&\s<>\\]+/gi)) {
+    try {
+      const inner = decodeURIComponent(m[0]);
+      if (kindFromUrl(inner) === "video") addGuess(inner);
+    } catch {
+      /* 壊れた % 表記は無視 */
+    }
+  }
+  // Base64 で隠した動画 URL（"aHR0cHM6Ly9…" = "https://…"）
+  for (const m of unescaped.matchAll(/["'`=](aHR0c[A-Za-z0-9+/_-]{16,}={0,2})/g)) {
+    const inner = decodeBase64(m[1]);
+    if (inner && /^https?:\/\/[^\s"'<>]+$/.test(inner) && kindFromUrl(inner) === "video") addGuess(inner);
+  }
+  // 拡張子のない動画 URL も、"video_url": "…" のような動画用のキー名なら候補にする（本当に動画かは後で確かめる）
+  let guesses = 0;
+  for (const m of unescaped.matchAll(
+    /["']?(?:video_?url|video_?src|video_?alt_?url|video_?file|stream_?url|hls_?url|hls_?src|hls|m3u8_?url|mp4_?url|mp4|content_?url|playback_?url|play_?url|manifest_?url|source_?url|file|src)["']?\s*[:=]\s*["'`]((?:https?:)?\/[^"'`\s<>\\]{8,})["'`]/gi,
+  )) {
+    if (guesses >= 15) break;
+    const url = resolveUrl(decodeEntities(m[1]), base);
+    if (!url || found.has(url) || url === pageUrl) continue;
+    if (kindFromUrl(url) === "video") {
+      addGuess(url);
+      continue;
+    }
+    // 画像・スクリプトなど別物とわかる URL は除く。動画らしい言葉を含むものだけ
+    if (extensionOf(url) && !/\.(?:php|aspx?|cgi)$/i.test(new URL(url).pathname)) continue;
+    if (!/video|stream|hls|m3u8|mp4|media|play|get_file|movie|vod/i.test(url)) continue;
+    guesses++;
+    add({ kind: "video", src: url, format: "動画", unverified: true, guess: true });
   }
 
   // --- 7. CSS の背景画像（style="background-image:url(...)" や <style> 内） ---
@@ -569,6 +662,16 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     if (main && !main.thumb) main.thumb = ogImage;
   }
 
+  // スクリプトで別のページへ飛ばすだけのページ（location.href = "…"）
+  if (!redirect) {
+    const js =
+      /(?:^|[;{}\s])(?:window\.|top\.|self\.|document\.|parent\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/.exec(html) ??
+      /location\.(?:replace|assign)\(\s*["']([^"']+)["']\s*\)/.exec(html);
+    const url = js ? resolveUrl(js[1], base) : null;
+    if (url && url !== pageUrl && isPageLikeUrl(url)) redirect = url;
+  }
+  const gate = GATE_RE.test(stripTags(markup).slice(0, 20000));
+
   const pagination = findPagination(markup, tags, base, pageUrl);
   const clientRendered =
     /__NEXT_DATA__|self\.__next_f|window\.__NUXT__|id=["']__nuxt["']|data-reactroot|id=["'](?:root|app)["']\s*>\s*<\/div>|ng-version=/i.test(html) ||
@@ -576,7 +679,7 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
   const playerHint =
     /video-js|videojs|jwplayer|jw-player|plyr|flowplayer|mediaelement|dplayer|artplayer|clappr|fluidplayer|shaka-player|<video\b|hls(?:\.min)?\.js|dash(?:\.all)?(?:\.min)?\.js|\.m3u8/i.test(
       html,
-    ) || frames.size > 0;
+    ) || [...frames].some((f) => VIDEO_URL_RE.test(f));
   // プレーヤーらしい iframe（URL に embed / player / video などを含む）を先に読む
   const frameList = [...frames].sort((a, b) => Number(VIDEO_URL_RE.test(b)) - Number(VIDEO_URL_RE.test(a)));
   return {
@@ -588,6 +691,8 @@ export function extractFromHtml(html: string, pageUrl: string): Extracted {
     frames: frameList.slice(0, 6),
     ogImage,
     title: pageTitle,
+    redirect,
+    gate,
   };
 }
 
