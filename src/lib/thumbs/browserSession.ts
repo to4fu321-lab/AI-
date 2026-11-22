@@ -179,12 +179,9 @@ export async function fetchInBrowser(url: string, signal: AbortSignal): Promise<
   });
 }
 
-async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
-  const { page } = session;
-  if (page.isClosed() || signal.aborted) return null;
-  session.at = Date.now();
-  const began = Date.now();
-  const out = (await Promise.race([
+/** ページの中から読み込む（12 秒で打ち切り） */
+async function fetchFromPage(page: Page, url: string): Promise<Read | null> {
+  return (await Promise.race([
     page.evaluate(async (target: string) => {
       try {
         const res = await fetch(target, { credentials: "include", redirect: "follow", headers: { accept: "text/html,application/xhtml+xml" } });
@@ -197,6 +194,14 @@ async function readInSession(session: Session, origin: string, url: string, sign
     }, url),
     sleep(12000).then(() => null),
   ])) as Read | null;
+}
+
+async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
+  const { page } = session;
+  if (page.isClosed() || signal.aborted) return null;
+  session.at = Date.now();
+  const began = Date.now();
+  const out = await fetchFromPage(page, url);
   const challenged = !out || out.status === 0 || out.status === 403 || out.status === 503 || isChallengeHtml(out.html);
   if (out && !challenged) {
     thumbsLog(`session fetch ${out.status} ${Date.now() - began}ms html=${out.html.length} ${url.slice(0, 100)}`);
@@ -208,7 +213,26 @@ async function readInSession(session: Session, origin: string, url: string, sign
   // ページ自体を移動して、確認を通り抜ける。確認には 20〜30 秒かかることがあるので、40 秒まで待つ
   const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
   const until = Date.now() + 40000;
-  while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) await sleep(600);
+  let tries = 0;
+  while (Date.now() < until && !signal.aborted && (await page.evaluate(CHALLENGE).catch(() => true))) {
+    await sleep(1500);
+    // 確認ページが表示されたままでも、裏で確認が済んで、中からの読み込みが通るようになっていることがある。
+    // 数秒おきに試して、通ったらすぐそれを使う
+    if (++tries % 2 === 0) {
+      const again = await fetchFromPage(page, url).catch(() => null);
+      if (again && again.status >= 200 && again.status < 400 && !isChallengeHtml(again.html) && again.html.length > 200) {
+        session.at = Date.now();
+        session.stuckUntil = undefined;
+        thumbsLog(`session 確認が済んだ ${Date.now() - began}ms html=${again.html.length} ${url.slice(0, 100)}`);
+        try {
+          if (new URL(again.finalUrl).origin !== origin) return null;
+        } catch {
+          return null;
+        }
+        return again;
+      }
+    }
+  }
   const stuck = await page.evaluate(CHALLENGE).catch(() => true);
   session.stuckUntil = stuck ? Date.now() + 60000 : undefined;
   const html = stuck ? "" : await page.content().catch(() => "");
