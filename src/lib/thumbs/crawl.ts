@@ -1,9 +1,10 @@
 import "server-only";
 import { AD_FRAME_RE, extensionOf, extractFromHtml, formatOf, type LinkCandidate, isPageLikeUrl, kindFromContentType, kindFromUrl } from "./extract";
+import { mediaKey, SeenMedia, variantKey } from "./dedupe";
 import { isExcluded, isItemExcluded } from "./exclude";
 import { RenderDeferred, renderPage, type Rendered } from "./render";
+import { checkEmbed, checkVideo, type LinkCheck } from "./probe";
 import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
-import { looksLikeVideo, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
 /**
@@ -135,74 +136,47 @@ async function loadRobots(origin: string, signal: AbortSignal): Promise<(path: s
   }
 }
 
-/** 動画かどうかの確認結果。yes: 動画 / no: 動画ではない / unknown: 断られた・時間切れなどで確かめられなかった */
-type VideoCheck = "yes" | "no" | "unknown";
-
-/** 確認結果（同じ実行中は使い回す） */
-const videoCheckCache = new Map<string, Promise<VideoCheck>>();
-
-async function probeVideo(url: string, referer: string | undefined, signal: AbortSignal): Promise<VideoCheck> {
-  try {
-    const headers: Record<string, string> = { range: "bytes=0-375", accept: "video/*,*/*;q=0.5" };
-    if (referer) headers.referer = referer;
-    const { res } = await safeFetch(url, { headers, timeoutMs: 5000, signal });
-    if (res.status !== 200 && res.status !== 206) {
-      await res.body?.cancel().catch(() => {});
-      return res.status === 404 || res.status === 410 ? "no" : "unknown";
-    }
-    const type = res.headers.get("content-type");
-    // 「動画」と名乗っていても中身が HTML のサーバーがあるので、先頭のバイトで確かめる
-    const head = await readHead(res, 376);
-    if (looksLikeVideo(head)) return "yes";
-    const text = new TextDecoder("latin1").decode(head).trimStart().toLowerCase();
-    const isText = text.startsWith("<") || text.startsWith("{");
-    return kindFromContentType(type) === "video" && !isText && head.length >= 16 ? "yes" : "no";
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * 先頭だけ取りに行き、本当に動画ファイルが返ってくるか確かめる。
- * 直リンク禁止のサーバーもあるので、まず見つけたページ（プレーヤー）を Referer として名乗り、
- * 断られたら Referer なしでもう一度試す
- */
-function checkVideo(url: string, referer: string, signal: AbortSignal): Promise<VideoCheck> {
-  let check = videoCheckCache.get(url);
-  if (!check) {
-    check = probeVideo(url, referer, signal).then((first) => (first === "unknown" && !signal.aborted ? probeVideo(url, undefined, signal) : first));
-    videoCheckCache.set(url, check);
-    if (videoCheckCache.size > 5000) videoCheckCache.delete(videoCheckCache.keys().next().value!);
-  }
-  return check;
-}
-
-/** 1 ページで確かめる動画候補の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
+/** 1 ページで確かめる動画の数と、確認にかけてよい時間の上限（サーバーの時間切れを防ぐ） */
 const MAX_VERIFY_PER_PAGE = 40;
 const VERIFY_BUDGET_MS = 15000;
 
 /**
- * URL の見た目だけで動画とした候補を確かめ、動画ファイルでないもの（ダウンロードページへのリンクなど）を外す。
- * 一度に 16 件ずつ確かめる。
- * サーバーから断られた・時間切れなどで確かめられなかったものは、URL が動画ファイルの形（.mp4 など）なら残す
- * （こちらのサーバーからは断られても、手元の端末からは再生できることが多いため）
+ * 見つけた動画・埋め込み動画のリンクが生きているか確かめ、リンク切れを外す。一度に 16 件ずつ。
+ * - リンク切れ（404・サイトがない・中身が動画ではない）は出さない
+ * - URL の見た目だけで動画とした候補は、動画だと確かめられたものだけ出す。
+ *   ただし、サーバーから断られた・時間切れなどで確かめられなかったものは、URL が動画ファイルの形（.mp4 など）なら残す
+ *   （こちらのサーバーからは断られても、手元の端末からは再生できることが多いため）
+ * 確かめたものには checked を付ける（付いていないものは、画面側があとで確かめる）
  */
 async function verifyVideos(items: MediaItem[], signal: AbortSignal, deadline: number): Promise<MediaItem[]> {
-  const result = new Map<MediaItem, VideoCheck>();
-  const pending = items.filter((m) => m.unverified).slice(0, MAX_VERIFY_PER_PAGE);
+  const result = new Map<MediaItem, LinkCheck>();
+  // 確かめないと出せないもの（見た目だけの候補）を先に
+  const pending = items
+    .filter((m) => m.kind !== "image")
+    .sort((a, b) => Number(!!b.unverified) - Number(!!a.unverified))
+    .slice(0, MAX_VERIFY_PER_PAGE);
   const stopAt = Math.min(deadline, Date.now() + VERIFY_BUDGET_MS);
   for (let i = 0; i < pending.length; i += 16) {
     if (Date.now() > stopAt || signal.aborted) break;
     const batch = pending.slice(i, i + 16);
-    const results = await Promise.all(batch.map((m) => checkVideo(m.src, m.referer ?? m.pageUrl, signal)));
+    const results = await Promise.all(
+      batch.map((m) => (m.kind === "embed" ? checkEmbed(m.src, signal) : checkVideo(m.src, m.referer ?? m.pageUrl, signal))),
+    );
     batch.forEach((m, j) => result.set(m, results[j]));
   }
   const keep = (m: MediaItem) => {
+    if (m.kind === "image") return true;
+    const r = result.get(m);
+    if (r === "no") return false;
     if (!m.unverified) return true;
-    const r = result.get(m) ?? "unknown";
-    return r === "yes" || (r === "unknown" && !m.guess && kindFromUrl(m.src) === "video");
+    return r === "yes" || (!m.guess && kindFromUrl(m.src) === "video");
   };
-  return items.filter(keep).map((m) => (m.unverified || m.guess ? { ...m, unverified: undefined, guess: undefined } : m));
+  return items.filter(keep).map((m) => {
+    if (m.kind === "image") return m;
+    const out: MediaItem = { ...m, unverified: undefined, guess: undefined };
+    if (result.has(m)) out.checked = true;
+    return out;
+  });
 }
 
 /**
@@ -220,6 +194,36 @@ function fillThumbs(media: MediaItem[], linkThumb: string | undefined, ogImage: 
     if (linkThumb && videos.length <= 3) v.thumb = linkThumb;
     else if (ogImage && videos.length <= 2) v.thumb = ogImage;
   }
+}
+
+/**
+ * 同じページにある「同じ動画の画質・形式違い」（a_720p.mp4・a_480p.mp4・a/master.m3u8、合言葉だけ違う URL）を 1 つにまとめる。
+ * 残すのは、どの端末でも再生・保存しやすい MP4 → 画質の高いもの → 先に見つけたもの、の順
+ */
+function pickVariants(items: MediaItem[]): MediaItem[] {
+  const score = (m: MediaItem) => {
+    const mp4 = /\.(?:mp4|m4v|mov)$/i.test(new URL(m.src).pathname) ? 100000 : 0;
+    const res = /(?:^|[_\-./])(240|360|480|540|720|1080|1440|2160)p?(?=$|[_\-./])/i.exec(new URL(m.src).pathname);
+    return mp4 + (res ? Number(res[1]) : 0);
+  };
+  const best = new Map<string, MediaItem>();
+  const out: MediaItem[] = [];
+  for (const m of items) {
+    const keys = [`file:${mediaKey(m)}`, variantKey(m)].filter((k): k is string => !!k);
+    const prev = keys.map((k) => best.get(k)).find(Boolean);
+    if (!prev) {
+      out.push(m);
+      for (const k of keys) best.set(k, m);
+      continue;
+    }
+    // 同じ動画。よいほうを残し、サムネイル・題名は補い合う
+    const [keep, drop] = score(m) > score(prev) ? [m, prev] : [prev, m];
+    keep.thumb ??= drop.thumb;
+    keep.title ??= drop.title;
+    if (keep !== prev) out[out.indexOf(prev)] = keep;
+    for (const k of [...keys, ...[...best].filter(([, v]) => v === prev).map(([k]) => k)]) best.set(k, keep);
+  }
+  return out;
 }
 
 /** iframe の中を読みに行く数・深さ・大きさの上限 */
@@ -300,7 +304,7 @@ export async function* crawl(
   };
 
   const seenPages = new Set<string>(resume?.seen ?? [normalizePageUrl(startUrl)]);
-  const seenMedia = new Set<string>();
+  const seenMedia = new SeenMedia();
   const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0, rank: 0, root: true }];
   /** 範囲や階層の外だったので後回しにしたリンク */
   const reserve: QueueItem[] = resume?.reserve ?? [];
@@ -498,6 +502,8 @@ export async function* crawl(
       let renderError: string | null = null;
       /** 普通の読み込みが断られた理由 */
       let blocked: string | null = null;
+      /** 断られたのではなく、そもそもつながらなかった（アドレス違い・サイトが落ちているなど） */
+      let unreachable = false;
       const pageOrigin = new URL(url).origin;
 
       if (browserOnly.has(pageOrigin)) blocked = "自動アクセスを断るサイト";
@@ -533,11 +539,11 @@ export async function* crawl(
                 thumb: directKind === "video" ? item.thumb : undefined,
                 format: (type?.split("/")[1]?.split(";")[0] ?? "").toUpperCase().replace("JPEG", "JPG") || undefined,
               };
-              if (seenMedia.has(direct.id)) {
+              if (seenMedia.has(direct)) {
                 events.push({ type: "page", url: finalUrl, depth, found: 0 });
                 return events;
               }
-              seenMedia.add(direct.id);
+              seenMedia.add(direct);
               found++;
               if (directKind === "video") videos++;
               events.push({ type: "page", url: finalUrl, depth, found: 1 }, { type: "media", items: [direct] });
@@ -555,6 +561,7 @@ export async function* crawl(
           // 接続を切られた・時間切れなど。入力したページなら、ブラウザで開き直してみる
           if (!item.root) throw err;
           blocked = describeFailure(err);
+          unreachable = true;
         }
       }
 
@@ -573,7 +580,7 @@ export async function* crawl(
             return events;
           }
           if (!known) blockedTries++;
-          return fail(`サイトが自動アクセスを断っています（${blocked}。ブラウザでも開けませんでした）`);
+          return fail(unreachable ? `サイトを開けませんでした（${blocked}）` : `サイトが自動アクセスを断っています（${blocked}。ブラウザでも開けませんでした）`);
         }
         if (r.status >= 400) {
           if (!known) blockedTries++;
@@ -685,19 +692,18 @@ export async function* crawl(
       const usableOg = ogImage && depth > 0 && (ogPages.get(ogImage) ?? 0) < 2 ? ogImage : undefined;
       fillThumbs(pageMedia, item.thumb, usableOg);
 
-      const candidates: MediaItem[] = [];
-      for (const m of pageMedia) {
-        if (seenMedia.has(m.id)) continue;
-        seenMedia.add(m.id);
-        candidates.push(m);
-      }
+      // すでに出した動画（URL の後ろの合言葉だけ違うもの・別のページで出したもの）は除く
+      // 画質・形式違いのどれか 1 つでも出していたら、残りの違いも出さない
+      const seenVariants = new Set(pageMedia.filter((m) => seenMedia.has(m)).map(variantKey));
+      const candidates = pageMedia.filter((m) => !seenMedia.has(m) && !seenVariants.has(variantKey(m) ?? ""));
       // 取得する種類の指定（動画のみ・画像のみ）。埋め込み動画は動画に含める。
       // 入力した階層の外のページは動画を探すために読んでいるので、画像は集めない
       const videoOnly = options.kinds === "video" || zone > 0;
       const wanted = candidates
         .filter((m) => !isItemExcluded(m, options.exclude))
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
-      const fresh = await verifyVideos(wanted, signal, deadline);
+      const fresh = pickVariants(await verifyVideos(wanted, signal, deadline));
+      for (const m of candidates) seenMedia.add(m);
       found += fresh.length;
       videos += fresh.filter((m) => m.kind !== "image").length;
       events.push({ type: "page", url: finalUrl, depth, found: fresh.length });

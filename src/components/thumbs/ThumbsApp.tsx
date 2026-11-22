@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
 import { getVideoThumb, peekVideoThumb } from "./videoThumb";
+import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
@@ -65,6 +66,35 @@ export function proxyUrl(
   return `/api/thumbs/media?${p}`;
 }
 
+/**
+ * リンク切れの確認（サーバーに聞く）。同時に 3 件まで。結果はこの画面を開いている間だけ覚えておく。
+ * サーバーが取得のときに確かめていない動画（以前に取得して保存してあったものなど）に使う
+ */
+const linkChecks = new Map<string, Promise<boolean>>();
+let checking = 0;
+const checkWaiters: (() => void)[] = [];
+function isDeadLink(item: MediaItem): Promise<boolean> {
+  let job = linkChecks.get(item.src);
+  if (!job) {
+    job = (async () => {
+      while (checking >= 3) await new Promise<void>((r) => checkWaiters.push(r));
+      checking++;
+      try {
+        const p = new URLSearchParams({ url: item.src, ref: item.referer ?? item.pageUrl, check: "1", kind: item.kind });
+        const res = await fetch(`/api/thumbs/media?${p}`);
+        return res.ok && (await res.json()).alive === "no";
+      } catch {
+        return false;
+      } finally {
+        checking--;
+        checkWaiters.shift()?.();
+      }
+    })();
+    linkChecks.set(item.src, job);
+  }
+  return job;
+}
+
 const isHls = (item: MediaItem) => /\.m3u8(\?|$)/i.test(item.src) || item.format === "M3U8";
 const isVideoLike = (item: MediaItem) => item.kind !== "image";
 
@@ -108,8 +138,9 @@ export function ThumbsApp() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
       // サーバー描画と食い違わないよう、保存データの復元は表示後に 1 回だけ行う
+      // 以前の取得で同じ動画が 2 個入っていたら、ここで 1 個にまとめる
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (saved?.items) setItems(saved.items);
+      if (saved?.items) setItems(dedupeMedia(saved.items as Item[]));
       if (saved?.jobs) setJobs(saved.jobs.map((j: Job) => (j.status === "running" ? { ...j, status: "stopped" } : j)));
       const library = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "null");
       if (Array.isArray(library?.history)) setHistory(library.history);
@@ -244,10 +275,16 @@ export function ThumbsApp() {
                 else if (event.type === "media") {
                   foundCount += event.items.length;
                   setItems((list) => {
-                    const known = new Set(list.map((i) => i.id));
-                    const fresh = event.items
-                      .filter((i) => !known.has(i.id) && !isItemExcluded(i, excludesRef.current))
-                      .map((i) => ({ ...i, jobId: id }));
+                    // 同じ動画（URL の後ろだけ違う・画質違い）は 2 個入れない
+                    const known = new SeenMedia(list);
+                    const ids = new Set(list.map((i) => i.id));
+                    const fresh: Item[] = [];
+                    for (const i of event.items) {
+                      if (ids.has(i.id) || known.has(i) || isItemExcluded(i, excludesRef.current)) continue;
+                      ids.add(i.id);
+                      known.add(i);
+                      fresh.push({ ...i, jobId: id });
+                    }
                     return fresh.length ? [...list, ...fresh].slice(-MAX_ITEMS) : list;
                   });
                 }
@@ -345,6 +382,8 @@ export function ThumbsApp() {
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
+  /** リンクが生きていると確かめた印を付ける（次からは確かめない） */
+  const markChecked = useCallback((id: string) => setItems((l) => l.map((i) => (i.id === id ? { ...i, checked: true } : i))), []);
 
   const visible = useMemo(
     () =>
@@ -535,7 +574,7 @@ export function ThumbsApp() {
         <ul className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
           {visible.map((item, index) => (
             <li key={item.id}>
-              <Thumb item={item} onOpen={() => setViewer(index)} onBroken={hideItem} />
+              <Thumb item={item} onOpen={() => setViewer(index)} onBroken={hideItem} onChecked={markChecked} />
             </li>
           ))}
         </ul>
@@ -550,6 +589,11 @@ export function ThumbsApp() {
           index={viewer}
           onIndex={setViewer}
           onClose={() => setViewer(null)}
+          onBroken={(id) => {
+            hideItem(id);
+            // 最後の 1 件を外したときは、1 つ前を表示する（なければ閉じる）
+            if (viewer >= visible.length - 1) setViewer(visible.length > 1 ? visible.length - 2 : null);
+          }}
           onExclude={(host) => {
             if (!confirm(`${host} を除外リストに追加して、一覧から消しますか？\n（次からこのサイトは取得しません）`)) return;
             setViewer(null);
@@ -677,7 +721,17 @@ function JobRow({
  *   失敗したらサーバー中継で再挑戦。画像がそれでも駄目なら一覧から外す
  * - サムネイルのない動画（または読み込めなかった動画）は、画面に見えたら動画から 1 コマ取り出して作る
  */
-function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onBroken: (id: string) => void }) {
+function Thumb({
+  item,
+  onOpen,
+  onBroken,
+  onChecked,
+}: {
+  item: Item;
+  onOpen: () => void;
+  onBroken: (id: string) => void;
+  onChecked: (id: string) => void;
+}) {
   const imageSrc = item.kind === "image" ? item.src : item.thumb;
   const [attempt, setAttempt] = useState(0);
   const [imgFailed, setImgFailed] = useState(false);
@@ -716,6 +770,32 @@ function Thumb({ item, onOpen, onBroken }: { item: Item; onOpen: () => void; onB
       alive = false;
     };
   }, [needCapture, visible, item.src, proxied]);
+
+  // サーバーがまだ確かめていない動画は、画面に入ったときにリンク切れか確かめ、切れていたら一覧から外す
+  const needCheck = video && !item.checked;
+  useEffect(() => {
+    if (!needCheck) return;
+    const el = ref.current;
+    if (!el) return;
+    let alive = true;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        io.disconnect();
+        void isDeadLink(item).then((dead) => {
+          if (!alive) return;
+          if (dead) onBroken(item.id);
+          else onChecked(item.id);
+        });
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => {
+      alive = false;
+      io.disconnect();
+    };
+  }, [needCheck, item, onBroken, onChecked]);
 
   const onError = () => {
     if (attempt === 0) setAttempt(1);
@@ -883,14 +963,19 @@ function Viewer({
   onIndex,
   onClose,
   onExclude,
+  onBroken,
 }: {
   items: Item[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
   onExclude: (host: string) => void;
+  /** リンク切れで見られなかったものを一覧から外す */
+  onBroken: (id: string) => void;
 }) {
   const item = items[index];
+  /** リンク切れを外したことのお知らせ（次の動画に切り替わったあとも少し出しておく） */
+  const [removed, setRemoved] = useState<string | null>(null);
   const [useProxy, setUseProxy] = useState(false);
   /** 動画をどこから読んでいるか（直接 / サーバー経由） */
   const [stage, setStage] = useState<"direct" | "proxy">("direct");
@@ -904,6 +989,7 @@ function Viewer({
       if (next >= 0 && next < items.length) {
         setUseProxy(false);
         setPlayError(null);
+        setRemoved(null);
         onIndex(next);
       }
     },
@@ -936,11 +1022,18 @@ function Viewer({
       const res = await fetch(proxyUrl(item), { headers: { range: "bytes=0-1" } });
       if (!res.ok) {
         const text = (await res.text().catch(() => "")).slice(0, 120);
-        const expired = /HTTP (403|404|410)/.test(text);
-        setPlayError(
-          `再生できませんでした：${text || `HTTP ${res.status}`}` +
-            (expired ? "\n期限付きの URL だった可能性があります。もう一度取得し直すと再生できることがあります。" : ""),
-        );
+        if (res.status === 401) {
+          setPlayError("パスワードの有効期限が切れました。ページを読み込み直してください。");
+          return;
+        }
+        // こちらのサーバー側の不調（時間切れなど）は、リンク切れとは限らないので外さない
+        if (![400, 415, 502].includes(res.status)) {
+          setPlayError(`再生できませんでした（サーバーの不調：HTTP ${res.status}）。少し待ってもう一度お試しください。`);
+          return;
+        }
+        // 直接もサーバー経由も読めなかった＝リンク切れ。一覧から外す（表示は次の動画に移る）
+        setRemoved(`リンク切れのため一覧から外しました（${text || `HTTP ${res.status}`}）`);
+        onBroken(item.id);
       } else {
         const type = res.headers.get("content-type") ?? "不明";
         setPlayError(`動画のデータは届いていますが、この端末では再生できない形式です（${type}）。「動画を直接開く」か「ダウンロード」を試してください。`);
@@ -948,7 +1041,7 @@ function Viewer({
     } catch {
       setPlayError("通信できませんでした。電波の状態を確認してください。");
     }
-  }, [item]);
+  }, [item, onBroken]);
 
   let body: React.ReactNode;
   if (item.kind === "embed") {
@@ -1032,6 +1125,7 @@ function Viewer({
       </div>
 
       <div className="space-y-2 px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
+        {removed && <div className="rounded-lg bg-amber-500/20 px-3 py-2 text-xs text-amber-100">🧹 {removed}</div>}
         {playError && (
           <div className="whitespace-pre-line rounded-lg bg-red-500/20 px-3 py-2 text-xs text-red-200">
             ⚠ {playError}
