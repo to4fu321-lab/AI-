@@ -1029,7 +1029,7 @@ function JobRow({
         ? job.message ?? "エラー"
         : job.status === "stopped"
           ? `停止（${job.pages}ページ）`
-          : `${job.pages}ページ${job.truncated ? "（上限で打ち切り）" : ""}`;
+          : `${job.pages}ページ${job.truncated ? (job.settings?.hunt ? "（さらに深く探せます）" : "（上限で打ち切り）") : ""}`;
   const trouble = [job.errors ? `読めず ${job.errors}` : "", job.skips ? `飛ばした ${job.skips}` : ""].filter(Boolean).join("・");
   return (
     <li
@@ -1170,7 +1170,11 @@ function GatedPages({ pages, newSince }: { pages: Gated[]; newSince: number }) {
  * 画面が短くて最初から見えているときは勝手に始めず、ボタンを押してもらう
  */
 function LoadMore({ jobs, running, onMore }: { jobs: Job[]; running: boolean; onMore: (job: Job) => void }) {
-  const more = jobs.filter((j) => j.status === "done" && j.truncated && j.resume);
+  // 一度に続けるのは 3 つまで（検索から探すと取得が十数個になる。読んだページの少ないものから順に）
+  const more = jobs
+    .filter((j) => j.status === "done" && j.truncated && j.resume)
+    .sort((a, b) => a.pages - b.pages)
+    .slice(0, 3);
   const end = useRef<HTMLDivElement>(null);
   const scrolled = useRef(false);
   const latest = useRef({ more, running, onMore });
@@ -1204,7 +1208,7 @@ function LoadMore({ jobs, running, onMore }: { jobs: Job[]; running: boolean; on
         <span className="animate-pulse text-xs font-semibold text-fuchsia-500">続きを読み込み中…</span>
       ) : (
         <button type="button" onClick={() => more.forEach(onMore)} className="rounded-full bg-neutral-900 px-5 py-2 text-xs font-bold text-white dark:bg-white dark:text-neutral-900">
-          もっと読み込む
+          {more.some((j) => j.settings?.hunt) ? "さらに深く探す" : "もっと読み込む"}
         </button>
       )}
     </div>
