@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { renderPage } from "./render";
-import { assertPublicUrl, safeFetch } from "./safeFetch";
+import { assertPublicUrl, safeFetch, thumbsLog } from "./safeFetch";
 
 /**
  * Gofile（gofile.io/d/ID）の共有フォルダから、ファイルの一覧と直リンクをもらう。
@@ -145,6 +145,7 @@ async function createGuest(signal: AbortSignal): Promise<{ token: string | null;
   });
   const json = await readJson(res);
   const token = (json?.data as { token?: unknown } | undefined)?.token;
+  thumbsLog(`gofile ゲスト登録 HTTP ${res.status} status=${typeof json?.status === "string" ? json.status : "-"} 合言葉=${typeof token === "string" && token ? "あり" : "なし"}`);
   if (typeof token === "string" && token) return { token, why: "ok" };
   return { token: null, why: typeof json?.status === "string" ? json.status : `HTTP ${res.status}` };
 }
@@ -375,5 +376,6 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
   } catch {
     error ??= "Gofile に接続できませんでした";
   }
+  thumbsLog(`gofile ${id} files=${files.length} ${error ?? ""} ${notes.join(" ／ ").slice(0, 500)}`);
   return { files, error: files.length ? undefined : error, detail: files.length ? undefined : notes.join(" ／ ").slice(0, 600) };
 }

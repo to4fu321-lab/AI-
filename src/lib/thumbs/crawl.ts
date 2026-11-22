@@ -9,7 +9,7 @@ import { isAdUrl } from "./adblock";
 import { tweetIdInUrl, tweetIdOf, tweetVideos } from "./twitter";
 import { gofileFiles, gofileId, type GofileResult } from "./gofile";
 import type { TweetRef } from "./extract";
-import { CookieJar, FetchBlockedError, safeFetch } from "./safeFetch";
+import { CookieJar, FetchBlockedError, safeFetch, thumbsLog } from "./safeFetch";
 import { isVagueType, mediaMime, readHead } from "./sniff";
 import type { CrawlEvent, CrawlHome, CrawlOptions, CrawlState, MediaItem, QueueItem } from "./types";
 
@@ -570,7 +570,16 @@ export async function* crawl(
   const openInBrowser = async (target: string): Promise<Rendered> => {
     // 1 回の実行で最初のブラウザ表示は必ず行う（次の回へ回し続けて進まなくなるのを防ぐ）
     const startBy = renderStarts++ === 0 ? Number.POSITIVE_INFINITY : deadline;
-    const r = await renderPage(target, signal, startBy, { play: wantsVideo });
+    const began = Date.now();
+    let r: Rendered;
+    try {
+      r = await renderPage(target, signal, startBy, { play: wantsVideo });
+    } catch (err) {
+      thumbsLog(`browser 失敗 ${Date.now() - began}ms ${err instanceof Error ? `${err.name} ${err.message.slice(0, 120)}` : String(err)} ${target.slice(0, 100)}`);
+      throw err;
+    }
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(r.html)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 40) ?? "";
+    thumbsLog(`browser ${r.status} ${Date.now() - began}ms html=${r.html.length} 通信=${r.network.length} 題名「${title}」 ${r.finalUrl.slice(0, 100)}`);
     // 年齢確認の結果などの Cookie は、以降の普通の読み込みでも使う
     try {
       const site = siteOf(new URL(r.finalUrl).hostname);
