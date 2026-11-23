@@ -626,6 +626,9 @@ export async function* crawl(
   const huntPerSite = new Map<string, number>();
   /** 断られて読めなかった一覧の続き（終わった後、続きとして残す） */
   const retryLater: QueueItem[] = [];
+  /** Gofile に一時的に止められている（この回は、Gofile のフォルダを聞かずに取っておく） */
+  let gofilePaused = false;
+  const paused: QueueItem[] = [];
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
@@ -1018,8 +1021,20 @@ export async function* crawl(
         deferred.push(item);
         return events;
       }
+      // Gofile がこのサーバーからの問い合わせを一時的に止めている間は、聞かずに取っておく
+      // （聞いても全部「読めない」になるだけで、列を空にしてしまうため）。時間をおいて「もっと読み込む」で続ける
+      if (gofilePaused) {
+        paused.push(item);
+        return events;
+      }
       seenGofile.delete(share);
       const g = await gofileMedia([share]);
+      if (!g.media.length && /一時的に止めています/.test(g.error ?? "")) {
+        gofilePaused = true;
+        seenGofile.delete(share);
+        paused.push(item);
+        return events;
+      }
       const items = g.media
         .filter((m) => (options.kinds === "video" ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true))
         .filter((m) => !seenMedia.has(m));
@@ -1670,6 +1685,13 @@ export async function* crawl(
       lastCheckpoint = Date.now();
       yield { type: "checkpoint", state: snapshot() };
     }
+    if (paused.length) {
+      // Gofile に止められていて聞けなかったフォルダは、読んだ数から引いて列に戻し、ここで終わる（続きは時間をおいてから）
+      pages -= paused.length;
+      for (const d of paused) queuedByUrl.set(d.url, d);
+      queue.unshift(...paused.splice(0));
+    }
+    if (gofilePaused) break;
     if (deferred.length) {
       // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
       pages -= deferred.length;
@@ -1741,8 +1763,11 @@ export async function* crawl(
     const retryNote = retryLater.length
       ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
       : null;
+    const pausedNote = gofilePaused
+      ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。10 分ほど待ってから、一番下の「もっと読み込む」で続きを読めます"
+      : null;
     const finalNote =
-      retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      pausedNote ?? retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   // 断られて読めなかった一覧の続きは、続きとして残す（「もっと読み込む」でもう一度試せる）

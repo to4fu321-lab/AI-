@@ -147,10 +147,10 @@ function describe(status: string): string {
   return `Gofile が答えませんでした（${status}）`;
 }
 
-/** 1 件ずつ、1.2 秒以上あけて聞く */
+/** 1 件ずつ、2 秒以上あけて聞く */
 function paced<T>(run: () => Promise<T>): Promise<T> {
   const job = chain.then(async () => {
-    const wait = lastAsk + 1200 - Date.now();
+    const wait = lastAsk + 2000 - Date.now();
     if (wait > 0) await sleep(wait);
     lastAsk = Date.now();
     return run();
