@@ -18,6 +18,8 @@ export interface CrawlSettings {
   hunt?: boolean;
   /** Gofile 探し（Gofile の中身だけ集める） */
   gofileOnly?: boolean;
+  /** ファイル置き場を探すとき、集めない置き場（設定で外したもの） */
+  skipHosts?: string[];
 }
 
 export interface HistoryEntry {

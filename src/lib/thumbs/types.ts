@@ -98,6 +98,8 @@ export interface CrawlOptions {
   hunt?: boolean;
   /** Gofile 探し：Gofile のリンクの中身だけを集める（ほかの動画・読めなかったページのタイルは出さない） */
   gofileOnly?: boolean;
+  /** ファイル置き場を探すとき、集めない置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox のうち、設定で外したもの） */
+  skipHosts?: string[];
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
 }
@@ -128,6 +130,8 @@ export interface QueueItem {
   preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */
   from?: string;
+  /** 一覧の続きが断られて読めず、後でもう一度試すことにした回数 */
+  retry?: number;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
   root?: boolean;
 }

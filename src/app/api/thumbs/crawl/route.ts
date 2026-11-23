@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     robots?: unknown;
     hunt?: unknown;
     gofileOnly?: unknown;
+    skipHosts?: unknown;
     gofileToken?: unknown;
     resume?: unknown;
   };
@@ -66,6 +67,7 @@ export async function POST(request: Request) {
     robots: body.robots !== false,
     hunt: body.hunt === true,
     gofileOnly: body.gofileOnly === true,
+    skipHosts: Array.isArray(body.skipHosts) ? body.skipHosts.filter((h): h is string => typeof h === "string" && h.length < 30).slice(0, 10) : [],
     gofileToken: typeof body.gofileToken === "string" && /^[A-Za-z0-9]{10,128}$/.test(body.gofileToken.trim()) ? body.gofileToken.trim() : undefined,
   };
   const resume = parseResume(body.resume);
@@ -178,6 +180,8 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (duration) item.duration = duration;
     const title = shortText(v.title, 120);
     if (title) item.title = title;
+    const retry = clamp(v.retry, 0, 10, 0);
+    if (retry) item.retry = retry;
     out.push(item);
   }
   return out;
