@@ -19,7 +19,15 @@ interface Session {
   at: number;
   /** このページを使う処理を 1 つずつ順番に行うための列（読み込みの途中でページを移動すると、ほかの読み込みが壊れるため） */
   queue: Promise<unknown>;
+  /** 最後にページを読んだ時刻（続けて読むときは間をあける） */
+  last?: number;
 }
+
+/**
+ * 同じサイトのページを続けて読むときにあける間。間をあけずに立て続けに読むと、サイトに負担がかかり、
+ * 2〜3 ページ目から「人間かどうかの確認」を求められるサイトがある（twihub など）ので、ゆっくり読む
+ */
+const READ_GAP_MS = 2500;
 
 const sessions = new Map<string, Promise<Session | null>>();
 /** 開いたままにするページの数（メモリを使うので 2 枚まで） */
@@ -198,7 +206,11 @@ async function fetchFromPage(page: Page, url: string): Promise<Read | null> {
 async function readInSession(session: Session, origin: string, url: string, signal: AbortSignal): Promise<Read | null> {
   const { page } = session;
   if (page.isClosed() || signal.aborted) return null;
+  const wait = (session.last ?? 0) + READ_GAP_MS - Date.now();
+  if (wait > 0) await sleep(wait);
+  if (page.isClosed() || signal.aborted) return null;
   session.at = Date.now();
+  session.last = Date.now();
   const began = Date.now();
   const out = await fetchFromPage(page, url);
   if (out && out.status >= 200 && out.status < 400 && !isChallengeHtml(out.html) && out.html.length > 200) {
