@@ -9,6 +9,8 @@ import { folderListPage, hostedFile } from "./filehost";
 import { isAdUrl } from "./adblock";
 import { gifVideoFromThumb, tweetGofileIds, tweetIdInUrl, tweetIdOf, tweetShareUrls, tweetVideos } from "./twitter";
 import { pixeldrainList, pixeldrainListId } from "./pixeldrain";
+import { feedLinksInHtml, parseFeed } from "./feeds";
+import { isVideoApi, parseVideoApi } from "./videoApis";
 import { isTwihubList, isTwihubListApi, twihubFromJson, twihubNextFromHtml } from "./sites";
 import { gofileDougaApi, gofileDougaList } from "./gofileDouga";
 import { linkexFiles, linkexList, linkexPlan } from "./linkex";
@@ -517,6 +519,10 @@ export async function* crawl(
     fruitful: [...fruitful].slice(-500),
   });
 
+  /** 前に読んだ Gofile のフォルダ（画面が覚えているもの）と、それで聞かずに済ませた数 */
+  const knownGofile = new Set(options.knownGofile ?? []);
+  let knownSkipped = 0;
+
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
 
@@ -532,6 +538,14 @@ export async function* crawl(
     preview?: string,
   ) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
+    // 前に読んだ Gofile のフォルダは、もう聞かない（入力したものは除く）
+    if (!root && knownGofile.size) {
+      const gid = gofileId(url);
+      if (gid && knownGofile.has(gid)) {
+        knownSkipped++;
+        return false;
+      }
+    }
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) {
       // すでに列にあるページなら、サムネイルと優先度だけ補う
@@ -555,6 +569,17 @@ export async function* crawl(
     queue.push(entry);
     queuedByUrl.set(url, entry);
     return true;
+  };
+
+  /** サイトが機械向けに出している一覧（サイトマップ・RSS）を、読む列に入れる（.xml でもページとして扱う） */
+  const enqueueFeed = (url: string, depth: number, rank: number) => {
+    if (isExcluded(url, options.exclude)) return;
+    const key = normalizePageUrl(url);
+    if (seenPages.has(key) || seenPages.size >= MAX_SEEN || queue.length >= MAX_QUEUE) return;
+    seenPages.add(key);
+    const entry: QueueItem = { url, depth, rank, prio: 0, feed: true };
+    queue.push(entry);
+    queuedByUrl.set(url, entry);
   };
 
   /** 今は辿らないリンクを取っておく（動画が見つからないときに、ここから範囲を広げる） */
@@ -801,7 +826,7 @@ export async function* crawl(
   /** Gofile をブラウザで開いても読めなかった（この実行では、もうブラウザでは開かない。時間がかかるだけなので） */
   let gofileBrowserFailed = false;
   const gofileMedia = async (ids: string[], allowBrowser = true): Promise<{ media: MediaItem[]; error?: string; detail?: string }> => {
-    const todo = ids.filter((id) => !seenGofile.has(id)).slice(0, 10);
+    const todo = ids.filter((id) => !seenGofile.has(id) && !knownGofile.has(id)).slice(0, 10);
     const media: MediaItem[] = [];
     let error: string | undefined;
     let detail: string | undefined;
@@ -949,7 +974,8 @@ export async function* crawl(
     // 読まずに「サイトで開く」に並べる（サイトに何度も読みに行かないように）
     if (!item.root && (gatedStreak.get(gateKey(url)) ?? 0) >= GATED_STREAK) return gated("サイトが「人間かどうかの確認」を求めているため、このページは読めません");
     // 入力したページ自体は、人がブラウザで開くのと同じなので常に読む。リンクを辿る先は robots.txt を守る
-    if (!item.root && !(await allowed(url))) {
+    // 公式の検索の窓口（機械から使うために出されているもの）は、robots.txt の対象にしない
+    if (!item.root && !isVideoApi(url) && !(await allowed(url))) {
       robotsSkipped++;
       thumbOnly();
       events.push({ type: "skip", url, reason: "robots.txt で禁止されています" });
@@ -1048,7 +1074,9 @@ export async function* crawl(
       const ok = dropSamePrint(await settle(verified));
       found += ok.length;
       videos += ok.filter((m) => m.kind !== "image").length;
-      events.push({ type: "page", url, depth, found: ok.length });
+      // 読み終えたフォルダは、画面が覚えて次からは聞かない（読めなかった・確かめきれなかったものは覚えない）
+      const readState = ok.length ? "ok" : !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "") ? "gone" : undefined;
+      events.push({ type: "page", url, depth, found: ok.length, gofile: readState });
       if (ok.length) events.push({ type: "media", items: ok });
       // まとめサイトのカードから来た Gofile のフォルダが、消されていた・空だった：サムネイルだけ並べる（タップでまとめサイトのページ）
       if (!ok.length && !verified.rest.length && !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "")) {
@@ -1097,6 +1125,64 @@ export async function* crawl(
         }
         return events;
       }
+    }
+    // 動画サービスの公式の検索の窓口（Dailymotion・ニコニコ・Internet Archive・Mastodon）、
+    // サイトが機械向けに出している一覧（サイトマップ・RSS）
+    if (isVideoApi(url) || item.feed) {
+      let text = "";
+      try {
+        const { res } = await safeFetch(url, { signal, timeoutMs: 12000, headers: { accept: item.feed ? "application/xml,text/xml,*/*" : "application/json", "user-agent": "thumbs-collector/1.0" } });
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          if (item.feed) return events;
+          return fail(`検索の窓口が答えませんでした（HTTP ${res.status}）`);
+        }
+        text = await readLimited(res, 4 * 1024 * 1024);
+      } catch (err) {
+        if (signal.aborted || item.feed) return events;
+        return fail(describeFailure(err));
+      }
+      const media: MediaItem[] = [];
+      if (item.feed) {
+        const feed = parseFeed(text, url);
+        if (!feed) return events;
+        let added = 0;
+        for (const p of feed.pages) {
+          if (added >= 300) break;
+          const z = options.crossSite ? 0 : zoneOf(p.url, home);
+          if (z !== 0 || item.depth >= options.depth) continue;
+          if (enqueue(p.url, item.depth + 1, rank + 1, p.thumb ? 3 : 1, p.thumb, 0, false, url)) {
+            added++;
+            const q = p.title ? queuedByUrl.get(p.url) : undefined;
+            if (q) q.title = p.title;
+          }
+        }
+        for (const more of feed.more.slice(0, 5)) {
+          enqueueFeed(more, item.depth, rank + 1);
+        }
+        for (const v of feed.videos) media.push({ id: v.src, kind: "video", src: v.src, pageUrl: v.pageUrl, thumb: v.thumb, title: v.title, duration: v.duration, format: formatOf(v.src, "video"), unverified: true });
+        thumbsLog(`feed pages=${feed.pages.length} 追加=${added} videos=${feed.videos.length} ${url.slice(0, 100)}`);
+      } else {
+        const api = parseVideoApi(text, url);
+        if (!api) return fail("検索の窓口の返事を読めませんでした");
+        for (const v of api.videos) media.push({ id: v.src, kind: v.kind, src: v.src, pageUrl: v.pageUrl, thumb: v.thumb, title: v.title, duration: v.duration, format: v.format });
+        for (const p of api.pages) {
+          if (!enqueue(p.url, depth + 1, rank + 1, 4, p.thumb, 0, false, url)) continue;
+          const q = p.title ? queuedByUrl.get(p.url) : undefined;
+          if (q) q.title = p.title;
+        }
+        if (api.next && paginationUsed < options.maxPagination && enqueue(api.next, depth, rank + 1, 1)) paginationUsed++;
+      }
+      const items = media.filter((m) => !isItemExcluded(m, options.exclude) && !seenMedia.has(m) && wantsVideo);
+      for (const m of items) seenMedia.add(m);
+      const verified = await verifyMedia(items, signal, Math.min(deadline, Date.now() + 15000), jar);
+      pending.push(...verified.rest);
+      const ok = dropSamePrint(await settle(verified));
+      found += ok.length;
+      videos += ok.length;
+      events.push({ type: "page", url, depth, found: ok.length });
+      if (ok.length) events.push({ type: "media", items: ok });
+      return events;
     }
     // pixeldrain のリスト（アルバム）：公開の窓口から中のファイルをもらう
     const pd = pixeldrainListId(url);
@@ -1152,7 +1238,10 @@ export async function* crawl(
       let unreachable = false;
       const pageOrigin = new URL(url).origin;
 
-      if (browserOnly.has(pageOrigin)) blocked = "自動アクセスを断るサイト";
+      // 本人のブラウザから送られてきたページ（入力したページの中身）があれば、サーバーからは読みに行かない
+      const given = !!item.root && !!options.rootHtml;
+      if (given) html = options.rootHtml!;
+      else if (browserOnly.has(pageOrigin)) blocked = "自動アクセスを断るサイト";
       else {
         try {
           const { res, url: fetched } = await safeFetch(fetchUrl, { signal, jar, headers: PAGE_HEADERS });
@@ -1320,6 +1409,7 @@ export async function* crawl(
       const wantRender =
         !r &&
         !lite &&
+        !given &&
         (options.render === "always" ||
           (options.render === "auto" &&
             ((extracted.clientRendered && poor && !elsewhere) ||
@@ -1388,6 +1478,13 @@ export async function* crawl(
         for (const u of [finalUrl, r?.finalUrl]) if (u) sites.add(siteOf(new URL(u).hostname));
         const base = new URL(finalUrl);
         home = { sites: [...sites], scope: scopeOf(base), path: base.pathname };
+      }
+      // サイトが機械向けに出している一覧（新着の RSS・サイトマップ）も読む。リンクを辿るだけでは届かないページまで集められる。
+      // ふつうのリンクより後に読む（検索から探しているとき・下の階層を辿らないときは読まない）
+      if (item.root && !options.hunt && options.depth > 0) {
+        for (const f of [...feedLinksInHtml(html, finalUrl), `${new URL(finalUrl).origin}/sitemap.xml`]) {
+          enqueueFeed(f, depth, rank + 2);
+        }
       }
 
       // 同じページ内の重複をまとめる（サムネイルなどの情報は補い合う）
@@ -1766,11 +1863,12 @@ export async function* crawl(
     const retryNote = retryLater.length
       ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
       : null;
+    const knownNote = knownSkipped ? `前に読んだ Gofile のフォルダ ${knownSkipped} 件は、読み直していません（新しいフォルダだけを読みました）` : null;
     const pausedNote = gofilePaused
       ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
       : null;
     const finalNote =
-      pausedNote ?? retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      pausedNote ?? retryNote ?? appNote ?? (found === 0 && knownSkipped ? knownNote : null) ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote ?? knownNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   // Gofile に止められていて聞けなかったフォルダは、続きとして残す

@@ -7,6 +7,7 @@ import { getVideoDuration, getVideoThumb, peekVideoDuration, peekVideoThumb } fr
 import { formatDuration } from "@/lib/thumbs/duration";
 import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
+import { videoApiUrls } from "@/lib/thumbs/videoApis";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
@@ -57,6 +58,12 @@ const clock = (sec: number) => {
 const VIEW_KEY = "thumbs:view:v1";
 /** 「さらに深く探す」を自動で続ける回数の保存場所 */
 const ROUNDS_KEY = "thumbs:rounds:v1";
+/** 読んだ Gofile のフォルダ（番号 → 読んだ時刻）の保存場所。3 日たったら忘れる */
+const GOFILE_KNOWN_KEY = "thumbs:gofile-known:v1";
+const GOFILE_KNOWN_MS = 3 * 24 * 60 * 60 * 1000;
+const MAX_GOFILE_KNOWN = 5000;
+/** 登録サイトの自動巡回（間隔の分・最後に巡回した時刻）の保存場所 */
+const PATROL_KEY = "thumbs:patrol:v1";
 /** メニュー・取得の一覧を畳んでいるかの保存場所 */
 const FOLD_KEY = "thumbs:fold:v1";
 /** 「探す」で使わない置き場・検索先の保存場所 */
@@ -74,6 +81,10 @@ const HUNT_ENGINES: [string, string][] = [
   ["naver", "Naver"],
   ["seznam", "Seznam"],
   ["sogou", "Sogou"],
+  ["dailymotion", "Dailymotion（公式の検索）"],
+  ["nico", "ニコニコ動画（公式の検索）"],
+  ["archive", "Internet Archive（公式の検索）"],
+  ["mastodon", "Mastodon（mstdn.jp のタグ）"],
 ];
 /** 検索の URL が、どの検索先のものか */
 function engineOf(url: string): string {
@@ -81,7 +92,10 @@ function engineOf(url: string): string {
     const u = new URL(url);
     const h = u.hostname;
     if (h.includes("yahoo")) return u.pathname.startsWith("/realtime") ? "x" : u.pathname.startsWith("/video") ? "yvideo" : "yahoo";
-    for (const id of ["bing", "5ch", "hatena", "naver", "seznam", "sogou"]) if (h.includes(id)) return id;
+    for (const id of ["bing", "5ch", "hatena", "naver", "seznam", "sogou", "dailymotion"]) if (h.includes(id)) return id;
+    if (h.includes("nicovideo")) return "nico";
+    if (h === "archive.org") return "archive";
+    if (u.pathname.includes("/api/v1/timelines/tag/")) return "mastodon";
   } catch {
     /* 下へ */
   }
@@ -191,6 +205,26 @@ export function ThumbsApp() {
   const [huntWord, setHuntWord] = useState("");
   /** 検索から探すとき、ひととおり終わった後に「さらに深く探す」を自動で何回続けるか */
   const [huntRounds, setHuntRounds] = useState(2);
+  /** 読んだ Gofile のフォルダ（番号 → 読んだ時刻）。次からは聞かない（Gofile への問い合わせを減らす） */
+  const gofileKnown = useRef(new Map<string, number>());
+  const [knownCount, setKnownCount] = useState(0);
+  const saveKnown = useCallback(() => {
+    const m = gofileKnown.current;
+    setKnownCount(m.size);
+    try {
+      localStorage.setItem(GOFILE_KNOWN_KEY, JSON.stringify([...m].slice(-MAX_GOFILE_KNOWN)));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  }, []);
+  const forgetKnown = useCallback(() => {
+    gofileKnown.current = new Map();
+    saveKnown();
+  }, [saveKnown]);
+  /** 登録サイトの自動巡回の間隔（分。0 はなし）と、最後に巡回した時刻 */
+  const [patrolMin, setPatrolMin] = useState(0);
+  const patrolLast = useRef(0);
+  const [patrolAt, setPatrolAt] = useState(0);
   /** 畳んでいるもの（メニュー・取得の一覧）。この端末に保存する */
   const [menuOpen, setMenuOpen] = useState(true);
   const [jobsOpen, setJobsOpen] = useState(true);
@@ -272,6 +306,18 @@ export function ThumbsApp() {
       const fold = JSON.parse(localStorage.getItem(FOLD_KEY) ?? "null");
       if (fold?.menu === false) setMenuOpen(false);
       if (fold?.jobs === false) setJobsOpen(false);
+      const known = JSON.parse(localStorage.getItem(GOFILE_KNOWN_KEY) ?? "[]");
+      if (Array.isArray(known)) {
+        const fresh = known.filter((e): e is [string, number] => Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "number" && Date.now() - e[1] < GOFILE_KNOWN_MS);
+        gofileKnown.current = new Map(fresh);
+        setKnownCount(fresh.length);
+      }
+      const patrol = JSON.parse(localStorage.getItem(PATROL_KEY) ?? "null");
+      if (typeof patrol?.min === "number" && patrol.min >= 0 && patrol.min <= 1440) setPatrolMin(patrol.min);
+      if (typeof patrol?.last === "number") {
+        patrolLast.current = patrol.last;
+        setPatrolAt(patrol.last);
+      }
       const rounds = Number(localStorage.getItem(ROUNDS_KEY));
       if (localStorage.getItem(ROUNDS_KEY) !== null && rounds >= 0 && rounds <= 20) setHuntRounds(Math.round(rounds));
     } catch {
@@ -340,7 +386,7 @@ export function ThumbsApp() {
   }, []);
 
   const startJob = useCallback(
-    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }) => {
+    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }, html?: string) => {
       let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots };
       // ページ数の上限で打ち切ったものを続けるときは、同じページ数だけ上限を足す
       if (existing?.job.truncated && existing.job.resume) {
@@ -354,6 +400,7 @@ export function ThumbsApp() {
       } else {
         setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
       }
+      let knownDirty = false;
       let pageCount = existing?.job.pages ?? 0;
       let foundCount = existing?.found ?? 0;
       const startedAt = Date.now();
@@ -382,6 +429,9 @@ export function ThumbsApp() {
                 exclude: excludesRef.current,
                 gofileToken: gofileTokenRef.current || undefined,
                 resume: current,
+                // ブラウザから送られてきたページの中身（最初の 1 回だけ送る）
+                html: current ? undefined : html,
+                knownGofile: [...gofileKnown.current.keys()].slice(-MAX_GOFILE_KNOWN),
               }),
               signal: controller.signal,
             });
@@ -404,6 +454,12 @@ export function ThumbsApp() {
                 if (!line.trim()) continue;
                 const event = JSON.parse(line) as CrawlEvent;
                 if (event.type === "page") {
+                  // 読んだ Gofile のフォルダを覚える（次からは聞かない）
+                  const gid = event.gofile ? /^https:\/\/gofile\.io\/d\/([\w-]{4,40})/.exec(event.url)?.[1] : null;
+                  if (gid) {
+                    gofileKnown.current.set(gid, Date.now());
+                    knownDirty = true;
+                  }
                   pageCount++;
                   updateJob(id, (j) => ({ pages: j.pages + 1 }));
                 } else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
@@ -477,10 +533,11 @@ export function ThumbsApp() {
         else updateJob(id, { status: "error", message: describeError(err) });
       } finally {
         controllers.current.delete(id);
+        if (knownDirty) saveKnown();
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory],
+    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory, saveKnown],
   );
 
   const resumeJob = useCallback(
@@ -490,6 +547,107 @@ export function ThumbsApp() {
     },
     [startJob, items],
   );
+
+  // --- ブラウザから送られてきたページを受け取る（ブックマークレットが、このアプリを #import 付きで開いて中身を渡す） ---
+  const [importing, setImporting] = useState(false);
+  const [appOrigin, setAppOrigin] = useState("");
+  const startJobRef = useRef(startJob);
+  useEffect(() => {
+    startJobRef.current = startJob;
+  });
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 画面に出してから、このアプリのアドレスを入れる
+    setAppOrigin(location.origin);
+    if (location.hash !== "#import" || !window.opener) return;
+    setImporting(true);
+    const opener = window.opener as Window;
+    // 送り元のページに「受け取れます」と知らせ続ける（送り元は、それを聞いてから中身を送る）
+    const ping = setInterval(() => {
+      try {
+        opener.postMessage("thumbs-ready", "*");
+      } catch {
+        /* 送り元が閉じられた */
+      }
+    }, 400);
+    const giveUp = setTimeout(() => {
+      clearInterval(ping);
+      setImporting(false);
+    }, 60000);
+    const onMessage = (e: MessageEvent) => {
+      const d = e.data as { type?: unknown; url?: unknown; html?: unknown } | null;
+      if (!d || d.type !== "thumbs-import" || typeof d.url !== "string" || typeof d.html !== "string") return;
+      if (!/^https?:\/\//.test(d.url)) return;
+      clearInterval(ping);
+      clearTimeout(giveUp);
+      window.removeEventListener("message", onMessage);
+      setImporting(false);
+      window.history.replaceState(null, "", location.pathname);
+      // 送られてきたページを「入力したページ」として読む（サーバーからは読みに行かない）。そこからのリンクは 1 階層だけ辿る
+      void startJobRef.current(d.url, { depth: 1, maxPages: 60, maxPagination: 0, crossSite: false, render: "auto", kinds: "video", robots: true }, undefined, d.html.slice(0, 2_500_000));
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      clearInterval(ping);
+      clearTimeout(giveUp);
+      window.removeEventListener("message", onMessage);
+    };
+  }, []);
+  // --- 登録サイトの自動巡回（このページを開いている間、決めた間隔で登録サイトを取得し直す） ---
+  const sitesRef = useRef(sites);
+  useEffect(() => {
+    sitesRef.current = sites;
+  });
+  const patrolBusy = useRef(false);
+  const runPatrol = useCallback(async () => {
+    if (patrolBusy.current || !sitesRef.current.length) return;
+    patrolBusy.current = true;
+    patrolLast.current = Date.now();
+    setPatrolAt(patrolLast.current);
+    try {
+      const saved = JSON.parse(localStorage.getItem(PATROL_KEY) ?? "{}");
+      localStorage.setItem(PATROL_KEY, JSON.stringify({ ...saved, last: patrolLast.current }));
+    } catch {
+      /* 保存できなくても動く */
+    }
+    try {
+      for (const site of sitesRef.current) {
+        // 同じ URL の取得があれば、その行を使って最初から取得し直す（行を増やさない）。動いている最中なら飛ばす
+        const job = latest.current.jobs.find((j) => j.url === site.url && !j.settings?.hunt);
+        if (job && controllers.current.has(job.id)) continue;
+        if (job) {
+          const found = latest.current.items.filter((i) => i.jobId === job.id).length;
+          await startJobRef.current(site.url, site.settings, { job: { ...job, resume: undefined, truncated: false, settings: site.settings }, found });
+        } else await startJobRef.current(site.url, site.settings);
+      }
+    } finally {
+      patrolBusy.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (!patrolMin) return;
+    const tick = () => {
+      if (Date.now() - patrolLast.current >= patrolMin * 60000) void runPatrol();
+    };
+    const t = setInterval(tick, 20000);
+    return () => clearInterval(t);
+  }, [patrolMin, runPatrol]);
+  const changePatrol = (min: number) => {
+    setPatrolMin(min);
+    // 選んだ時点から数え始める（選んですぐには走らせない）
+    patrolLast.current = Date.now();
+    setPatrolAt(patrolLast.current);
+    try {
+      localStorage.setItem(PATROL_KEY, JSON.stringify({ min, last: patrolLast.current }));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  };
+
+  /** ブックマークに登録して使う「このページをサムネ収集に送る」ボタンの中身 */
+  const bookmarklet = appOrigin
+    ? `javascript:(function(){var o=${JSON.stringify(appOrigin)};var w=window.open(o+'/thumbs#import');if(!w){alert('ポップアップを許可してください');return;}var h=document.documentElement.outerHTML.slice(0,2500000);var u=location.href;function f(e){if(e.origin===o&&e.data==='thumbs-ready'){w.postMessage({type:'thumbs-import',url:u,html:h},o);removeEventListener('message',f);}}addEventListener('message',f);})();`
+    : "";
+  const [copied, setCopied] = useState(false);
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -577,6 +735,8 @@ export function ThumbsApp() {
       `https://b.hatena.ne.jp/q/${q(`${kw} 動画`)}?target=text&sort=recent`,
       `https://find.5ch.net/search?q=${q(kw)}`,
       `https://search.naver.com/search.naver?query=${q(`${kw} 動画`)}`,
+      // 動画サービスの公式の検索の窓口
+      ...Object.values(videoApiUrls(kw)),
     ].filter((u) => !huntOff.includes(engineOf(u)));
     if (!urls.length) {
       setFormError("探す先がありません（「探す先の設定」で、検索先を 1 つ以上選んでください）");
@@ -628,6 +788,8 @@ export function ThumbsApp() {
     stopJob(id);
     setJobs((l) => l.filter((j) => j.id !== id));
     setItems((l) => l.filter((i) => i.jobId !== id));
+    // 消した分の Gofile の動画をもう一度取れるように、覚えたフォルダも忘れる
+    forgetKnown();
     if (jobFilter === id) setJobFilter(null);
   };
   const clearAll = () => {
@@ -636,6 +798,7 @@ export function ThumbsApp() {
     setJobs([]);
     setItems([]);
     setJobFilter(null);
+    forgetKnown();
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
@@ -787,6 +950,7 @@ export function ThumbsApp() {
               取得
             </button>
           </form>
+          {importing && <p className="mt-1.5 animate-pulse text-xs font-semibold text-sky-500">📥 ブラウザからページを受け取っています…</p>}
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
           {menuOpen && (
           <>
@@ -862,6 +1026,70 @@ export function ThumbsApp() {
               ))}
             </div>
           </details>
+          <details className="mt-2 rounded-xl border border-neutral-200 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+            <summary className="cursor-pointer select-none font-semibold">📥 ブラウザで見ているページを送る</summary>
+            <p className="mt-2 leading-relaxed">
+              「人間かどうかの確認」が出るサイトは、このアプリからは読めません。自分のブラウザで開いて見えているページなら、下のボタンでこのアプリに送って、動画とサムネを取り出せます。
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 leading-relaxed">
+              <li>下の「コードをコピー」を押す</li>
+              <li>ブラウザで適当なページをブックマークに追加し、そのブックマークを編集して、アドレス（URL）の欄をコピーしたコードに置き換える（名前は「サムネ収集に送る」など）</li>
+              <li>動画のあるページを開いた状態で、そのブックマークを選ぶ → このアプリが開いて、取得が始まります</li>
+            </ol>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={!bookmarklet}
+                onClick={() => {
+                  void navigator.clipboard?.writeText(bookmarklet).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2500);
+                  });
+                }}
+                className="rounded-full bg-neutral-900 px-4 py-1.5 font-bold text-white disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+              >
+                {copied ? "コピーしました ✓" : "コードをコピー"}
+              </button>
+              <span className="text-[11px] text-neutral-400">パソコンでは、コードをブックマークバーの新しいブックマークの URL に貼り付けます</span>
+            </div>
+            <textarea readOnly value={bookmarklet} rows={2} aria-label="ブックマークに入れるコード" className="mt-2 w-full rounded-md border border-neutral-200 bg-neutral-50 p-1.5 font-mono text-[10px] text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900" />
+          </details>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-neutral-200 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+            <label className="flex items-center gap-1.5" title="登録サイト（☆）を、決めた間隔で自動で取得し直します。このページを開いている間だけ動きます">
+              🔁 登録サイトの自動巡回
+              <select
+                value={patrolMin}
+                onChange={(e) => changePatrol(Number(e.target.value))}
+                className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+              >
+                {[0, 15, 30, 60, 180, 360].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "なし" : n < 60 ? `${n}分ごと` : `${n / 60}時間ごと`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {patrolMin > 0 && (
+              <span className="text-[11px] text-neutral-400">
+                {sites.length === 0
+                  ? "登録サイトがありません（履歴や一覧の ☆ で登録してください）"
+                  : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
+              </span>
+            )}
+            {patrolMin > 0 && sites.length > 0 && (
+              <button type="button" onClick={() => void runPatrol()} className="rounded-full bg-neutral-200/70 px-3 py-1 font-bold dark:bg-neutral-800">
+                今すぐ巡回
+              </button>
+            )}
+            {knownCount > 0 && (
+              <span className="flex items-center gap-2 text-[11px] text-neutral-400">
+                読んだ Gofile フォルダ {knownCount} 件を覚えています（次からは聞きません・3 日で忘れます）
+                <button type="button" onClick={forgetKnown} className="rounded-full bg-neutral-200/70 px-2.5 py-0.5 font-bold text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                  忘れる
+                </button>
+              </span>
+            )}
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類
@@ -1141,7 +1369,9 @@ function EmptyState() {
 function huntLabel(url: string): string {
   try {
     const u = new URL(url);
-    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? decodeURIComponent(u.pathname.replace(/^\/q\//, ""))).replace(/"/g, "");
+    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? u.searchParams.get("search") ?? decodeURIComponent(u.pathname.replace(/^.*\//, "")))
+      .replace(/"/g, "")
+      .replace(/ AND mediatype:movies$/, "");
     const h = u.hostname;
     const where = u.pathname.startsWith("/realtime")
       ? "X の投稿"
@@ -1157,7 +1387,15 @@ function huntLabel(url: string): string {
                 ? "Web（Seznam）"
                 : h.includes("sogou")
                   ? "Web（Sogou）"
-                  : "Web（Yahoo!）";
+                  : h.includes("dailymotion")
+                    ? "Dailymotion"
+                    : h.includes("nicovideo")
+                      ? "ニコニコ動画"
+                      : h === "archive.org"
+                        ? "Internet Archive"
+                        : u.pathname.includes("/timelines/tag/")
+                          ? "Mastodon"
+                          : "Web（Yahoo!）";
     return `🔎 ${where}：${word}`;
   } catch {
     return url;

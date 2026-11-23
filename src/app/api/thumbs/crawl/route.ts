@@ -33,6 +33,8 @@ export async function POST(request: Request) {
     hunt?: unknown;
     gofileOnly?: unknown;
     skipHosts?: unknown;
+    html?: unknown;
+    knownGofile?: unknown;
     gofileToken?: unknown;
     resume?: unknown;
   };
@@ -67,6 +69,10 @@ export async function POST(request: Request) {
     robots: body.robots !== false,
     hunt: body.hunt === true,
     gofileOnly: body.gofileOnly === true,
+    knownGofile: Array.isArray(body.knownGofile)
+      ? body.knownGofile.filter((c): c is string => typeof c === "string" && /^[\w-]{4,40}$/.test(c)).slice(0, 5000)
+      : [],
+    rootHtml: typeof body.html === "string" && body.html.length > 50 ? body.html.slice(0, 3_000_000) : undefined,
     skipHosts: Array.isArray(body.skipHosts) ? body.skipHosts.filter((h): h is string => typeof h === "string" && h.length < 30).slice(0, 10) : [],
     gofileToken: typeof body.gofileToken === "string" && /^[A-Za-z0-9]{10,128}$/.test(body.gofileToken.trim()) ? body.gofileToken.trim() : undefined,
   };
@@ -182,6 +188,7 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (title) item.title = title;
     const retry = clamp(v.retry, 0, 10, 0);
     if (retry) item.retry = retry;
+    if (v.feed === true) item.feed = true;
     out.push(item);
   }
   return out;
