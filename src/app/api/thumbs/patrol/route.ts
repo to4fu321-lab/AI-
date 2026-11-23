@@ -6,7 +6,7 @@ import { runPatrol } from "@/lib/thumbs/patrol";
  * サーバー側の自動巡回の設定と、たまった結果の受け渡し。
  *   GET  ?since=時刻（ミリ秒）… 設定と、その時刻より後に見つかったもの
  *   POST { sites, intervalMin, exclude, gofileToken } … 巡回するサイトと間隔を保存
- *   POST { run: true } … 今すぐ巡回
+ *   POST { run: true } … 今すぐ巡回 / { run: "due" } … 時刻になったサイトだけ巡回
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,7 +54,8 @@ export async function POST(request: Request) {
   try {
     const pool = await db();
     if (!pool) return Response.json({ configured: false });
-    if (body.run === true) return Response.json({ configured: true, ...(await runPatrol((maxDuration - 30) * 1000, true)) });
+    // run: true は今すぐ全部、"due" は時刻になったものだけ（画面を開いている間は、画面が時刻を見て頼む）
+    if (body.run === true || body.run === "due") return Response.json({ configured: true, ...(await runPatrol((maxDuration - 30) * 1000, body.run === true)) });
 
     const interval = typeof body.intervalMin === "number" && body.intervalMin >= 0 && body.intervalMin <= 1440 ? Math.round(body.intervalMin) : 0;
     const sites = (Array.isArray(body.sites) ? body.sites : [])

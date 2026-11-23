@@ -676,9 +676,15 @@ export function ThumbsApp() {
     }
   }, [updateJob]);
   useEffect(() => {
-    // 保存データを戻した後に 1 回、その後は 2 分おきに受け取る
+    // 保存データを戻した後に 1 回、その後は 2 分おきに受け取る。画面を開いている間は、時刻になったサイトの巡回もサーバーに頼む
+    // （サーバーの定期実行の間隔が長くても、開いている間は選んだ間隔で巡回する）
     const first = setTimeout(() => void pullPatrol(), 1500);
-    const t = setInterval(() => document.visibilityState === "visible" && void pullPatrol(), 120000);
+    const t = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void fetch("/api/thumbs/patrol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ run: "due" }) })
+        .catch(() => null)
+        .then(() => pullPatrol());
+    }, 120000);
     return () => {
       clearTimeout(first);
       clearInterval(t);
@@ -1189,7 +1195,7 @@ export function ThumbsApp() {
                 {sites.length === 0
                   ? "登録サイトがありません（履歴や一覧の ☆ で登録してください）"
                   : serverPatrol
-                    ? `サーバーが巡回します（ブラウザを閉じていても動きます・15 分ごとに時刻を確認）。${serverNote}`
+                    ? `サーバーが巡回します（開いている間は選んだ間隔で・閉じている間はサーバーの定期実行のときに）。${serverNote}`
                     : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
               </span>
             )}
