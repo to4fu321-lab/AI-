@@ -749,6 +749,12 @@ export async function* crawl(
       enqueue(`https://gofile.io/d/${id}`, 0, lastRank + 1, 5, undefined, 0, false, from);
     }
   };
+  /** 設定で外した置き場のものか（ファイル置き場を探すときだけ） */
+  const hostSkipped = (format?: string, src = "") => {
+    const off = options.skipHosts;
+    if (!off?.length) return false;
+    return (!!format && off.includes(format)) || (off.includes("catbox") && /^https:\/\/files\.catbox\.moe\//.test(src));
+  };
   const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
     if (xBroken()) return [];
     const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
@@ -996,6 +1002,10 @@ export async function* crawl(
       return events;
     }
     const share = gofileId(url);
+    if (share && hostSkipped("Gofile")) {
+      events.push({ type: "skip", url, reason: "設定で外した置き場（Gofile）です" });
+      return events;
+    }
     if (share) {
       // 区切りの時刻が近いときは、聞かずに次の回へ回す（聞けなかったのを「消されていた」と取り違えないように）
       if (Date.now() > deadline - 3000) {
@@ -1065,6 +1075,10 @@ export async function* crawl(
     }
     // pixeldrain のリスト（アルバム）：公開の窓口から中のファイルをもらう
     const pd = pixeldrainListId(url);
+    if (pd && hostSkipped("pixeldrain")) {
+      events.push({ type: "skip", url, reason: "設定で外した置き場（pixeldrain）です" });
+      return events;
+    }
     if (pd) {
       const files = await pixeldrainList(pd, signal).catch(() => []);
       const items = files
@@ -1083,6 +1097,10 @@ export async function* crawl(
       return events;
     }
     const hosted = wantsVideo ? hostedFile(url) : null;
+    if (hosted && hostSkipped(hosted.service)) {
+      events.push({ type: "skip", url, reason: `設定で外した置き場（${hosted.service}）です` });
+      return events;
+    }
     if (hosted) {
       return emitDirect({
         id: hosted.src,
@@ -1394,6 +1412,7 @@ export async function* crawl(
         .filter((m) => !isItemExcluded(m, options.exclude))
         // Gofile 探しでは、Gofile の中身だけを集める
         .filter((m) => !options.gofileOnly || isFileHostItem(m))
+        .filter((m) => !hostSkipped(m.format, m.src))
         .filter((m) => (videoOnly ? m.kind !== "image" : options.kinds === "image" ? m.kind === "image" : true));
       for (const m of candidates) seenMedia.add(m);
       // リンク切れかどうかを確かめてから画面へ送る。同じ動画の画質違いは、見られるものの中から選ぶ

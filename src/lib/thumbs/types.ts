@@ -98,6 +98,8 @@ export interface CrawlOptions {
   hunt?: boolean;
   /** Gofile 探し：Gofile のリンクの中身だけを集める（ほかの動画・読めなかったページのタイルは出さない） */
   gofileOnly?: boolean;
+  /** ファイル置き場を探すとき、集めない置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox のうち、設定で外したもの） */
+  skipHosts?: string[];
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
 }

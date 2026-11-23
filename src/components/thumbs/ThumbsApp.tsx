@@ -55,6 +55,34 @@ const clock = (sec: number) => {
 const VIEW_KEY = "thumbs:view:v1";
 /** 「さらに深く探す」を自動で続ける回数の保存場所 */
 const ROUNDS_KEY = "thumbs:rounds:v1";
+/** 「探す」で使わない置き場・検索先の保存場所 */
+const HUNT_OFF_KEY = "thumbs:huntoff:v1";
+/** 「ファイル置き場を探す」で探す置き場 */
+const HUNT_HOSTS = ["Gofile", "pixeldrain", "Google ドライブ", "Dropbox", "catbox"];
+/** 「探す」で使う検索先（id と画面に出す名前） */
+const HUNT_ENGINES: [string, string][] = [
+  ["x", "X の投稿（Yahoo! リアルタイム）"],
+  ["yahoo", "Yahoo!"],
+  ["yvideo", "Yahoo! 動画検索"],
+  ["bing", "Bing"],
+  ["5ch", "5ちゃんねる"],
+  ["hatena", "はてなブックマーク"],
+  ["naver", "Naver"],
+  ["seznam", "Seznam"],
+  ["sogou", "Sogou"],
+];
+/** 検索の URL が、どの検索先のものか */
+function engineOf(url: string): string {
+  try {
+    const u = new URL(url);
+    const h = u.hostname;
+    if (h.includes("yahoo")) return u.pathname.startsWith("/realtime") ? "x" : u.pathname.startsWith("/video") ? "yvideo" : "yahoo";
+    for (const id of ["bing", "5ch", "hatena", "naver", "seznam", "sogou"]) if (h.includes(id)) return id;
+  } catch {
+    /* 下へ */
+  }
+  return "";
+}
 /** サムネイルの大きさ（1 枚の最小の幅 px）。画面の幅に合わせて、入るだけ並べる */
 const TILE_SIZES = [56, 76, 100, 130, 170, 220, 300, 420, 640];
 const DEFAULT_TILE = 2;
@@ -159,6 +187,18 @@ export function ThumbsApp() {
   const [huntWord, setHuntWord] = useState("");
   /** 検索から探すとき、ひととおり終わった後に「さらに深く探す」を自動で何回続けるか */
   const [huntRounds, setHuntRounds] = useState(2);
+  /** 「探す」で使わない置き場・検索先（設定で外したもの） */
+  const [huntOff, setHuntOff] = useState<string[]>([]);
+  const toggleHunt = (id: string) =>
+    setHuntOff((list) => {
+      const next = list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+      try {
+        localStorage.setItem(HUNT_OFF_KEY, JSON.stringify(next));
+      } catch {
+        /* 保存できなくても動く */
+      }
+      return next;
+    });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -210,6 +250,8 @@ export function ThumbsApp() {
       const view = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null");
       if (typeof view?.tile === "number") setTile(Math.min(TILE_SIZES.length - 1, Math.max(0, Math.round(view.tile))));
       if (view?.shape === "wide" || view?.shape === "square") setShape(view.shape);
+      const off = JSON.parse(localStorage.getItem(HUNT_OFF_KEY) ?? "[]");
+      if (Array.isArray(off)) setHuntOff(off.filter((x): x is string => typeof x === "string").slice(0, 30));
       const rounds = Number(localStorage.getItem(ROUNDS_KEY));
       if (localStorage.getItem(ROUNDS_KEY) !== null && rounds >= 0 && rounds <= 20) setHuntRounds(Math.round(rounds));
     } catch {
@@ -461,29 +503,36 @@ export function ThumbsApp() {
   const startHunt = () => {
     const kw = huntWord.trim().slice(0, 60);
     const q = (s: string) => encodeURIComponent(s.trim());
-    const urls = [
-      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile.io ${kw}`)}`,
-      `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile ${kw || "配布"}`)}`,
-      `https://search.yahoo.co.jp/search?p=${q(`"gofile.io/d/" ${kw}`)}`,
-      `https://search.yahoo.co.jp/search?p=${q(`gofile ${kw || "動画"} 掲示板`)}`,
-      `https://www.bing.com/search?q=${q(`"gofile.io/d/" ${kw}`)}`,
+    const all: [string, string][] = [
+      ["Gofile", `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile.io ${kw}`)}`],
+      ["Gofile", `https://search.yahoo.co.jp/realtime/search?p=${q(`gofile ${kw || "配布"}`)}`],
+      ["Gofile", `https://search.yahoo.co.jp/search?p=${q(`"gofile.io/d/" ${kw}`)}`],
+      ["Gofile", `https://search.yahoo.co.jp/search?p=${q(`gofile ${kw || "動画"} 掲示板`)}`],
+      ["Gofile", `https://www.bing.com/search?q=${q(`"gofile.io/d/" ${kw}`)}`],
       // 5ちゃんねるのスレッド検索・はてなブックマークの本文検索（掲示板・まとめ記事を探す）
-      `https://find.5ch.net/search?q=${q(`gofile ${kw}`)}`,
-      `https://b.hatena.ne.jp/q/${q(`gofile ${kw}`)}?target=text&sort=recent`,
+      ["Gofile", `https://find.5ch.net/search?q=${q(`gofile ${kw}`)}`],
+      ["Gofile", `https://b.hatena.ne.jp/q/${q(`gofile ${kw}`)}?target=text&sort=recent`],
       // 海外の検索（韓国・チェコ・中国。日本の検索に出ない掲示板・まとめが見つかることがある）
-      `https://search.naver.com/search.naver?query=${q(`"gofile.io/d/" ${kw}`)}`,
-      `https://search.seznam.cz/?q=${q(`"gofile.io/d/" ${kw}`)}`,
-      `https://www.sogou.com/web?query=${q(`"gofile.io/d/" ${kw}`)}`,
+      ["Gofile", `https://search.naver.com/search.naver?query=${q(`"gofile.io/d/" ${kw}`)}`],
+      ["Gofile", `https://search.seznam.cz/?q=${q(`"gofile.io/d/" ${kw}`)}`],
+      ["Gofile", `https://www.sogou.com/web?query=${q(`"gofile.io/d/" ${kw}`)}`],
       // Gofile 以外のファイル置き場（pixeldrain・Google ドライブ・Dropbox・catbox）の共有リンク
-      `https://search.yahoo.co.jp/realtime/search?p=${q(`pixeldrain.com ${kw}`)}`,
-      `https://search.yahoo.co.jp/search?p=${q(`"pixeldrain.com/u/" ${kw}`)}`,
-      `https://www.bing.com/search?q=${q(`"pixeldrain.com/l/" ${kw}`)}`,
-      `https://search.yahoo.co.jp/realtime/search?p=${q(`drive.google.com 動画 ${kw}`)}`,
-      `https://search.yahoo.co.jp/search?p=${q(`"drive.google.com/file/d/" 動画 ${kw}`)}`,
-      `https://search.yahoo.co.jp/realtime/search?p=${q(`dropbox.com 動画 ${kw}`)}`,
-      `https://search.yahoo.co.jp/search?p=${q(`"files.catbox.moe" mp4 ${kw}`)}`,
+      ["pixeldrain", `https://search.yahoo.co.jp/realtime/search?p=${q(`pixeldrain.com ${kw}`)}`],
+      ["pixeldrain", `https://search.yahoo.co.jp/search?p=${q(`"pixeldrain.com/u/" ${kw}`)}`],
+      ["pixeldrain", `https://www.bing.com/search?q=${q(`"pixeldrain.com/l/" ${kw}`)}`],
+      ["Google ドライブ", `https://search.yahoo.co.jp/realtime/search?p=${q(`drive.google.com 動画 ${kw}`)}`],
+      ["Google ドライブ", `https://search.yahoo.co.jp/search?p=${q(`"drive.google.com/file/d/" 動画 ${kw}`)}`],
+      ["Dropbox", `https://search.yahoo.co.jp/realtime/search?p=${q(`dropbox.com 動画 ${kw}`)}`],
+      ["catbox", `https://search.yahoo.co.jp/search?p=${q(`"files.catbox.moe" mp4 ${kw}`)}`],
     ];
-    const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true, gofileOnly: true };
+    // 設定で外した置き場・検索先は使わない
+    const urls = all.filter(([host, u]) => !huntOff.includes(host) && !huntOff.includes(engineOf(u))).map(([, u]) => u);
+    if (!urls.length) {
+      setFormError("探す先がありません（「探す先の設定」で、置き場と検索先を 1 つ以上選んでください）");
+      return;
+    }
+    const skipHosts = HUNT_HOSTS.filter((h) => huntOff.includes(h));
+    const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true, gofileOnly: true, skipHosts };
     setFormError(null);
     runHunt(urls, settings);
   };
@@ -508,7 +557,11 @@ export function ThumbsApp() {
       `https://b.hatena.ne.jp/q/${q(`${kw} 動画`)}?target=text&sort=recent`,
       `https://find.5ch.net/search?q=${q(kw)}`,
       `https://search.naver.com/search.naver?query=${q(`${kw} 動画`)}`,
-    ];
+    ].filter((u) => !huntOff.includes(engineOf(u)));
+    if (!urls.length) {
+      setFormError("探す先がありません（「探す先の設定」で、検索先を 1 つ以上選んでください）");
+      return;
+    }
     const settings: CrawlSettings = { depth: 2, maxPages: 150, maxPagination: 5, crossSite: true, render: "auto", kinds: "video", robots, hunt: true };
     setFormError(null);
     runHunt(urls, settings);
@@ -752,6 +805,30 @@ export function ThumbsApp() {
               </select>
             </label>
           </div>
+          <details className="mt-2 rounded-xl border border-neutral-200 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+            <summary className="cursor-pointer select-none font-semibold">
+              ⚙️ 探す先の設定{huntOff.length ? `（${huntOff.length} 件を外しています）` : ""}
+            </summary>
+            <p className="mt-2 text-[11px] text-neutral-400">チェックを外したものは、「ファイル置き場を探す」「動画を探す」で使いません。</p>
+            <p className="mt-2 font-semibold">動画の置き場（ファイル置き場を探す）</p>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5">
+              {HUNT_HOSTS.map((h) => (
+                <label key={h} className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={!huntOff.includes(h)} onChange={() => toggleHunt(h)} className="h-4 w-4 accent-sky-500" />
+                  {h}
+                </label>
+              ))}
+            </div>
+            <p className="mt-3 font-semibold">検索先</p>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5">
+              {HUNT_ENGINES.map(([id, label]) => (
+                <label key={id} className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={!huntOff.includes(id)} onChange={() => toggleHunt(id)} className="h-4 w-4 accent-sky-500" />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </details>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類
