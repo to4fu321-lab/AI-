@@ -180,6 +180,8 @@ function parseQueue(value: unknown, max: number): QueueItem[] {
     if (duration) item.duration = duration;
     const title = shortText(v.title, 120);
     if (title) item.title = title;
+    const retry = clamp(v.retry, 0, 10, 0);
+    if (retry) item.retry = retry;
     out.push(item);
   }
   return out;

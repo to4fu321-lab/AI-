@@ -130,6 +130,8 @@ export interface QueueItem {
   preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */
   from?: string;
+  /** 一覧の続きが断られて読めず、後でもう一度試すことにした回数 */
+  retry?: number;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
   root?: boolean;
 }

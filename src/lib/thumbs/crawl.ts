@@ -159,6 +159,8 @@ const MAX_GUESS_RENDERS = 3;
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
+/** 断られた一覧の続きを、後で試し直す回数の上限 */
+const LIST_RETRIES = 4;
 /** ファイル置き場（Gofile・pixeldrain・Google ドライブなど）に置かれたものか（「ファイル置き場を探す」で集めるもの） */
 function isFileHostItem(m: MediaItem): boolean {
   return /^(?:Gofile|pixeldrain|Google ドライブ|Dropbox|OneDrive|Box)$/.test(m.format ?? "") || /^https:\/\/files\.catbox\.moe\//.test(m.src);
@@ -622,6 +624,8 @@ export async function* crawl(
   /** 確認を求められた・断られたので読めなかったページの数 */
   /** Gofile 探し：サイトごとに、辿ることにしたページの数 */
   const huntPerSite = new Map<string, number>();
+  /** 断られて読めなかった一覧の続き（終わった後、続きとして残す） */
+  const retryLater: QueueItem[] = [];
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
@@ -895,6 +899,8 @@ export async function* crawl(
     const gated = (message: string) => {
       // 一覧の続きの窓口（twihub の /api/v1/posts）は、開いても見るものがないので「サイトで開く」に並べない
       if (options.gofileOnly || (options.hunt && !item.thumb)) return fail(message);
+      // 一覧の続き（twihub のランキングの一覧・続きの窓口）が断られた：タイルにはせず、後で「もっと読み込む」でもう一度試せるように取っておく
+      if ((isTwihubListApi(url) || isTwihubList(url)) && !item.root && (item.retry ?? 0) < LIST_RETRIES) retryLater.push({ ...item, retry: (item.retry ?? 0) + 1 });
       if (isTwihubListApi(url) || isTwihubList(url)) return fail("一覧の続きは、サイトが「人間かどうかの確認」を求めたので読めませんでした");
       const video = (item.thumb && gifVideoFromThumb(item.thumb)) || item.preview;
       events.push({ type: "gated", url, thumb: item.thumb, title: item.title, duration: item.duration, video: video || undefined });
@@ -1732,9 +1738,17 @@ export async function* crawl(
       : thumbOnlyPages
       ? `動画を取り出せなかったページ ${thumbOnlyPages} 件は、サムネイルだけ並べました。タップするとそのページを開きます`
       : null;
+    const retryNote = retryLater.length
+      ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
+      : null;
     const finalNote =
-      appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
+  }
+  // 断られて読めなかった一覧の続きは、続きとして残す（「もっと読み込む」でもう一度試せる）
+  if (retryLater.length && !signal.aborted) {
+    for (const r of retryLater) queuedByUrl.set(r.url, r);
+    queue.push(...retryLater.splice(0));
   }
   // 検索から探しているときは、取っておいたリンクがある限り「続き（さらに深く）」がある
   const truncated = queue.length > 0 || (!!options.hunt && reserve.length > 0 && !signal.aborted);
