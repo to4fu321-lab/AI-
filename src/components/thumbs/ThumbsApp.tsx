@@ -1195,7 +1195,7 @@ export function ThumbsApp() {
                 {sites.length === 0
                   ? "登録サイトがありません（履歴や一覧の ☆ で登録してください）"
                   : serverPatrol
-                    ? `サーバーが巡回します（開いている間は選んだ間隔で・閉じている間はサーバーの定期実行のときに）。${serverNote}`
+                    ? `サーバーが巡回します（ブラウザを閉じていても動きます・15 分ごとに時刻を確認）。${serverNote}`
                     : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
               </span>
             )}
