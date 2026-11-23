@@ -100,6 +100,11 @@ export interface CrawlOptions {
   gofileOnly?: boolean;
   /** ファイル置き場を探すとき、集めない置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox のうち、設定で外したもの） */
   skipHosts?: string[];
+  /**
+   * 入力したページの中身（HTML）。本人のブラウザで開いているページを、ブックマークレットでこのアプリに送ったもの。
+   * これがあれば、入力したページはサーバーから読みに行かず、この中身を使う（確認を求めるサイトでも、本人が見ているページは読める）
+   */
+  rootHtml?: string;
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
 }
@@ -130,6 +135,8 @@ export interface QueueItem {
   preview?: string;
   /** このページへのリンクがあったページ（リンク先がそのまま動画ファイルだったとき、元ページ・Referer にする） */
   from?: string;
+  /** サイトが機械向けに出している一覧（サイトマップ・RSS）として読むもの */
+  feed?: boolean;
   /** 一覧の続きが断られて読めず、後でもう一度試すことにした回数 */
   retry?: number;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */

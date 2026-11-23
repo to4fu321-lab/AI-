@@ -7,6 +7,7 @@ import { getVideoDuration, getVideoThumb, peekVideoDuration, peekVideoThumb } fr
 import { formatDuration } from "@/lib/thumbs/duration";
 import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
+import { videoApiUrls } from "@/lib/thumbs/videoApis";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
@@ -74,6 +75,10 @@ const HUNT_ENGINES: [string, string][] = [
   ["naver", "Naver"],
   ["seznam", "Seznam"],
   ["sogou", "Sogou"],
+  ["dailymotion", "Dailymotion（公式の検索）"],
+  ["nico", "ニコニコ動画（公式の検索）"],
+  ["archive", "Internet Archive（公式の検索）"],
+  ["mastodon", "Mastodon（mstdn.jp のタグ）"],
 ];
 /** 検索の URL が、どの検索先のものか */
 function engineOf(url: string): string {
@@ -81,7 +86,10 @@ function engineOf(url: string): string {
     const u = new URL(url);
     const h = u.hostname;
     if (h.includes("yahoo")) return u.pathname.startsWith("/realtime") ? "x" : u.pathname.startsWith("/video") ? "yvideo" : "yahoo";
-    for (const id of ["bing", "5ch", "hatena", "naver", "seznam", "sogou"]) if (h.includes(id)) return id;
+    for (const id of ["bing", "5ch", "hatena", "naver", "seznam", "sogou", "dailymotion"]) if (h.includes(id)) return id;
+    if (h.includes("nicovideo")) return "nico";
+    if (h === "archive.org") return "archive";
+    if (u.pathname.includes("/api/v1/timelines/tag/")) return "mastodon";
   } catch {
     /* 下へ */
   }
@@ -340,7 +348,7 @@ export function ThumbsApp() {
   }, []);
 
   const startJob = useCallback(
-    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }) => {
+    async (url: string, override?: CrawlSettings, existing?: { job: Job; found: number }, html?: string) => {
       let settings: CrawlSettings = existing?.job.settings ?? override ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots };
       // ページ数の上限で打ち切ったものを続けるときは、同じページ数だけ上限を足す
       if (existing?.job.truncated && existing.job.resume) {
@@ -382,6 +390,8 @@ export function ThumbsApp() {
                 exclude: excludesRef.current,
                 gofileToken: gofileTokenRef.current || undefined,
                 resume: current,
+                // ブラウザから送られてきたページの中身（最初の 1 回だけ送る）
+                html: current ? undefined : html,
               }),
               signal: controller.signal,
             });
@@ -491,6 +501,56 @@ export function ThumbsApp() {
     [startJob, items],
   );
 
+  // --- ブラウザから送られてきたページを受け取る（ブックマークレットが、このアプリを #import 付きで開いて中身を渡す） ---
+  const [importing, setImporting] = useState(false);
+  const [appOrigin, setAppOrigin] = useState("");
+  const startJobRef = useRef(startJob);
+  useEffect(() => {
+    startJobRef.current = startJob;
+  });
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 画面に出してから、このアプリのアドレスを入れる
+    setAppOrigin(location.origin);
+    if (location.hash !== "#import" || !window.opener) return;
+    setImporting(true);
+    const opener = window.opener as Window;
+    // 送り元のページに「受け取れます」と知らせ続ける（送り元は、それを聞いてから中身を送る）
+    const ping = setInterval(() => {
+      try {
+        opener.postMessage("thumbs-ready", "*");
+      } catch {
+        /* 送り元が閉じられた */
+      }
+    }, 400);
+    const giveUp = setTimeout(() => {
+      clearInterval(ping);
+      setImporting(false);
+    }, 60000);
+    const onMessage = (e: MessageEvent) => {
+      const d = e.data as { type?: unknown; url?: unknown; html?: unknown } | null;
+      if (!d || d.type !== "thumbs-import" || typeof d.url !== "string" || typeof d.html !== "string") return;
+      if (!/^https?:\/\//.test(d.url)) return;
+      clearInterval(ping);
+      clearTimeout(giveUp);
+      window.removeEventListener("message", onMessage);
+      setImporting(false);
+      window.history.replaceState(null, "", location.pathname);
+      // 送られてきたページを「入力したページ」として読む（サーバーからは読みに行かない）。そこからのリンクは 1 階層だけ辿る
+      void startJobRef.current(d.url, { depth: 1, maxPages: 60, maxPagination: 0, crossSite: false, render: "auto", kinds: "video", robots: true }, undefined, d.html.slice(0, 2_500_000));
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      clearInterval(ping);
+      clearTimeout(giveUp);
+      window.removeEventListener("message", onMessage);
+    };
+  }, []);
+  /** ブックマークに登録して使う「このページをサムネ収集に送る」ボタンの中身 */
+  const bookmarklet = appOrigin
+    ? `javascript:(function(){var o=${JSON.stringify(appOrigin)};var w=window.open(o+'/thumbs#import');if(!w){alert('ポップアップを許可してください');return;}var h=document.documentElement.outerHTML.slice(0,2500000);var u=location.href;function f(e){if(e.origin===o&&e.data==='thumbs-ready'){w.postMessage({type:'thumbs-import',url:u,html:h},o);removeEventListener('message',f);}}addEventListener('message',f);})();`
+    : "";
+  const [copied, setCopied] = useState(false);
+
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     // 改行・スペース区切りで複数 URL をまとめて入れられる
@@ -577,6 +637,8 @@ export function ThumbsApp() {
       `https://b.hatena.ne.jp/q/${q(`${kw} 動画`)}?target=text&sort=recent`,
       `https://find.5ch.net/search?q=${q(kw)}`,
       `https://search.naver.com/search.naver?query=${q(`${kw} 動画`)}`,
+      // 動画サービスの公式の検索の窓口
+      ...Object.values(videoApiUrls(kw)),
     ].filter((u) => !huntOff.includes(engineOf(u)));
     if (!urls.length) {
       setFormError("探す先がありません（「探す先の設定」で、検索先を 1 つ以上選んでください）");
@@ -787,6 +849,7 @@ export function ThumbsApp() {
               取得
             </button>
           </form>
+          {importing && <p className="mt-1.5 animate-pulse text-xs font-semibold text-sky-500">📥 ブラウザからページを受け取っています…</p>}
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
           {menuOpen && (
           <>
@@ -861,6 +924,34 @@ export function ThumbsApp() {
                 </label>
               ))}
             </div>
+          </details>
+          <details className="mt-2 rounded-xl border border-neutral-200 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+            <summary className="cursor-pointer select-none font-semibold">📥 ブラウザで見ているページを送る</summary>
+            <p className="mt-2 leading-relaxed">
+              「人間かどうかの確認」が出るサイトは、このアプリからは読めません。自分のブラウザで開いて見えているページなら、下のボタンでこのアプリに送って、動画とサムネを取り出せます。
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 leading-relaxed">
+              <li>下の「コードをコピー」を押す</li>
+              <li>ブラウザで適当なページをブックマークに追加し、そのブックマークを編集して、アドレス（URL）の欄をコピーしたコードに置き換える（名前は「サムネ収集に送る」など）</li>
+              <li>動画のあるページを開いた状態で、そのブックマークを選ぶ → このアプリが開いて、取得が始まります</li>
+            </ol>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={!bookmarklet}
+                onClick={() => {
+                  void navigator.clipboard?.writeText(bookmarklet).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2500);
+                  });
+                }}
+                className="rounded-full bg-neutral-900 px-4 py-1.5 font-bold text-white disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+              >
+                {copied ? "コピーしました ✓" : "コードをコピー"}
+              </button>
+              <span className="text-[11px] text-neutral-400">パソコンでは、コードをブックマークバーの新しいブックマークの URL に貼り付けます</span>
+            </div>
+            <textarea readOnly value={bookmarklet} rows={2} aria-label="ブックマークに入れるコード" className="mt-2 w-full rounded-md border border-neutral-200 bg-neutral-50 p-1.5 font-mono text-[10px] text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900" />
           </details>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
@@ -1141,7 +1232,9 @@ function EmptyState() {
 function huntLabel(url: string): string {
   try {
     const u = new URL(url);
-    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? decodeURIComponent(u.pathname.replace(/^\/q\//, ""))).replace(/"/g, "");
+    const word = (u.searchParams.get("p") ?? u.searchParams.get("q") ?? u.searchParams.get("query") ?? u.searchParams.get("search") ?? decodeURIComponent(u.pathname.replace(/^.*\//, "")))
+      .replace(/"/g, "")
+      .replace(/ AND mediatype:movies$/, "");
     const h = u.hostname;
     const where = u.pathname.startsWith("/realtime")
       ? "X の投稿"
@@ -1157,7 +1250,15 @@ function huntLabel(url: string): string {
                 ? "Web（Seznam）"
                 : h.includes("sogou")
                   ? "Web（Sogou）"
-                  : "Web（Yahoo!）";
+                  : h.includes("dailymotion")
+                    ? "Dailymotion"
+                    : h.includes("nicovideo")
+                      ? "ニコニコ動画"
+                      : h === "archive.org"
+                        ? "Internet Archive"
+                        : u.pathname.includes("/timelines/tag/")
+                          ? "Mastodon"
+                          : "Web（Yahoo!）";
     return `🔎 ${where}：${word}`;
   } catch {
     return url;
