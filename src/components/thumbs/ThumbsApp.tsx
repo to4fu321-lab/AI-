@@ -27,6 +27,8 @@ interface Job {
   note?: string;
   /** 確認を求められて読めなかったページ（サイトを本人のブラウザで開いてもらう） */
   gated?: Gated[];
+  /** この取得の「サイトで開く」のタイルを畳んでいるか */
+  folded?: boolean;
   settings?: CrawlSettings;
   /** 最後に受け取った途中経過。止まったときは「続きから」でここから再開する */
   resume?: CrawlState;
@@ -55,6 +57,8 @@ const clock = (sec: number) => {
 const VIEW_KEY = "thumbs:view:v1";
 /** 「さらに深く探す」を自動で続ける回数の保存場所 */
 const ROUNDS_KEY = "thumbs:rounds:v1";
+/** メニュー・取得の一覧を畳んでいるかの保存場所 */
+const FOLD_KEY = "thumbs:fold:v1";
 /** 「探す」で使わない置き場・検索先の保存場所 */
 const HUNT_OFF_KEY = "thumbs:huntoff:v1";
 /** 「ファイル置き場を探す」で探す置き場 */
@@ -187,6 +191,19 @@ export function ThumbsApp() {
   const [huntWord, setHuntWord] = useState("");
   /** 検索から探すとき、ひととおり終わった後に「さらに深く探す」を自動で何回続けるか */
   const [huntRounds, setHuntRounds] = useState(2);
+  /** 畳んでいるもの（メニュー・取得の一覧）。この端末に保存する */
+  const [menuOpen, setMenuOpen] = useState(true);
+  const [jobsOpen, setJobsOpen] = useState(true);
+  const toggleFold = (which: "menu" | "jobs") => {
+    const next = { menu: which === "menu" ? !menuOpen : menuOpen, jobs: which === "jobs" ? !jobsOpen : jobsOpen };
+    setMenuOpen(next.menu);
+    setJobsOpen(next.jobs);
+    try {
+      localStorage.setItem(FOLD_KEY, JSON.stringify(next));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  };
   /** 「探す」で使わない置き場・検索先（設定で外したもの） */
   const [huntOff, setHuntOff] = useState<string[]>([]);
   const toggleHunt = (id: string) =>
@@ -252,6 +269,9 @@ export function ThumbsApp() {
       if (view?.shape === "wide" || view?.shape === "square") setShape(view.shape);
       const off = JSON.parse(localStorage.getItem(HUNT_OFF_KEY) ?? "[]");
       if (Array.isArray(off)) setHuntOff(off.filter((x): x is string => typeof x === "string").slice(0, 30));
+      const fold = JSON.parse(localStorage.getItem(FOLD_KEY) ?? "null");
+      if (fold?.menu === false) setMenuOpen(false);
+      if (fold?.jobs === false) setJobsOpen(false);
       const rounds = Number(localStorage.getItem(ROUNDS_KEY));
       if (localStorage.getItem(ROUNDS_KEY) !== null && rounds >= 0 && rounds <= 20) setHuntRounds(Math.round(rounds));
     } catch {
@@ -732,11 +752,22 @@ export function ThumbsApp() {
                 <span className="mr-1">🖼️</span>サムネ収集
               </span>
             </h1>
-            {items.length > 0 && (
-              <button type="button" onClick={clearAll} className="text-xs font-semibold text-neutral-400 hover:text-red-500">
-                すべて消す
+            <div className="flex items-center gap-3">
+              {running && !menuOpen && <span className="animate-pulse text-xs font-semibold text-fuchsia-500">取得中…</span>}
+              {items.length > 0 && (
+                <button type="button" onClick={clearAll} className="text-xs font-semibold text-neutral-400 hover:text-red-500">
+                  すべて消す
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => toggleFold("menu")}
+                aria-expanded={menuOpen}
+                className="rounded-full bg-neutral-200/70 px-3 py-1 text-xs font-bold text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200"
+              >
+                メニュー {menuOpen ? "▲" : "▼"}
               </button>
-            )}
+            </div>
           </div>
           <form onSubmit={onSubmit} className="flex gap-2">
             <input
@@ -757,6 +788,8 @@ export function ThumbsApp() {
             </button>
           </form>
           {formError && <p className="mt-1.5 text-xs text-red-500">{formError}</p>}
+          {menuOpen && (
+          <>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <input
               type="text"
@@ -891,10 +924,13 @@ export function ThumbsApp() {
             </label>
             {running && <span className="animate-pulse font-semibold text-fuchsia-500">取得中…</span>}
           </div>
+          </>
+          )}
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-4">
+        {menuOpen && (
         <Library
           sites={sites}
           history={history}
@@ -910,8 +946,22 @@ export function ThumbsApp() {
           onRemoveHistory={(url) => setHistory((list) => list.filter((h) => h.url !== url))}
           onClearHistory={() => confirm("履歴をすべて消しますか？") && setHistory([])}
         />
+        )}
         {jobs.length > 0 && (
-          <ul className="mt-3 flex flex-col gap-1.5">
+          <button
+            type="button"
+            onClick={() => toggleFold("jobs")}
+            aria-expanded={jobsOpen}
+            className="mt-3 flex w-full items-center justify-between rounded-xl bg-neutral-100 px-3 py-2 text-xs font-bold text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300"
+          >
+            <span>
+              取得・検索の一覧（{jobs.length} 件{running ? "・取得中" : ""}）
+            </span>
+            <span>{jobsOpen ? "▲ 畳む" : "▼ 開く"}</span>
+          </button>
+        )}
+        {jobs.length > 0 && jobsOpen && (
+          <ul className="mt-1.5 flex flex-col gap-1.5">
             {jobs.map((job) => (
               <JobRow
                 key={job.id}
@@ -926,6 +976,7 @@ export function ThumbsApp() {
                 onSave={() => saveSite(job.url, job.settings ?? { depth, maxPages, maxPagination, crossSite, render, kinds, robots })}
                 onRemove={() => removeJob(job.id)}
                 newSince={newSince}
+                onFold={() => updateJob(job.id, { folded: !job.folded })}
               />
             ))}
           </ul>
@@ -1125,7 +1176,10 @@ function JobRow({
   onStop,
   onRemove,
   newSince,
+  onFold,
 }: {
+  /** 「サイトで開く」のタイルを畳む・開く */
+  onFold: () => void;
   newSince: number;
   job: Job;
   onResume: () => void;
@@ -1207,7 +1261,18 @@ function JobRow({
         </button>
       )}
       </div>
-      {job.gated && job.gated.length > 0 && <GatedPages pages={job.gated} newSince={newSince} />}
+      {job.gated && job.gated.length > 0 && (
+        <button
+          type="button"
+          onClick={onFold}
+          aria-expanded={!job.folded}
+          className="mt-1.5 flex w-full items-center justify-between rounded-lg bg-neutral-100 px-2.5 py-1.5 text-[11px] font-semibold text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300"
+        >
+          <span>タップで開くタイル {job.gated.length} 件</span>
+          <span>{job.folded ? "▼ 開く" : "▲ 畳む"}</span>
+        </button>
+      )}
+      {job.gated && job.gated.length > 0 && !job.folded && <GatedPages pages={job.gated} newSince={newSince} />}
     </li>
   );
 }
