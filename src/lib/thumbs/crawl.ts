@@ -499,7 +499,7 @@ export async function* crawl(
   const navLinks = new Set<string>();
 
   const snapshot = (): CrawlState => ({
-    queue: [...queue],
+    queue: [...pausedAll, ...queue],
     seen: [...seenPages],
     pages,
     paginationUsed,
@@ -629,6 +629,7 @@ export async function* crawl(
   /** Gofile に一時的に止められている（この回は、Gofile のフォルダを聞かずに取っておく） */
   let gofilePaused = false;
   const paused: QueueItem[] = [];
+  const pausedAll: QueueItem[] = [];
   let gatedPages = 0;
   /** 動画は取り出せなかったが、サムネイルだけ並べたページの数 */
   let thumbOnlyPages = 0;
@@ -1025,6 +1026,8 @@ export async function* crawl(
       // （聞いても全部「読めない」になるだけで、列を空にしてしまうため）。時間をおいて「もっと読み込む」で続ける
       if (gofilePaused) {
         paused.push(item);
+        // サムネイルがわかっているものは、サムネイルだけ先に並べる（タップでまとめサイトのページ）
+        thumbOnly(item.from ?? url, "Gofile が混雑中");
         return events;
       }
       seenGofile.delete(share);
@@ -1033,6 +1036,7 @@ export async function* crawl(
         gofilePaused = true;
         seenGofile.delete(share);
         paused.push(item);
+        thumbOnly(item.from ?? url, "Gofile が混雑中");
         return events;
       }
       const items = g.media
@@ -1686,12 +1690,11 @@ export async function* crawl(
       yield { type: "checkpoint", state: snapshot() };
     }
     if (paused.length) {
-      // Gofile に止められていて聞けなかったフォルダは、読んだ数から引いて列に戻し、ここで終わる（続きは時間をおいてから）
+      // Gofile に止められていて聞けなかったフォルダは、読んだ数から引いて取っておく（終わった後、続きとして残す）。
+      // 一覧のページは読み続けて、サムネイルだけ先に並べる
       pages -= paused.length;
-      for (const d of paused) queuedByUrl.set(d.url, d);
-      queue.unshift(...paused.splice(0));
+      pausedAll.push(...paused.splice(0));
     }
-    if (gofilePaused) break;
     if (deferred.length) {
       // 次の回に回したページは、読んだ数から引いて列の先頭に戻す
       pages -= deferred.length;
@@ -1764,11 +1767,16 @@ export async function* crawl(
       ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
       : null;
     const pausedNote = gofilePaused
-      ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。10 分ほど待ってから、一番下の「もっと読み込む」で続きを読めます"
+      ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
       : null;
     const finalNote =
       pausedNote ?? retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
+  }
+  // Gofile に止められていて聞けなかったフォルダは、続きとして残す
+  if (pausedAll.length && !signal.aborted) {
+    for (const r of pausedAll) queuedByUrl.set(r.url, r);
+    queue.unshift(...pausedAll.splice(0));
   }
   // 断られて読めなかった一覧の続きは、続きとして残す（「もっと読み込む」でもう一度試せる）
   if (retryLater.length && !signal.aborted) {
