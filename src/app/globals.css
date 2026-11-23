@@ -15,5 +15,7 @@
 body {
   background: var(--color-background);
   color: var(--color-foreground);
+  /* フォントは layout.tsx の <link> で読み込む（読み込めないときは、端末の日本語フォントで表示する） */
+  font-family: "Noto Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, sans-serif;
 }
 
