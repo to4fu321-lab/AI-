@@ -58,6 +58,12 @@ const clock = (sec: number) => {
 const VIEW_KEY = "thumbs:view:v1";
 /** 「さらに深く探す」を自動で続ける回数の保存場所 */
 const ROUNDS_KEY = "thumbs:rounds:v1";
+/** 読んだ Gofile のフォルダ（番号 → 読んだ時刻）の保存場所。3 日たったら忘れる */
+const GOFILE_KNOWN_KEY = "thumbs:gofile-known:v1";
+const GOFILE_KNOWN_MS = 3 * 24 * 60 * 60 * 1000;
+const MAX_GOFILE_KNOWN = 5000;
+/** 登録サイトの自動巡回（間隔の分・最後に巡回した時刻）の保存場所 */
+const PATROL_KEY = "thumbs:patrol:v1";
 /** メニュー・取得の一覧を畳んでいるかの保存場所 */
 const FOLD_KEY = "thumbs:fold:v1";
 /** 「探す」で使わない置き場・検索先の保存場所 */
@@ -199,6 +205,26 @@ export function ThumbsApp() {
   const [huntWord, setHuntWord] = useState("");
   /** 検索から探すとき、ひととおり終わった後に「さらに深く探す」を自動で何回続けるか */
   const [huntRounds, setHuntRounds] = useState(2);
+  /** 読んだ Gofile のフォルダ（番号 → 読んだ時刻）。次からは聞かない（Gofile への問い合わせを減らす） */
+  const gofileKnown = useRef(new Map<string, number>());
+  const [knownCount, setKnownCount] = useState(0);
+  const saveKnown = useCallback(() => {
+    const m = gofileKnown.current;
+    setKnownCount(m.size);
+    try {
+      localStorage.setItem(GOFILE_KNOWN_KEY, JSON.stringify([...m].slice(-MAX_GOFILE_KNOWN)));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  }, []);
+  const forgetKnown = useCallback(() => {
+    gofileKnown.current = new Map();
+    saveKnown();
+  }, [saveKnown]);
+  /** 登録サイトの自動巡回の間隔（分。0 はなし）と、最後に巡回した時刻 */
+  const [patrolMin, setPatrolMin] = useState(0);
+  const patrolLast = useRef(0);
+  const [patrolAt, setPatrolAt] = useState(0);
   /** 畳んでいるもの（メニュー・取得の一覧）。この端末に保存する */
   const [menuOpen, setMenuOpen] = useState(true);
   const [jobsOpen, setJobsOpen] = useState(true);
@@ -280,6 +306,18 @@ export function ThumbsApp() {
       const fold = JSON.parse(localStorage.getItem(FOLD_KEY) ?? "null");
       if (fold?.menu === false) setMenuOpen(false);
       if (fold?.jobs === false) setJobsOpen(false);
+      const known = JSON.parse(localStorage.getItem(GOFILE_KNOWN_KEY) ?? "[]");
+      if (Array.isArray(known)) {
+        const fresh = known.filter((e): e is [string, number] => Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "number" && Date.now() - e[1] < GOFILE_KNOWN_MS);
+        gofileKnown.current = new Map(fresh);
+        setKnownCount(fresh.length);
+      }
+      const patrol = JSON.parse(localStorage.getItem(PATROL_KEY) ?? "null");
+      if (typeof patrol?.min === "number" && patrol.min >= 0 && patrol.min <= 1440) setPatrolMin(patrol.min);
+      if (typeof patrol?.last === "number") {
+        patrolLast.current = patrol.last;
+        setPatrolAt(patrol.last);
+      }
       const rounds = Number(localStorage.getItem(ROUNDS_KEY));
       if (localStorage.getItem(ROUNDS_KEY) !== null && rounds >= 0 && rounds <= 20) setHuntRounds(Math.round(rounds));
     } catch {
@@ -362,6 +400,7 @@ export function ThumbsApp() {
       } else {
         setJobs((list) => [{ id, url, status: "running", pages: 0, errors: 0, settings }, ...list]);
       }
+      let knownDirty = false;
       let pageCount = existing?.job.pages ?? 0;
       let foundCount = existing?.found ?? 0;
       const startedAt = Date.now();
@@ -392,6 +431,7 @@ export function ThumbsApp() {
                 resume: current,
                 // ブラウザから送られてきたページの中身（最初の 1 回だけ送る）
                 html: current ? undefined : html,
+                knownGofile: [...gofileKnown.current.keys()].slice(-MAX_GOFILE_KNOWN),
               }),
               signal: controller.signal,
             });
@@ -414,6 +454,12 @@ export function ThumbsApp() {
                 if (!line.trim()) continue;
                 const event = JSON.parse(line) as CrawlEvent;
                 if (event.type === "page") {
+                  // 読んだ Gofile のフォルダを覚える（次からは聞かない）
+                  const gid = event.gofile ? /^https:\/\/gofile\.io\/d\/([\w-]{4,40})/.exec(event.url)?.[1] : null;
+                  if (gid) {
+                    gofileKnown.current.set(gid, Date.now());
+                    knownDirty = true;
+                  }
                   pageCount++;
                   updateJob(id, (j) => ({ pages: j.pages + 1 }));
                 } else if (event.type === "error") updateJob(id, (j) => ({ errors: j.errors + 1, message: event.message }));
@@ -487,10 +533,11 @@ export function ThumbsApp() {
         else updateJob(id, { status: "error", message: describeError(err) });
       } finally {
         controllers.current.delete(id);
+        if (knownDirty) saveKnown();
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory],
+    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory, saveKnown],
   );
 
   const resumeJob = useCallback(
@@ -545,6 +592,57 @@ export function ThumbsApp() {
       window.removeEventListener("message", onMessage);
     };
   }, []);
+  // --- 登録サイトの自動巡回（このページを開いている間、決めた間隔で登録サイトを取得し直す） ---
+  const sitesRef = useRef(sites);
+  useEffect(() => {
+    sitesRef.current = sites;
+  });
+  const patrolBusy = useRef(false);
+  const runPatrol = useCallback(async () => {
+    if (patrolBusy.current || !sitesRef.current.length) return;
+    patrolBusy.current = true;
+    patrolLast.current = Date.now();
+    setPatrolAt(patrolLast.current);
+    try {
+      const saved = JSON.parse(localStorage.getItem(PATROL_KEY) ?? "{}");
+      localStorage.setItem(PATROL_KEY, JSON.stringify({ ...saved, last: patrolLast.current }));
+    } catch {
+      /* 保存できなくても動く */
+    }
+    try {
+      for (const site of sitesRef.current) {
+        // 同じ URL の取得があれば、その行を使って最初から取得し直す（行を増やさない）。動いている最中なら飛ばす
+        const job = latest.current.jobs.find((j) => j.url === site.url && !j.settings?.hunt);
+        if (job && controllers.current.has(job.id)) continue;
+        if (job) {
+          const found = latest.current.items.filter((i) => i.jobId === job.id).length;
+          await startJobRef.current(site.url, site.settings, { job: { ...job, resume: undefined, truncated: false, settings: site.settings }, found });
+        } else await startJobRef.current(site.url, site.settings);
+      }
+    } finally {
+      patrolBusy.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (!patrolMin) return;
+    const tick = () => {
+      if (Date.now() - patrolLast.current >= patrolMin * 60000) void runPatrol();
+    };
+    const t = setInterval(tick, 20000);
+    return () => clearInterval(t);
+  }, [patrolMin, runPatrol]);
+  const changePatrol = (min: number) => {
+    setPatrolMin(min);
+    // 選んだ時点から数え始める（選んですぐには走らせない）
+    patrolLast.current = Date.now();
+    setPatrolAt(patrolLast.current);
+    try {
+      localStorage.setItem(PATROL_KEY, JSON.stringify({ min, last: patrolLast.current }));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  };
+
   /** ブックマークに登録して使う「このページをサムネ収集に送る」ボタンの中身 */
   const bookmarklet = appOrigin
     ? `javascript:(function(){var o=${JSON.stringify(appOrigin)};var w=window.open(o+'/thumbs#import');if(!w){alert('ポップアップを許可してください');return;}var h=document.documentElement.outerHTML.slice(0,2500000);var u=location.href;function f(e){if(e.origin===o&&e.data==='thumbs-ready'){w.postMessage({type:'thumbs-import',url:u,html:h},o);removeEventListener('message',f);}}addEventListener('message',f);})();`
@@ -690,6 +788,8 @@ export function ThumbsApp() {
     stopJob(id);
     setJobs((l) => l.filter((j) => j.id !== id));
     setItems((l) => l.filter((i) => i.jobId !== id));
+    // 消した分の Gofile の動画をもう一度取れるように、覚えたフォルダも忘れる
+    forgetKnown();
     if (jobFilter === id) setJobFilter(null);
   };
   const clearAll = () => {
@@ -698,6 +798,7 @@ export function ThumbsApp() {
     setJobs([]);
     setItems([]);
     setJobFilter(null);
+    forgetKnown();
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
@@ -953,6 +1054,42 @@ export function ThumbsApp() {
             </div>
             <textarea readOnly value={bookmarklet} rows={2} aria-label="ブックマークに入れるコード" className="mt-2 w-full rounded-md border border-neutral-200 bg-neutral-50 p-1.5 font-mono text-[10px] text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900" />
           </details>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-neutral-200 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+            <label className="flex items-center gap-1.5" title="登録サイト（☆）を、決めた間隔で自動で取得し直します。このページを開いている間だけ動きます">
+              🔁 登録サイトの自動巡回
+              <select
+                value={patrolMin}
+                onChange={(e) => changePatrol(Number(e.target.value))}
+                className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+              >
+                {[0, 15, 30, 60, 180, 360].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "なし" : n < 60 ? `${n}分ごと` : `${n / 60}時間ごと`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {patrolMin > 0 && (
+              <span className="text-[11px] text-neutral-400">
+                {sites.length === 0
+                  ? "登録サイトがありません（履歴や一覧の ☆ で登録してください）"
+                  : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
+              </span>
+            )}
+            {patrolMin > 0 && sites.length > 0 && (
+              <button type="button" onClick={() => void runPatrol()} className="rounded-full bg-neutral-200/70 px-3 py-1 font-bold dark:bg-neutral-800">
+                今すぐ巡回
+              </button>
+            )}
+            {knownCount > 0 && (
+              <span className="flex items-center gap-2 text-[11px] text-neutral-400">
+                読んだ Gofile フォルダ {knownCount} 件を覚えています（次からは聞きません・3 日で忘れます）
+                <button type="button" onClick={forgetKnown} className="rounded-full bg-neutral-200/70 px-2.5 py-0.5 font-bold text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                  忘れる
+                </button>
+              </span>
+            )}
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-500">
             <label className="flex items-center gap-1.5">
               取得する種類

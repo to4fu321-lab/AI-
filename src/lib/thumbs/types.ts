@@ -54,7 +54,8 @@ export interface MediaItem {
 
 /** /api/thumbs/crawl が 1 行ずつ返すイベント（NDJSON）。 */
 export type CrawlEvent =
-  | { type: "page"; url: string; depth: number; found: number }
+  /** gofile：Gofile のフォルダを読み終えた印（ok: 中身があった / gone: 消されていた・空だった）。画面が「読んだフォルダ」として覚える */
+  | { type: "page"; url: string; depth: number; found: number; gofile?: "ok" | "gone" }
   | { type: "media"; items: MediaItem[] }
   | { type: "skip"; url: string; reason: string }
   | { type: "note"; url: string; message: string }
@@ -100,6 +101,8 @@ export interface CrawlOptions {
   gofileOnly?: boolean;
   /** ファイル置き場を探すとき、集めない置き場（Gofile・pixeldrain・Google ドライブ・Dropbox・catbox のうち、設定で外したもの） */
   skipHosts?: string[];
+  /** 前に読んだ Gofile のフォルダの番号（画面が覚えているもの）。もう一度は聞かない（Gofile への問い合わせを減らす） */
+  knownGofile?: string[];
   /**
    * 入力したページの中身（HTML）。本人のブラウザで開いているページを、ブックマークレットでこのアプリに送ったもの。
    * これがあれば、入力したページはサーバーから読みに行かず、この中身を使う（確認を求めるサイトでも、本人が見ているページは読める）

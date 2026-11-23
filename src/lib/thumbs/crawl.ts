@@ -519,6 +519,10 @@ export async function* crawl(
     fruitful: [...fruitful].slice(-500),
   });
 
+  /** 前に読んだ Gofile のフォルダ（画面が覚えているもの）と、それで聞かずに済ませた数 */
+  const knownGofile = new Set(options.knownGofile ?? []);
+  let knownSkipped = 0;
+
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
 
@@ -534,6 +538,14 @@ export async function* crawl(
     preview?: string,
   ) => {
     if (!isPageLikeUrl(url) || isExcluded(url, options.exclude)) return false;
+    // 前に読んだ Gofile のフォルダは、もう聞かない（入力したものは除く）
+    if (!root && knownGofile.size) {
+      const gid = gofileId(url);
+      if (gid && knownGofile.has(gid)) {
+        knownSkipped++;
+        return false;
+      }
+    }
     const key = normalizePageUrl(url);
     if (seenPages.has(key)) {
       // すでに列にあるページなら、サムネイルと優先度だけ補う
@@ -814,7 +826,7 @@ export async function* crawl(
   /** Gofile をブラウザで開いても読めなかった（この実行では、もうブラウザでは開かない。時間がかかるだけなので） */
   let gofileBrowserFailed = false;
   const gofileMedia = async (ids: string[], allowBrowser = true): Promise<{ media: MediaItem[]; error?: string; detail?: string }> => {
-    const todo = ids.filter((id) => !seenGofile.has(id)).slice(0, 10);
+    const todo = ids.filter((id) => !seenGofile.has(id) && !knownGofile.has(id)).slice(0, 10);
     const media: MediaItem[] = [];
     let error: string | undefined;
     let detail: string | undefined;
@@ -1062,7 +1074,9 @@ export async function* crawl(
       const ok = dropSamePrint(await settle(verified));
       found += ok.length;
       videos += ok.filter((m) => m.kind !== "image").length;
-      events.push({ type: "page", url, depth, found: ok.length });
+      // 読み終えたフォルダは、画面が覚えて次からは聞かない（読めなかった・確かめきれなかったものは覚えない）
+      const readState = ok.length ? "ok" : !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "") ? "gone" : undefined;
+      events.push({ type: "page", url, depth, found: ok.length, gofile: readState });
       if (ok.length) events.push({ type: "media", items: ok });
       // まとめサイトのカードから来た Gofile のフォルダが、消されていた・空だった：サムネイルだけ並べる（タップでまとめサイトのページ）
       if (!ok.length && !verified.rest.length && !g.media.length && /見つかりません|ありませんでした/.test(g.error ?? "")) {
@@ -1849,11 +1863,12 @@ export async function* crawl(
     const retryNote = retryLater.length
       ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
       : null;
+    const knownNote = knownSkipped ? `前に読んだ Gofile のフォルダ ${knownSkipped} 件は、読み直していません（新しいフォルダだけを読みました）` : null;
     const pausedNote = gofilePaused
       ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
       : null;
     const finalNote =
-      pausedNote ?? retryNote ?? appNote ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote;
+      pausedNote ?? retryNote ?? appNote ?? (found === 0 && knownSkipped ? knownNote : null) ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote ?? knownNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   // Gofile に止められていて聞けなかったフォルダは、続きとして残す
