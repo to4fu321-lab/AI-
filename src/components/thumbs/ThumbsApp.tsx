@@ -64,6 +64,8 @@ const GOFILE_KNOWN_MS = 3 * 24 * 60 * 60 * 1000;
 const MAX_GOFILE_KNOWN = 5000;
 /** 登録サイトの自動巡回（間隔の分・最後に巡回した時刻）の保存場所 */
 const PATROL_KEY = "thumbs:patrol:v1";
+/** サーバーの自動巡回の結果を、どの時刻の分まで受け取ったかの保存場所 */
+const PATROL_SEEN_KEY = "thumbs:patrol-seen:v1";
 /** メニュー・取得の一覧を畳んでいるかの保存場所 */
 const FOLD_KEY = "thumbs:fold:v1";
 /** 「探す」で使わない置き場・検索先の保存場所 */
@@ -592,6 +594,124 @@ export function ThumbsApp() {
       window.removeEventListener("message", onMessage);
     };
   }, []);
+  // --- サーバー側の自動巡回（データベースがあるとき）。ブラウザを閉じていてもサーバーが巡回し、開いたときに結果を受け取る ---
+  const [serverPatrol, setServerPatrol] = useState(false);
+  const [serverBusy, setServerBusy] = useState(false);
+  const [serverNote, setServerNote] = useState("");
+  const pullPatrol = useCallback(async () => {
+    let since = 0;
+    try {
+      since = Number(localStorage.getItem(PATROL_SEEN_KEY)) || 0;
+    } catch {
+      /* 0 から */
+    }
+    const res = await fetch(`/api/thumbs/patrol?since=${since}`).catch(() => null);
+    if (!res?.ok) return;
+    const data = (await res.json().catch(() => null)) as {
+      configured?: boolean;
+      now?: number;
+      sites?: { url: string; lastRun: number | null; lastFound: number }[];
+      items?: { id: string; siteUrl: string; kind: string; data: Record<string, unknown>; foundAt: number }[];
+    } | null;
+    if (!data?.configured) return;
+    setServerPatrol(true);
+    const last = Math.max(0, ...(data.sites ?? []).map((x) => x.lastRun ?? 0));
+    setServerNote(last ? `最後の巡回 ${new Date(last).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}` : "まだ巡回していません");
+    const got = data.items ?? [];
+    if (got.length) {
+      // サイトごとの行（なければ作る）
+      const idOf = new Map<string, string>();
+      const fresh: Job[] = [];
+      for (const it of got) {
+        if (idOf.has(it.siteUrl)) continue;
+        const job = latest.current.jobs.find((j) => j.url === it.siteUrl && !j.settings?.hunt);
+        if (job) idOf.set(it.siteUrl, job.id);
+        else {
+          const id = `patrol-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          idOf.set(it.siteUrl, id);
+          fresh.push({ id, url: it.siteUrl, status: "done", pages: 0, errors: 0, settings: sitesRef.current.find((x) => x.url === it.siteUrl)?.settings });
+        }
+      }
+      if (fresh.length) setJobs((list) => [...fresh, ...list]);
+      // ここから後に加わったものが「新着」
+      const stamp = Date.now();
+      newSinceRef.current = stamp;
+      setNewSince(stamp);
+      const media = got.filter((it) => it.kind !== "gated");
+      setItems((prev) => {
+        const known = new SeenMedia(prev);
+        const ids = new Set(prev.map((i) => i.id));
+        const add: Item[] = [];
+        for (const it of media) {
+          const m = it.data as unknown as MediaItem;
+          if (!m || typeof m.id !== "string" || typeof m.src !== "string" || ids.has(m.id) || known.has(m) || isItemExcluded(m, excludesRef.current)) continue;
+          ids.add(m.id);
+          known.add(m);
+          // サーバーが確かめた時刻を印にする（時間がたっていれば、画面が確かめ直してから表示する）
+          add.push({ ...m, jobId: idOf.get(it.siteUrl)!, checked: m.checked ? it.foundAt : undefined, addedAt: stamp });
+        }
+        return add.length ? [...add.reverse(), ...prev].slice(0, MAX_ITEMS) : prev;
+      });
+      for (const it of got.filter((x) => x.kind === "gated")) {
+        const g = it.data as { url?: unknown; thumb?: unknown; title?: unknown; duration?: unknown; video?: unknown; app?: unknown };
+        if (typeof g.url !== "string") continue;
+        const tile: Gated = {
+          url: g.url,
+          thumb: typeof g.thumb === "string" ? g.thumb : undefined,
+          title: typeof g.title === "string" ? g.title : undefined,
+          duration: typeof g.duration === "number" ? g.duration : undefined,
+          video: typeof g.video === "string" ? g.video : undefined,
+          app: typeof g.app === "string" ? g.app : undefined,
+          at: stamp,
+        };
+        updateJob(idOf.get(it.siteUrl)!, (j) => ((j.gated ?? []).some((x) => x.url === tile.url) ? {} : { gated: [tile, ...(j.gated ?? [])].slice(0, MAX_GATED) }));
+      }
+    }
+    try {
+      // 受け取った分の時刻まで進める（3000 件で区切られたときは、最後の 1 件の時刻まで）
+      const upTo = got.length >= 3000 ? got[got.length - 1].foundAt : (data.now ?? Date.now());
+      localStorage.setItem(PATROL_SEEN_KEY, String(upTo));
+    } catch {
+      /* 保存できなくても動く */
+    }
+  }, [updateJob]);
+  useEffect(() => {
+    // 保存データを戻した後に 1 回、その後は 2 分おきに受け取る。画面を開いている間は、時刻になったサイトの巡回もサーバーに頼む
+    // （サーバーの定期実行の間隔が長くても、開いている間は選んだ間隔で巡回する）
+    const first = setTimeout(() => void pullPatrol(), 1500);
+    const t = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void fetch("/api/thumbs/patrol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ run: "due" }) })
+        .catch(() => null)
+        .then(() => pullPatrol());
+    }, 120000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(t);
+    };
+  }, [pullPatrol]);
+  // 巡回するサイト・間隔・除外リスト・Gofile のトークンが変わったら、サーバーに伝える
+  useEffect(() => {
+    if (!serverPatrol || !loaded.current) return;
+    const t = setTimeout(() => {
+      void fetch("/api/thumbs/patrol", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sites, intervalMin: patrolMin, exclude: excludes, gofileToken }),
+      }).catch(() => null);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [serverPatrol, sites, patrolMin, excludes, gofileToken]);
+  const runServerPatrol = async () => {
+    setServerBusy(true);
+    try {
+      await fetch("/api/thumbs/patrol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ run: true }) });
+      await pullPatrol();
+    } finally {
+      setServerBusy(false);
+    }
+  };
+
   // --- 登録サイトの自動巡回（このページを開いている間、決めた間隔で登録サイトを取得し直す） ---
   const sitesRef = useRef(sites);
   useEffect(() => {
@@ -624,13 +744,14 @@ export function ThumbsApp() {
     }
   }, []);
   useEffect(() => {
-    if (!patrolMin) return;
+    // サーバーが巡回してくれるときは、画面では巡回しない
+    if (!patrolMin || serverPatrol) return;
     const tick = () => {
       if (Date.now() - patrolLast.current >= patrolMin * 60000) void runPatrol();
     };
     const t = setInterval(tick, 20000);
     return () => clearInterval(t);
-  }, [patrolMin, runPatrol]);
+  }, [patrolMin, runPatrol, serverPatrol]);
   const changePatrol = (min: number) => {
     setPatrolMin(min);
     // 選んだ時点から数え始める（選んですぐには走らせない）
@@ -1073,12 +1194,19 @@ export function ThumbsApp() {
               <span className="text-[11px] text-neutral-400">
                 {sites.length === 0
                   ? "登録サイトがありません（履歴や一覧の ☆ で登録してください）"
-                  : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
+                  : serverPatrol
+                    ? `サーバーが巡回します（開いている間は選んだ間隔で・閉じている間はサーバーの定期実行のときに）。${serverNote}`
+                    : `次は ${new Date(patrolAt + patrolMin * 60000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} ごろ（このページを開いている間だけ動きます）`}
               </span>
             )}
             {patrolMin > 0 && sites.length > 0 && (
-              <button type="button" onClick={() => void runPatrol()} className="rounded-full bg-neutral-200/70 px-3 py-1 font-bold dark:bg-neutral-800">
-                今すぐ巡回
+              <button
+                type="button"
+                disabled={serverBusy}
+                onClick={() => void (serverPatrol ? runServerPatrol() : runPatrol())}
+                className="rounded-full bg-neutral-200/70 px-3 py-1 font-bold disabled:opacity-50 dark:bg-neutral-800"
+              >
+                {serverBusy ? "巡回中…" : "今すぐ巡回"}
               </button>
             )}
             {knownCount > 0 && (
