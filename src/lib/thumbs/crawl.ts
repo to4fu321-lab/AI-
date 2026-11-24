@@ -159,6 +159,8 @@ export const MAX_PRINTS = 5000;
 const MAX_GUESS_RENDERS = 3;
 /** 動画プレーヤーを置く部品らしい名前（id・class） */
 const PLAYERISH_RE = /\b(?:id|class)\s*=\s*["'][^"']*(?:player|video|movie|douga|vjs|stream)[^"']*["']/i;
+/** Gofile に止められている間に並べる「Gofile が混雑中」のタイルの上限（1 回の取得あたり） */
+const MAX_BUSY_TILES = 30;
 /** 同じ種類のページが何回続けて確認を求められたら、読みに行かずに「サイトで開く」に並べるか */
 const GATED_STREAK = 3;
 /** 断られた一覧の続きを、後で試し直す回数の上限 */
@@ -677,6 +679,8 @@ export async function* crawl(
   const retryLater: QueueItem[] = [];
   /** Gofile に一時的に止められている（この回は、Gofile のフォルダを聞かずに取っておく） */
   let gofilePaused = false;
+  /** Gofile に止められている間に並べた「Gofile が混雑中」のタイルの数（多すぎると一覧が埋まるので上限を設ける） */
+  let busyTiles = 0;
   const paused: QueueItem[] = [];
   const pausedAll: QueueItem[] = [];
   let gatedPages = 0;
@@ -1051,6 +1055,12 @@ export async function* crawl(
     // （画面を後から描くサイトなので、ふつうに読むと 1 ページごとにブラウザで開くことになり、とても遅い）
     const gd = gofileDougaApi(url);
     if (gd) {
+      // Gofile に止められている間は、一覧の続きを読み進めない（読んでも中身を聞けず、混雑中のタイルが何百件も並ぶだけ）。
+      // 続きとして取っておき、時間をおいて「もっと読み込む」で読む
+      if (gofilePaused && !item.root) {
+        paused.push(item);
+        return events;
+      }
       try {
         const list = await gofileDougaList(gd, signal);
         for (const it of list.items) {
@@ -1059,7 +1069,7 @@ export async function* crawl(
           if (q && it.title) q.title = it.title;
         }
         events.push({ type: "page", url, depth, found: 0 });
-        if (list.next && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 2, 1)) paginationUsed++;
+        if (list.next && !gofilePaused && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 2, 1)) paginationUsed++;
         if (!list.items.length && item.root) events.push({ type: "note", url, message: "gofile-douga の一覧に Gofile のリンクが見つかりませんでした" });
       } catch (err) {
         return fail(`gofile-douga の一覧を読めませんでした（${err instanceof Error ? err.message.slice(0, 60) : String(err)}）`);
@@ -1081,8 +1091,12 @@ export async function* crawl(
       // （聞いても全部「読めない」になるだけで、列を空にしてしまうため）。時間をおいて「もっと読み込む」で続ける
       if (gofilePaused) {
         paused.push(item);
-        // サムネイルがわかっているものは、サムネイルだけ先に並べる（タップでまとめサイトのページ）
-        thumbOnly(item.from ?? url, "Gofile が混雑中");
+        // サムネイルがわかっているものは、サムネイルだけ先に並べる（タップでまとめサイトのページ）。
+        // 1 回の取得で 30 件まで（残りは「もっと読み込む」の続きとして取っておく）
+        if (busyTiles < MAX_BUSY_TILES) {
+          busyTiles++;
+          thumbOnly(item.from ?? url, "Gofile が混雑中");
+        }
         return events;
       }
       seenGofile.delete(share);
@@ -1091,6 +1105,7 @@ export async function* crawl(
         gofilePaused = true;
         seenGofile.delete(share);
         paused.push(item);
+        busyTiles++;
         thumbOnly(item.from ?? url, "Gofile が混雑中");
         return events;
       }
