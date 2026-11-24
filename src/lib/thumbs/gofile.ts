@@ -83,6 +83,8 @@ function parseContents(json: Record<string, unknown>, rootId: string, cookie: st
 /** Gofile に止められた（聞きすぎ・接続元の制限）ときに、次に聞いてよい時刻 */
 let blockedUntil = 0;
 let blockedWhy = "";
+/** 止められている理由が「人間かどうかの確認」か（聞きすぎの制限とは、伝える言葉を分ける） */
+let blockedByChallenge = false;
 /** 前に聞いた時刻（間隔をあけるため） */
 let lastAsk = 0;
 /** 順番に 1 件ずつ聞くための列 */
@@ -141,6 +143,9 @@ function describe(status: string): string {
     return "Gofile が合言葉（アカウントトークン）を受け付けませんでした。「🔑 Gofile の設定」のトークンが正しいか確かめてください（空にするとゲストとして読みます）";
   }
   if (status === "error-guest") return "Gofile がゲスト登録を断りました。Gofile の無料アカウントの「Account Token」を「🔑 Gofile の設定」に入れると読めます";
+  if (status === "error-challenge") {
+    return "Gofile が、このアプリのサーバーに「人間かどうかの確認」を出しているため、サーバーからは一時的に止めています。タイルをタップすると、あなたのブラウザで直接見られます（30 分ほどしたら、もう一度試します）";
+  }
   if (status === "error-browser" || status === "error-noGenerator") return "Gofile のページをブラウザで開けませんでした（少し待ってから、もう一度取得してください）";
   if (status === "error-empty") return "この Gofile フォルダに画像・動画はありませんでした";
   if (status === "error-time") return "時間が足りず、Gofile を読めませんでした（「続きから」でもう一度試してください）";
@@ -170,7 +175,7 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
   };
   if (Date.now() < blockedUntil) {
     notes.push(`止められています（あと ${Math.ceil((blockedUntil - Date.now()) / 60000)} 分・${blockedWhy}）`);
-    return fail("error-blocked");
+    return fail(blockedByChallenge ? "error-challenge" : "error-blocked");
   }
   if (!allowBrowser) return fail("error-time");
 
@@ -183,7 +188,12 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
     .catch(() => false);
   if (!ready) {
     dropSession(ORIGIN);
-    return fail("error-noGenerator");
+    // Gofile がこのサーバーのブラウザに「人間かどうかの確認」を出していて、Gofile のページが読み込まれない。
+    // 開き直しても同じなので（1 回 16 秒ほどかかる）、30 分は聞きに行かない。確認を機械で通り抜けることはしない
+    blockedUntil = Date.now() + 30 * 60 * 1000;
+    blockedWhy = "人間かどうかの確認";
+    blockedByChallenge = true;
+    return fail("error-challenge");
   }
 
   let token = fixed;
@@ -195,6 +205,7 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
         if (made.http === 429) {
           blockedUntil = Date.now() + 10 * 60 * 1000;
           blockedWhy = "ゲスト登録で 429";
+          blockedByChallenge = false;
         }
         return fail(made.http === 429 ? "error-rateLimit" : "error-guest");
       }
@@ -217,6 +228,7 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
       if (answer.http === 429 || answer.status === "error-rateLimit") {
         blockedUntil = Date.now() + 10 * 60 * 1000;
         blockedWhy = `${answer.status}`;
+        blockedByChallenge = false;
       }
       // ゲストの合言葉が使えなくなっていたら、次は作り直す
       if (!fixed && (answer.http === 401 || /token/i.test(answer.status))) guest = null;
