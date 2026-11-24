@@ -679,6 +679,8 @@ export async function* crawl(
   const retryLater: QueueItem[] = [];
   /** Gofile に一時的に止められている（この回は、Gofile のフォルダを聞かずに取っておく） */
   let gofilePaused = false;
+  /** 止められている理由が「人間かどうかの確認」か */
+  let gofileChallenge = false;
   /** Gofile に止められている間に並べた「Gofile が混雑中」のタイルの数（多すぎると一覧が埋まるので上限を設ける） */
   let busyTiles = 0;
   const paused: QueueItem[] = [];
@@ -1102,6 +1104,7 @@ export async function* crawl(
       seenGofile.delete(share);
       const g = await gofileMedia([share]);
       if (!g.media.length && /一時的に止めています/.test(g.error ?? "")) {
+        gofileChallenge ||= /人間かどうかの確認/.test(g.error ?? "");
         gofilePaused = true;
         seenGofile.delete(share);
         paused.push(item);
@@ -1919,7 +1922,9 @@ export async function* crawl(
         ? `${(wantsVideo ? videos === 0 : found === 0) ? "新しく増えたものはありませんでした。" : ""}前に読んだ${[knownPagesSkipped ? `ページ・投稿 ${knownPagesSkipped} 件` : "", knownSkipped ? `Gofile のフォルダ ${knownSkipped} 件` : ""].filter(Boolean).join("・")}は、読み直していません（新しく増えた分だけを読みました）`
         : null;
     const pausedNote = gofilePaused
-      ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
+      ? gofileChallenge
+        ? "Gofile が、このアプリのサーバーに「人間かどうかの確認」を出しているため、Gofile の中身を読めませんでした（新しい動画がないのではありません）。サムネイルがわかるものはサムネイルだけ並べています。タップすると、あなたのブラウザで直接見られます。時間をおいてから、一番下の「もっと読み込む」で続きを試せます"
+        : "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
       : null;
     const finalNote =
       pausedNote ?? retryNote ?? appNote ?? (found === 0 && (knownSkipped || knownPagesSkipped) ? knownNote : null) ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote ?? knownNote;
