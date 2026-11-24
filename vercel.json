@@ -9,5 +9,5 @@
       "schedule": "*/15 * * * *"
     }
   ],
-  "ignoreCommand": "[ \"$VERCEL_ENV\" != \"production\" ]"
+  "ignoreCommand": "bash scripts/vercel-ignore-build.sh"
 }
