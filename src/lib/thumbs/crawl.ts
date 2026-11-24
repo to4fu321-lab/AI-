@@ -522,6 +522,28 @@ export async function* crawl(
   /** 前に読んだ Gofile のフォルダ（画面が覚えているもの）と、それで聞かずに済ませた数 */
   const knownGofile = new Set(options.knownGofile ?? []);
   let knownSkipped = 0;
+  /** 前に動画が見つかったページ・X の投稿（画面・巡回が覚えているもの）と、それで読まずに済ませた数 */
+  const knownPages = new Set<string>();
+  for (const u of options.knownPages ?? []) {
+    try {
+      knownPages.add(normalizePageUrl(u));
+    } catch {
+      /* 形の崩れた URL は無視 */
+    }
+  }
+  const knownTweets = new Set(options.knownTweets ?? []);
+  let knownPagesSkipped = 0;
+  /** 前に読んだページ・投稿か（入力したページは除く。呼ぶ側で判定） */
+  const isKnownPage = (url: string): boolean => {
+    if (!knownPages.size && !knownTweets.size) return false;
+    try {
+      if (knownPages.has(normalizePageUrl(url))) return true;
+    } catch {
+      return false;
+    }
+    const tid = tweetIdOf(url) ?? tweetIdInUrl(url);
+    return !!tid && knownTweets.has(tid);
+  };
 
   /** 列に入っているページを URL から引くための索引（サムネイル・優先度を後から補うとき用） */
   const queuedByUrl = new Map<string, QueueItem>(queue.map((q) => [q.url, q]));
@@ -609,6 +631,8 @@ export async function* crawl(
   let deeperAllowed = !!resume && queue.length === 0;
   const widen = (): number => {
     if (!autoWiden || !reserve.length) return 0;
+    // 前に動画が取れたページを読まずに済ませたなら、このサイトに動画はある。新しく増えた分がなかっただけなので、範囲は広げない
+    if (videos === 0 && knownPagesSkipped > 0) return 0;
     if (videos === 0 ? widened >= WIDEN_BLIND_PAGES : widened === 0) return 0;
     reserve.sort((a, b) => (b.prio ?? 0) - (a.prio ?? 0) || (a.zone ?? 0) - (b.zone ?? 0) || a.depth - b.depth);
     const limit = videos === 0 ? Math.min(WIDEN_STEP, WIDEN_BLIND_PAGES - widened) : WIDEN_STEP;
@@ -790,7 +814,12 @@ export async function* crawl(
   };
   const tweetMedia = async (refs: TweetRef[]): Promise<MediaItem[]> => {
     if (xBroken()) return [];
-    const todo = refs.filter((t) => !seenTweets.has(t.id)).slice(0, 80);
+    // 前に動画を取り出した投稿は、もう聞かない（新しい投稿だけ。入力した投稿は、呼ぶ前に knownTweets から外してある）
+    const fresh = refs.filter((t) => !seenTweets.has(t.id));
+    const known = fresh.filter((t) => knownTweets.has(t.id));
+    knownPagesSkipped += known.length;
+    for (const t of known) seenTweets.add(t.id);
+    const todo = fresh.filter((t) => !knownTweets.has(t.id)).slice(0, 80);
     for (const t of todo) seenTweets.add(t.id);
     const out: MediaItem[] = [];
     let next = 0;
@@ -1105,6 +1134,8 @@ export async function* crawl(
     const tweetId = tweet ?? embedded;
     if (tweetId) {
       seenTweets.delete(tweetId);
+      // 入力した投稿・ページそのものは、前に読んでいても読む
+      if (item.root) knownTweets.delete(tweetId);
       // X 以外のサイトのリンクは、まず行き先を見る（動画ファイルへ転送されることが多い）。駄目なら X に聞く
       const ref = { id: tweetId, thumb: item.thumb, duration: item.duration };
       const got = embedded ? await playLinkMedia([{ ...ref, url }], item.from ?? url) : await tweetMedia([ref]);
@@ -1627,6 +1658,11 @@ export async function* crawl(
       const listing = wantsVideo && (promising >= LISTING_MIN_LINKS || pageHasVideo);
       for (const link of links) {
         if (pagination.has(link.url)) continue;
+        // 前に動画が見つかったページ・投稿へのリンクは辿らない（新しく増えたページだけを読む）
+        if (isKnownPage(link.url)) {
+          knownPagesSkipped++;
+          continue;
+        }
         // Gofile 探し：検索結果のページからは、結果のサイトへのリンクだけを辿る（検索サイト自身のメニューは辿らない）。
         // 結果のサイトの中では、Gofile と書かれたリンク・サムネイル付きのリンクだけを辿る
         if (options.hunt) {
@@ -1863,12 +1899,15 @@ export async function* crawl(
     const retryNote = retryLater.length
       ? `一覧の続き ${retryLater.length} ページは、サイトが「人間かどうかの確認」を求めたので読めませんでした。少し時間をおいて、一番下の「もっと読み込む」でもう一度試せます`
       : null;
-    const knownNote = knownSkipped ? `前に読んだ Gofile のフォルダ ${knownSkipped} 件は、読み直していません（新しいフォルダだけを読みました）` : null;
+    const knownNote =
+      knownSkipped || knownPagesSkipped
+        ? `${(wantsVideo ? videos === 0 : found === 0) ? "新しく増えたものはありませんでした。" : ""}前に読んだ${[knownPagesSkipped ? `ページ・投稿 ${knownPagesSkipped} 件` : "", knownSkipped ? `Gofile のフォルダ ${knownSkipped} 件` : ""].filter(Boolean).join("・")}は、読み直していません（新しく増えた分だけを読みました）`
+        : null;
     const pausedNote = gofilePaused
       ? "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（聞きすぎたときの制限）。サムネイルがわかるものは、サムネイルだけ並べています。時間をおいてから（数十分〜数時間かかることがあります）、一番下の「もっと読み込む」で続きを読めます"
       : null;
     const finalNote =
-      pausedNote ?? retryNote ?? appNote ?? (found === 0 && knownSkipped ? knownNote : null) ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote ?? knownNote;
+      pausedNote ?? retryNote ?? appNote ?? (found === 0 && (knownSkipped || knownPagesSkipped) ? knownNote : null) ?? (goneGofile ? thumbNote : null) ?? ((found === 0 || noVideos) && gatedNote ? gatedNote : (message ?? (noVideos ? xNote : null) ?? gatedNote)) ?? thumbNote ?? knownNote;
     if (finalNote) yield { type: "note", url: startUrl, message: finalNote };
   }
   // Gofile に止められていて聞けなかったフォルダは、続きとして残す
