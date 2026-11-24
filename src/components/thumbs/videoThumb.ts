@@ -113,7 +113,9 @@ function grabFrame(url: string, cors: boolean): Promise<{ data: string; duration
     const v = document.createElement("video");
     v.muted = true;
     v.playsInline = true;
-    v.preload = "auto";
+    // 直接読むときは相手のサーバーの通信なので先読みしてよい。サーバー経由（cors=false）のときは、
+    // 先読みした分だけこのアプリのサーバーの通信量（課金）になるので、必要な部分だけ読む
+    v.preload = cors ? "auto" : "metadata";
     v.setAttribute("playsinline", "");
     v.setAttribute("muted", "");
     if (cors) v.crossOrigin = "anonymous";
@@ -164,8 +166,11 @@ function grabFrame(url: string, cors: boolean): Promise<{ data: string; duration
     v.addEventListener("seeked", () => {
       requestAnimationFrame(() => {
         if (draw()) return;
-        // 真っ黒だったり描けなかったりしたら、少し再生して先のコマを使う
-        void v.play().catch(() => {});
+        // 真っ黒だったり描けなかったりしたら、先のコマを使う。
+        // 直接なら少し再生する。サーバー経由なら再生はせず（再生した分だけ通信量がかかる）、3 秒先へ飛んで描き直す
+        if (cors) void v.play().catch(() => {});
+        else if (Number.isFinite(v.duration) && v.currentTime + 3 < v.duration) v.currentTime += 3;
+        else finish(null);
       });
     });
     v.addEventListener("timeupdate", () => {
