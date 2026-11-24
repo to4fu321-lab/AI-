@@ -23,14 +23,13 @@ export async function GET(request: Request) {
     return new Response(`保存した動画を読めませんでした（${err instanceof Error ? err.message.slice(0, 100) : String(err)}）`, { status: 502 });
   }
   if (!saved) return new Response("保存した動画が見つかりません", { status: 404 });
-  const { blob } = saved;
   const out = new Headers();
-  out.set("content-type", saved.contentType || blob.blob.contentType || "video/mp4");
+  out.set("content-type", saved.contentType || "video/mp4");
   out.set("accept-ranges", "bytes");
   out.set("cache-control", "private, max-age=3600");
   out.set("x-content-type-options", "nosniff");
   for (const name of ["content-length", "content-range", "etag", "last-modified"]) {
-    const v = blob.headers.get(name);
+    const v = saved.headers.get(name);
     if (v) out.set(name, v);
   }
   if (params.get("dl") === "1") {
@@ -39,5 +38,5 @@ export async function GET(request: Request) {
     const name = `${base}.${ext}`;
     out.set("content-disposition", `attachment; filename="${name.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(name)}`);
   }
-  return new Response(blob.stream, { status: blob.headers.get("content-range") ? 206 : 200, headers: out });
+  return new Response(saved.stream, { status: saved.headers.get("content-range") ? 206 : 200, headers: out });
 }
