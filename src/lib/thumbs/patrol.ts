@@ -51,6 +51,9 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
   const due = await pool.query<{ url: string; settings: PatrolSettings }>(
     `select url, settings from thumbs_patrol_sites
      where interval_min > 0 and ($1 or last_run is null or last_run < now() - make_interval(mins => interval_min))
+       -- 前回の巡回が「Gofile に止められている」で終わったサイトは、60 分たつまで巡回しない
+       -- （15 分ごとに問い合わせ続けると、Gofile の制限が解けず、手で取得したときも最初から止められるため）
+       and ($1 or last_note is null or last_note not like '%一時的に止めています%' or last_run < now() - interval '60 minutes')
      order by last_run asc nulls first limit 10`,
     [force],
   );
