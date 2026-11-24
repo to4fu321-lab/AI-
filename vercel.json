@@ -8,5 +8,6 @@
       "path": "/api/cron/thumbs-patrol",
       "schedule": "*/15 * * * *"
     }
-  ]
+  ],
+  "ignoreCommand": "[ \"$VERCEL_ENV\" != \"production\" ]"
 }
