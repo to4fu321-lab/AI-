@@ -22,7 +22,10 @@ export interface PatrolSettings {
 
 const clampInt = (v: unknown, lo: number, hi: number, d: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : d);
 
-function optionsOf(s: PatrolSettings, extra: { exclude: string[]; gofileToken?: string; knownGofile: string[] }): CrawlOptions {
+function optionsOf(
+  s: PatrolSettings,
+  extra: { exclude: string[]; gofileToken?: string; knownGofile: string[]; knownPages?: string[]; knownTweets?: string[] },
+): CrawlOptions {
   return {
     depth: clampInt(s.depth, 0, 20, 1),
     // 1 回の巡回で読むページ数は控えめにする（時間の上限があるため）
@@ -35,6 +38,8 @@ function optionsOf(s: PatrolSettings, extra: { exclude: string[]; gofileToken?: 
     robots: s.robots !== false,
     gofileToken: extra.gofileToken,
     knownGofile: extra.knownGofile,
+    knownPages: extra.knownPages,
+    knownTweets: extra.knownTweets,
   };
 }
 
@@ -69,7 +74,20 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
     let found = 0;
     let note: string | null = null;
     try {
-      const options = optionsOf(site.settings ?? {}, { exclude, gofileToken, knownGofile: known });
+      // このサイトの巡回で、前に動画が見つかったページ・X の投稿は読み直さない（新しく増えた分だけを読む）
+      const pages = await pool.query<{ page: string | null }>(
+        "select data->>'pageUrl' as page from thumbs_patrol_items where site_url = $1 and kind = 'video' order by found_at desc limit 3000",
+        [site.url],
+      );
+      const knownPages: string[] = [];
+      const knownTweets: string[] = [];
+      for (const r of pages.rows) {
+        if (!r.page) continue;
+        const tweet = /(?:twitter|x)\.com\/[^/]+\/status\/(\d{8,20})/.exec(r.page)?.[1];
+        if (tweet) knownTweets.push(tweet);
+        else if (r.page !== site.url) knownPages.push(r.page);
+      }
+      const options = optionsOf(site.settings ?? {}, { exclude, gofileToken, knownGofile: known, knownPages, knownTweets });
       for await (const e of crawl(site.url, options, abort.signal, deadline)) {
         if (e.type === "media") {
           for (const m of e.items) found += await saveItem(site.url, m.kind === "image" ? "image" : "video", m.id, m);

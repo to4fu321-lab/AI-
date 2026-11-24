@@ -35,7 +35,33 @@ interface Job {
   resume?: CrawlState;
 }
 
-type Filter = "all" | "image" | "video";
+type Filter = "all" | "image" | "video" | "new";
+
+/** X の投稿の番号（投稿の URL・番号の入った保存サイトの URL から。なければ null） */
+const tweetIdIn = (url: string): string | null =>
+  /(?:twitter|x)\.com\/[^/?#]+\/status(?:es)?\/(\d{8,20})/.exec(url)?.[1] ?? /\/(\d{18,19})(?:[/?#]|$)/.exec(url)?.[1] ?? null;
+/** ページの URL を比べやすい形にする（# より後ろと、最後の / を外す） */
+const pageKey = (url: string) => url.replace(/#.*$/, "").replace(/\/+$/, "");
+
+/**
+ * 前に動画が見つかったページと X の投稿の番号。
+ * 取得のとき「読み直さなくてよいもの」としてサーバーに渡し、新しく増えたページだけを読んでもらう。
+ * 新しいものから、それぞれ 3000 件まで
+ */
+function knownOf(items: Item[]): { pages: string[]; tweets: string[] } {
+  const pages = new Set<string>();
+  const tweets = new Set<string>();
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "image") continue;
+    const t = /(?:twitter|x)\.com\/[^/?#]+\/status(?:es)?\/(\d{8,20})/.exec(it.pageUrl)?.[1];
+    if (t) {
+      if (tweets.size < 3000) tweets.add(t);
+    } else if (pages.size < 3000) pages.add(it.pageUrl);
+    if (pages.size >= 3000 && tweets.size >= 3000) break;
+  }
+  return { pages: [...pages], tweets: [...tweets] };
+}
 
 const STORAGE_KEY = "thumbs:v1";
 /** 履歴と登録サイトは「すべて消す」をしても残すので、別の場所に保存する */
@@ -330,6 +356,8 @@ export function ThumbsApp() {
   }, []);
   // 一覧の保存。変化が続く間は 0.5 秒待ってまとめて保存し、画面が隠れる（アプリ切り替え・閉じる）ときはすぐ保存する
   const latest = useRef({ items, jobs });
+  /** 取得の中から一覧を見るための別名（取得の中では latest が途中経過の名前に使われているため） */
+  const listNow = latest;
   const dirty = useRef(false);
   const saveNow = useCallback(() => {
     if (!loaded.current || !dirty.current) return;
@@ -434,6 +462,11 @@ export function ThumbsApp() {
                 // ブラウザから送られてきたページの中身（最初の 1 回だけ送る）
                 html: current ? undefined : html,
                 knownGofile: [...gofileKnown.current.keys()].slice(-MAX_GOFILE_KNOWN),
+                // 前に動画が見つかったページ・投稿は読み直さない（新しく増えた分だけを読む）
+                ...(() => {
+                  const k = knownOf(listNow.current.items);
+                  return { knownPages: k.pages, knownTweets: k.tweets };
+                })(),
               }),
               signal: controller.signal,
             });
@@ -539,7 +572,7 @@ export function ThumbsApp() {
         recordHistory({ url, at: startedAt, pages: pageCount, found: foundCount, settings });
       }
     },
-    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory, saveKnown],
+    [depth, maxPages, maxPagination, crossSite, render, kinds, robots, updateJob, recordHistory, saveKnown, listNow],
   );
 
   const resumeJob = useCallback(
@@ -1003,10 +1036,15 @@ export function ThumbsApp() {
     () =>
       shown.filter(
         (i) =>
-          (filter === "all" || (filter === "image" ? i.kind === "image" : i.kind !== "image")) &&
+          (filter === "all" ||
+            (filter === "new"
+              ? newSince > 0 && (i.addedAt ?? 0) >= newSince
+              : filter === "image"
+                ? i.kind === "image"
+                : i.kind !== "image")) &&
           (!jobFilter || i.jobId === jobFilter),
       ),
-    [shown, filter, jobFilter],
+    [shown, filter, jobFilter, newSince],
   );
   const viewerIndex = viewerId ? visible.findIndex((i) => i.id === viewerId) : -1;
   const viewer = viewerIndex >= 0 ? viewerIndex : null;
@@ -1014,8 +1052,27 @@ export function ThumbsApp() {
   const counts = useMemo(() => {
     const scoped = jobFilter ? shown.filter((i) => i.jobId === jobFilter) : shown;
     const video = scoped.filter(isVideoLike).length;
-    return { all: scoped.length, image: scoped.length - video, video };
-  }, [shown, jobFilter]);
+    const fresh = newSince > 0 ? scoped.filter((i) => (i.addedAt ?? 0) >= newSince).length : 0;
+    return { all: scoped.length, image: scoped.length - video, video, new: fresh };
+  }, [shown, jobFilter, newSince]);
+
+  /**
+   * 「サイトで開く」のタイルのうち、もう動画が取れているページ（前の取得で読めた・X の投稿の番号が同じ）は出さない。
+   * 確認を求められて読めなかっただけで、動画は一覧にあるため
+   */
+  const knownForGated = useMemo(() => {
+    const k = knownOf(items);
+    return { pages: new Set(k.pages.map(pageKey)), tweets: new Set(k.tweets) };
+  }, [items]);
+  const gatedLeft = useCallback(
+    (list: Gated[] | undefined) =>
+      list?.filter((g) => {
+        if (knownForGated.pages.has(pageKey(g.url))) return false;
+        const t = tweetIdIn(g.url);
+        return !(t && knownForGated.tweets.has(t));
+      }),
+    [knownForGated],
+  );
 
   const running = jobs.some((j) => j.status === "running");
   const foundByJob = useMemo(() => {
@@ -1322,7 +1379,7 @@ export function ThumbsApp() {
             {jobs.map((job) => (
               <JobRow
                 key={job.id}
-                job={job}
+                job={{ ...job, gated: gatedLeft(job.gated) }}
                 found={foundByJob.get(job.id) ?? 0}
                 active={jobFilter === job.id}
                 onSelect={() => setJobFilter(jobFilter === job.id ? null : job.id)}
@@ -1346,8 +1403,11 @@ export function ThumbsApp() {
                 ["all", "すべて"],
                 ["image", "🖼 画像"],
                 ["video", "🎬 動画"],
+                ["new", "🆕 新着"],
               ] as const
-            ).map(([value, label]) => (
+            )
+              .filter(([value]) => value !== "new" || counts.new > 0 || filter === "new")
+              .map(([value, label]) => (
               <button
                 key={value}
                 type="button"

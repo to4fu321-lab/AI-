@@ -35,6 +35,8 @@ export async function POST(request: Request) {
     skipHosts?: unknown;
     html?: unknown;
     knownGofile?: unknown;
+    knownPages?: unknown;
+    knownTweets?: unknown;
     gofileToken?: unknown;
     resume?: unknown;
   };
@@ -71,6 +73,12 @@ export async function POST(request: Request) {
     gofileOnly: body.gofileOnly === true,
     knownGofile: Array.isArray(body.knownGofile)
       ? body.knownGofile.filter((c): c is string => typeof c === "string" && /^[\w-]{4,40}$/.test(c)).slice(0, 5000)
+      : [],
+    knownPages: Array.isArray(body.knownPages)
+      ? body.knownPages.filter((u): u is string => typeof u === "string" && u.length < 2000 && /^https?:\/\//i.test(u)).slice(0, 5000)
+      : [],
+    knownTweets: Array.isArray(body.knownTweets)
+      ? body.knownTweets.filter((t): t is string => typeof t === "string" && /^\d{8,20}$/.test(t)).slice(0, 5000)
       : [],
     rootHtml: typeof body.html === "string" && body.html.length > 50 ? body.html.slice(0, 3_000_000) : undefined,
     skipHosts: Array.isArray(body.skipHosts) ? body.skipHosts.filter((h): h is string => typeof h === "string" && h.length < 30).slice(0, 10) : [],
