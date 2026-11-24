@@ -142,7 +142,7 @@ export function proxyUrl(
 }
 
 /** 確かめてからこの時間がたったものは、確かめ直してから表示する（期限付きの URL が切れることがあるため） */
-const CHECK_FRESH_MS = 6 * 60 * 60 * 1000;
+const CHECK_FRESH_MS = 24 * 60 * 60 * 1000;
 
 /** リンク切れでないと、最近確かめてあるか */
 const isFresh = (item: MediaItem, now: number) => typeof item.checked === "number" && now - item.checked < CHECK_FRESH_MS;
@@ -976,18 +976,18 @@ export function ThumbsApp() {
     if (e.touches.length < 2) pinch.current = null;
   };
 
-  // --- リンク切れを最初から出さない ---
-  // 表示するのは「最近リンク切れでないと確かめたもの」だけ。
-  // 以前に保存した一覧などで確かめていないもの・時間がたったものは、裏で確かめ直し、見られるものだけ表示に加える
-  const shown = useMemo(() => items.filter((i) => isFresh(i, now)), [items, now]);
+  // --- 以前の一覧のリンク切れ ---
+  // 一覧はすぐ全部表示し、裏で確かめて、リンク切れと決まったものだけ外す（確かめ終わるまで隠すと、数百件あると長く何も見えないため）。
+  // サーバーに確かめるのは動画だけ。画像は表示するときに読み込めなければ、その場で一覧から外れる（サーバーの通信を使わない）
+  const shown = items;
   /** 確かめに出したもの（同じものを何度も聞かない） */
   const asked = useRef(new Set<string>());
-  /** 確かめられなかった（通信の失敗など）もの。表示はしない */
+  /** 確かめられなかった（通信の失敗など）もの。表示はそのまま */
   const [unsure, setUnsure] = useState(0);
   useEffect(() => {
     if (!loaded.current || !now) return;
     for (const item of items) {
-      if (isFresh(item, now) || asked.current.has(item.id)) continue;
+      if (item.kind === "image" || isFresh(item, now) || asked.current.has(item.id)) continue;
       asked.current.add(item.id);
       void checkLink(item).then((r) => {
         if (r === "yes") setItems((l) => l.map((i) => (i.id === item.id ? { ...i, checked: Date.now() } : i)));
@@ -996,7 +996,8 @@ export function ThumbsApp() {
       });
     }
   }, [items, now]);
-  const waiting = items.length - shown.length;
+  /** まだ確かめていない以前の動画（確かめられなかったものは数えない） */
+  const waiting = Math.max(0, items.filter((i) => i.kind !== "image" && !isFresh(i, now)).length - unsure);
 
   const visible = useMemo(
     () =>
@@ -1433,9 +1434,7 @@ export function ThumbsApp() {
         </ul>
         {waiting > 0 && (
           <p className="mt-2 text-center text-xs text-neutral-400">
-            {waiting > unsure ? `🔍 以前の一覧のリンク切れを確認中… 残り ${waiting - unsure} 件` : ""}
-            {waiting > unsure && unsure > 0 ? " ・ " : ""}
-            {unsure > 0 ? `通信できず確認できなかった ${unsure} 件は表示していません（開き直すともう一度確かめます）` : ""}
+            🔍 以前の動画のリンク切れを裏で確認中… 残り {waiting} 件（一覧はそのまま見られます。切れていたものだけ消えます）
           </p>
         )}
         {items.length > 0 && visible.length === 0 && waiting === 0 && (
