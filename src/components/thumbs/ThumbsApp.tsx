@@ -31,7 +31,12 @@ type ReviveRow = {
   note: string | null;
   savedAt: number | null;
   foundAt: number | null;
+  /** Google ドライブに保存したときの、ドライブのファイルの番号 */
+  driveId?: string | null;
 };
+
+/** 保存先の Google ドライブの状態 */
+type DriveInfo = { configured: boolean; connected: boolean; email?: string; database?: boolean; redirectUri?: string };
 
 /** 保存した動画の窓口 */
 const savedUrl = (fp: string, download = false) => `/api/thumbs/revive/file?${new URLSearchParams({ fp, ...(download ? { dl: "1" } : {}) })}`;
@@ -1037,6 +1042,33 @@ export function ThumbsApp() {
     [],
   );
 
+  // --- 「復活したら保存」の保存先：Google ドライブ（つながっていなければ Vercel Blob） ---
+  const [drive, setDrive] = useState<DriveInfo | null>(null);
+  const [driveNote, setDriveNote] = useState<string | null>(null);
+  const loadDrive = useCallback(async () => {
+    const res = await fetch("/api/thumbs/drive").catch(() => null);
+    if (res?.ok) setDrive((await res.json().catch(() => null)) as DriveInfo | null);
+  }, []);
+  useEffect(() => {
+    // Google の許可画面から戻ってきたとき（?drive=connected など）の結果を出して、URL からは消す
+    const q = new URLSearchParams(location.search);
+    const result = q.get("drive");
+    if (result) {
+      const msg = q.get("driveMessage");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 戻ってきた 1 回だけ
+      setDriveNote(
+        result === "connected"
+          ? `✅ Google ドライブとつなぎました${msg ? `（${msg}）` : ""}。これからは「サムネ収集（復活保存）」フォルダに保存します`
+          : result === "notconfigured"
+            ? "Google ドライブを使う設定（Vercel の環境変数）がまだありません"
+            : `⚠ つなげませんでした：${msg ?? "不明なエラー"}`,
+      );
+      if (result === "connected" || result === "error") setFilter("dead");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    void loadDrive();
+  }, [loadDrive]);
+
   // --- 「復活したら保存」：サーバーが見張っている動画と、その状態 ---
   const [revive, setRevive] = useState<Map<string, ReviveRow>>(new Map());
   const [reviveOn, setReviveOn] = useState(false);
@@ -1620,6 +1652,7 @@ export function ThumbsApp() {
                 ? "🔔 を付けた動画は、巡回・取得で同じ動画（同じファイル）が見つかったら、サーバーに保存します。"
                 : "「復活したら保存」は、サーバーの保存先（データベース・Blob）が使えるときだけ使えます。"}
             </p>
+            {reviveOn && <DrivePanel drive={drive} note={driveNote} onChanged={() => void loadDrive()} />}
             <div className="flex flex-wrap gap-2">
               {reviveOn && (
                 <button
@@ -2308,6 +2341,66 @@ function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => 
   );
 }
 
+/** 「復活したら保存」の保存先（Google ドライブ・Vercel Blob）の表示と、Google ドライブをつなぐ・切る */
+function DrivePanel({ drive, note, onChanged }: { drive: DriveInfo | null; note: string | null; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  if (!drive) return null;
+  return (
+    <div className="space-y-1.5 rounded-lg bg-white/60 px-2.5 py-2 dark:bg-black/20">
+      {note && <p className="font-semibold">{note}</p>}
+      {drive.connected ? (
+        <p className="flex flex-wrap items-center gap-2">
+          <span>
+            💾 保存先：<b>Google ドライブ</b>
+            {drive.email ? `（${drive.email}）` : ""}の「サムネ収集（復活保存）」フォルダ
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              if (!confirm("Google ドライブとのつながりを切りますか？（保存した動画はドライブに残ります。これからは Vercel Blob に保存します）")) return;
+              setBusy(true);
+              await fetch("/api/thumbs/drive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "disconnect" }) }).catch(() => null);
+              setBusy(false);
+              onChanged();
+            }}
+            className="rounded-full bg-black/10 px-2.5 py-1 font-semibold dark:bg-white/10"
+          >
+            つながりを切る
+          </button>
+        </p>
+      ) : drive.configured ? (
+        <p className="flex flex-wrap items-center gap-2">
+          <span>💾 保存先：Vercel Blob（非公開）</span>
+          <a href="/api/thumbs/drive/connect" className="rounded-full bg-sky-600 px-3 py-1 font-bold text-white">
+            Google ドライブとつなぐ
+          </a>
+        </p>
+      ) : (
+        <details>
+          <summary className="cursor-pointer">💾 保存先：Vercel Blob（非公開）・Google ドライブに保存するには（設定の手順）</summary>
+          <ol className="mt-1.5 list-decimal space-y-1 pl-5">
+            <li>
+              <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer" className="underline">
+                Google Cloud
+              </a>
+              でプロジェクトを作り、「Google Drive API」を有効にする
+            </li>
+            <li>「OAuth 同意画面」を作り（外部・アプリ名は自由）、スコープに drive.file を入れて「公開（本番）」にする（テスト中のままだと 7 日ごとにつなぎ直しが必要）</li>
+            <li>
+              「認証情報」→「OAuth クライアント ID」（ウェブ アプリケーション）を作り、「承認済みのリダイレクト URI」に次を登録する：
+              <br />
+              <code className="break-all select-all rounded bg-black/10 px-1 dark:bg-white/10">{drive.redirectUri}</code>
+            </li>
+            <li>できたクライアント ID とシークレットを、Vercel の環境変数 GOOGLE_DRIVE_CLIENT_ID・GOOGLE_DRIVE_CLIENT_SECRET に入れて、配置し直す</li>
+            <li>この欄に出る「Google ドライブとつなぐ」を押して許可する</li>
+          </ol>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function Viewer({
   items,
   index,
@@ -2555,6 +2648,16 @@ function Viewer({
             {saved && (
               <a href={savedUrl(saved, true)} className="flex-1 rounded-full bg-emerald-600 py-2.5 text-center text-sm font-bold">
                 ⬇ 保存した動画をダウンロード
+              </a>
+            )}
+            {saved && row?.driveId && (
+              <a
+                href={`https://drive.google.com/file/d/${encodeURIComponent(row.driveId)}/view`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-full bg-white/10 px-3 py-2.5 text-center text-sm font-semibold"
+              >
+                ドライブで開く
               </a>
             )}
             <button type="button" onClick={() => onRemove(item)} className="flex-1 rounded-full bg-white/10 py-2.5 text-sm font-semibold">

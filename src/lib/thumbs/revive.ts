@@ -1,6 +1,7 @@
 import "server-only";
 import { del, get, put } from "@vercel/blob";
 import { db } from "./db";
+import { deleteFromDrive, driveConfigured, driveTarget, readFromDrive, uploadToDrive } from "./drive";
 import { CookieJar, safeFetch, thumbsLog } from "./safeFetch";
 import { mediaMime } from "./sniff";
 import type { MediaItem } from "./types";
@@ -22,6 +23,11 @@ const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const STUCK_MS = 15 * 60 * 1000;
 
 export function reviveConfigured(): boolean {
+  return blobConfigured() || driveConfigured();
+}
+
+/** Vercel Blob（保存先その 1）が使えるか */
+function blobConfigured(): boolean {
   return !!process.env.BLOB_READ_WRITE_TOKEN;
 }
 
@@ -34,6 +40,8 @@ export interface ReviveRow {
   note: string | null;
   savedAt: number | null;
   foundAt: number | null;
+  /** Google ドライブに保存したときの、ドライブのファイルの番号 */
+  driveId: string | null;
 }
 
 /** 指紋として正しい形か（"大きさ:要約"） */
@@ -67,8 +75,9 @@ export async function listRevive(): Promise<ReviveRow[]> {
     note: string | null;
     saved_at: string | null;
     found_at: string | null;
+    blob_path: string | null;
   }>(
-    `select fp, status, title, thumb, size, note,
+    `select fp, status, title, thumb, size, note, blob_path,
             extract(epoch from saved_at) * 1000 as saved_at, extract(epoch from found_at) * 1000 as found_at
      from thumbs_revive order by updated_at desc limit 5000`,
   );
@@ -81,6 +90,7 @@ export async function listRevive(): Promise<ReviveRow[]> {
     note: x.note,
     savedAt: x.saved_at === null ? null : Math.round(Number(x.saved_at)),
     foundAt: x.found_at === null ? null : Math.round(Number(x.found_at)),
+    driveId: x.blob_path?.startsWith("drive:") ? x.blob_path.slice(6) : null,
   }));
 }
 
@@ -115,7 +125,9 @@ export async function unwatchPrints(fps: string[], withFile: boolean): Promise<n
   if (withFile) {
     const rows = await pool.query<{ blob_path: string | null }>("select blob_path from thumbs_revive where fp = any($1) and blob_path is not null", [ok]);
     const paths = rows.rows.map((r) => r.blob_path!).filter(Boolean);
-    if (paths.length && reviveConfigured()) await del(paths).catch(() => {});
+    const blobs = paths.filter((p) => !p.startsWith("drive:"));
+    if (blobs.length && blobConfigured()) await del(blobs).catch(() => {});
+    for (const p of paths.filter((x) => x.startsWith("drive:"))) await deleteFromDrive(p.slice(6)).catch(() => {});
     const r = await pool.query("delete from thumbs_revive where fp = any($1)", [ok]);
     return r.rowCount ?? 0;
   }
@@ -187,7 +199,7 @@ export async function saveFound(budgetMs: number): Promise<{ saved: number; fail
     if (!row) break;
     tried.push(row.fp);
     try {
-      const result = await saveOne(row.fp, row.found_src, row.found_referer ?? undefined, row.found_cookie ?? undefined, left - 10000);
+      const result = await saveOne(row.fp, row.found_src, row.found_referer ?? undefined, row.found_cookie ?? undefined, left - 10000, row.title);
       await pool.query(
         `update thumbs_revive set status = 'saved', blob_path = $2, size = $3, content_type = $4, saved_at = now(), note = null, updated_at = now() where fp = $1`,
         [row.fp, result.path, result.size, result.type],
@@ -206,7 +218,7 @@ export async function saveFound(budgetMs: number): Promise<{ saved: number; fail
 }
 
 /** 1 本を元のサイトから読みながら、そのまま Blob に書く（サーバーには貯めない） */
-async function saveOne(fp: string, src: string, referer: string | undefined, cookie: string | undefined, budgetMs: number) {
+async function saveOne(fp: string, src: string, referer: string | undefined, cookie: string | undefined, budgetMs: number, title?: string | null) {
   const signal = AbortSignal.timeout(Math.max(10000, budgetMs));
   const headers: Record<string, string> = { accept: "video/*,*/*;q=0.5" };
   if (referer) headers.referer = referer;
@@ -267,18 +279,43 @@ async function saveOne(fp: string, src: string, referer: string | undefined, coo
       void reader.cancel().catch(() => {});
     },
   });
+  // Google ドライブがつながっていれば、ドライブの「サムネ収集（復活保存）」フォルダへ。なければ Vercel Blob（非公開）へ
+  const drive = await driveTarget();
+  if (drive) {
+    const name = `${(title || fp).replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 100)}.${EXT_BY_TYPE[type] ?? "mp4"}`;
+    const file = await uploadToDrive(drive, name, type, counted, Number.isFinite(total) && total > 0 ? total : undefined, signal);
+    return { path: `drive:${file.id}`, size: file.size || size, type };
+  }
+  if (!blobConfigured()) {
+    await reader.cancel().catch(() => {});
+    throw new Error("保存先がありません（Google ドライブをつなぐか、Vercel Blob を用意してください）");
+  }
   await put(path, counted, { access: "private", contentType: type, multipart: true, allowOverwrite: true, addRandomSuffix: false, abortSignal: signal });
   return { path, size, type };
 }
 
 /** 保存した動画を読む（Range に対応。見つからなければ null） */
-export async function openSaved(fp: string, range: string | null) {
-  if (!isPrint(fp) || !reviveConfigured()) return null;
+export async function openSaved(
+  fp: string,
+  range: string | null,
+): Promise<{ stream: ReadableStream<Uint8Array>; headers: Headers; title: string | null; contentType: string | null; path: string } | null> {
+  if (!isPrint(fp)) return null;
   const pool = await db().catch(() => null);
   if (!pool) return null;
   const row = (await pool.query<{ blob_path: string | null; title: string | null; content_type: string | null }>("select blob_path, title, content_type from thumbs_revive where fp = $1 and status = 'saved'", [fp])).rows[0];
   if (!row?.blob_path) return null;
+  if (row.blob_path.startsWith("drive:")) {
+    // Google ドライブに保存したもの
+    const res = await readFromDrive(row.blob_path.slice(6), range);
+    if (!res.ok || !res.body) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+    return { stream: res.body, headers: res.headers, title: row.title, contentType: row.content_type, path: row.blob_path };
+  }
+  if (!blobConfigured()) return null;
   const blob = await get(row.blob_path, { access: "private", headers: range ? { range } : undefined });
   if (!blob || blob.statusCode !== 200) return null;
-  return { blob, title: row.title, contentType: row.content_type, path: row.blob_path };
+  // （Blob の部品が返す Headers は、型の定義だけが標準と少し違う。中身は同じ）
+  return { stream: blob.stream as ReadableStream<Uint8Array>, headers: blob.headers as unknown as Headers, title: row.title, contentType: row.content_type ?? blob.blob.contentType, path: row.blob_path };
 }
