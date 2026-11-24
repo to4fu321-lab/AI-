@@ -2,6 +2,7 @@ import "server-only";
 import { crawl } from "./crawl";
 import { db } from "./db";
 import { thumbsLog } from "./safeFetch";
+import { noticeFound, saveFound, watchedPrints } from "./revive";
 import type { CrawlOptions, MediaItem } from "./types";
 
 /**
@@ -65,6 +66,9 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
   await pool.query("delete from thumbs_patrol_gofile where at < now() - interval '3 days'");
   const known = (await pool.query<{ code: string }>("select code from thumbs_patrol_gofile order by at desc limit 5000")).rows.map((r) => r.code);
 
+  // 「復活したら保存」で見張っている動画の指紋
+  const watched = await watchedPrints().catch(() => new Set<string>());
+  let revived = 0;
   let ran = 0;
   let total = 0;
   for (const site of due.rows) {
@@ -94,6 +98,7 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
       const options = optionsOf(site.settings ?? {}, { exclude, gofileToken, knownGofile: known, knownPages, knownTweets });
       for await (const e of crawl(site.url, options, abort.signal, deadline)) {
         if (e.type === "media") {
+          if (watched.size) revived += await noticeFound(e.items, watched).catch(() => 0);
           for (const m of e.items) found += await saveItem(site.url, m.kind === "image" ? "image" : "video", m.id, m);
         } else if (e.type === "gated") {
           found += await saveItem(site.url, "gated", `gated:${e.url}`, { url: e.url, thumb: e.thumb, title: e.title, duration: e.duration, video: e.video, app: e.app });
@@ -116,6 +121,12 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
     thumbsLog(`patrol ${site.url.slice(0, 80)} 新しく ${found} 件 ${Date.now() - started}ms ${note ? note.slice(0, 80) : ""}`);
     ran++;
     total += found;
+  }
+  // 見張っていた動画が見つかっていれば、残りの時間で保存する（今回見つけたもの・前に見つけて保存しきれなかったもの）
+  const left = budgetMs - (Date.now() - started);
+  if (left > 40000) {
+    const r = await saveFound(left - 20000).catch(() => ({ saved: 0, failed: 0 }));
+    if (r.saved || r.failed || revived) thumbsLog(`revive 見つけた ${revived} 件・保存 ${r.saved} 件・失敗 ${r.failed} 件`);
   }
   // 2 週間たったものは捨てる（画面が受け取り済みのはずなので）
   await pool.query("delete from thumbs_patrol_items where found_at < now() - interval '14 days'");

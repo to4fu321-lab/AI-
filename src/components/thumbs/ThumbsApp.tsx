@@ -5,14 +5,80 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CrawlEvent, CrawlState, MediaItem } from "@/lib/thumbs/types";
 import { getVideoDuration, getVideoThumb, peekVideoDuration, peekVideoThumb } from "./videoThumb";
 import { formatDuration } from "@/lib/thumbs/duration";
-import { dedupeMedia, SeenMedia } from "@/lib/thumbs/dedupe";
+import { dedupeMedia, mediaKey, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { videoApiUrls } from "@/lib/thumbs/videoApis";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
 /** addedAt：この一覧に加わった時刻（今回の取得で増えたものに NEW の印を付ける） */
-type Item = MediaItem & { jobId: string; addedAt?: number };
+type Item = MediaItem & {
+  jobId: string;
+  addedAt?: number;
+  /** リンク切れと確かめた時刻。一覧には残し（⚠ の印）、消すのは手動 */
+  dead?: number;
+  /** リンク切れから、同じ動画が見つかって生き返った時刻 */
+  revivedAt?: number;
+};
+
+/** 「復活したら保存」の見張り（サーバーが覚えているもの） */
+type ReviveRow = {
+  fp: string;
+  status: "watch" | "found" | "saving" | "saved" | "failed";
+  title: string | null;
+  thumb: string | null;
+  size: number | null;
+  note: string | null;
+  savedAt: number | null;
+  foundAt: number | null;
+};
+
+/** 保存した動画の窓口 */
+const savedUrl = (fp: string, download = false) => `/api/thumbs/revive/file?${new URLSearchParams({ fp, ...(download ? { dl: "1" } : {}) })}`;
+
+/**
+ * 届いた画像・動画のうち、リンク切れの印の付いたものと同じもの（同じ指紋＝同じファイル・同じファイルの URL）は、
+ * 新しく足さずに、その印の付いたものを生き返らせる（場所・見張りの設定はそのまま、URL だけ新しいものにする）
+ */
+function reviveArrivals(prev: Item[], incoming: MediaItem[], stamp: number): { list: Item[]; rest: MediaItem[] } {
+  const deadAt = new Map<string, number>();
+  prev.forEach((it, idx) => {
+    if (!it.dead) return;
+    deadAt.set(`k:${mediaKey(it)}`, idx);
+    if (it.fp) deadAt.set(`f:${it.fp}`, idx);
+  });
+  if (!deadAt.size) return { list: prev, rest: incoming };
+  let list = prev;
+  const rest: MediaItem[] = [];
+  for (const m of incoming) {
+    let idx = m.fp ? deadAt.get(`f:${m.fp}`) : undefined;
+    if (idx === undefined) idx = deadAt.get(`k:${mediaKey(m)}`);
+    if (idx === undefined || !m.checked) {
+      rest.push(m);
+      continue;
+    }
+    if (list === prev) list = [...prev];
+    const old = list[idx];
+    list[idx] = {
+      ...old,
+      src: m.src,
+      thumb: m.thumb ?? old.thumb,
+      pageUrl: m.pageUrl,
+      referer: m.referer,
+      cookie: m.cookie,
+      format: m.format ?? old.format,
+      duration: m.duration ?? old.duration,
+      fp: m.fp ?? old.fp,
+      checked: stamp,
+      dead: undefined,
+      revivedAt: stamp,
+      addedAt: stamp,
+    };
+    deadAt.delete(`k:${mediaKey(old)}`);
+    if (old.fp) deadAt.delete(`f:${old.fp}`);
+  }
+  return { list, rest };
+}
 
 interface Job {
   id: string;
@@ -35,7 +101,7 @@ interface Job {
   resume?: CrawlState;
 }
 
-type Filter = "all" | "image" | "video" | "new";
+type Filter = "all" | "image" | "video" | "new" | "dead";
 
 /** X の投稿の番号（投稿の URL・番号の入った保存サイトの URL から。なければ null） */
 const tweetIdIn = (url: string): string | null =>
@@ -523,17 +589,21 @@ export function ThumbsApp() {
                 }
                 else if (event.type === "media") {
                   foundCount += event.items.length;
-                  setItems((prev) => {
+                  setItems((before) => {
+                    const stamp = Date.now();
+                    // リンク切れの印の付いたものと同じ動画が届いたら、それを生き返らせる
+                    const revived = reviveArrivals(before, event.items, stamp);
+                    const prev = revived.list;
+                    const incoming = revived.rest;
                     // 以前に取得して「確認できず非表示」のまま残っているものが、いま確認済みで届いたものと同じなら、
                     // 古いほうを捨てる（残しておくと、新しく届いたものが「もうある」と見なされて、ずっと表示されない）
-                    const arriving = new SeenMedia(event.items.filter((i) => i.checked));
-                    const stamp = Date.now();
-                    const list = prev.filter((i) => isFresh(i, stamp) || !arriving.has(i));
+                    const arriving = new SeenMedia(incoming.filter((i) => i.checked));
+                    const list = prev.filter((i) => isFresh(i, stamp) || i.dead || !arriving.has(i));
                     // 同じ動画（URL の後ろだけ違う・画質違い）は 2 個入れない
                     const known = new SeenMedia(list);
                     const ids = new Set(list.map((i) => i.id));
                     const fresh: Item[] = [];
-                    for (const i of event.items) {
+                    for (const i of incoming) {
                       if (ids.has(i.id) || known.has(i) || isItemExcluded(i, excludesRef.current)) continue;
                       ids.add(i.id);
                       known.add(i);
@@ -541,7 +611,7 @@ export function ThumbsApp() {
                       fresh.push({ ...i, jobId: id, checked: i.checked ? Date.now() : undefined, addedAt: Date.now() });
                     }
                     // 新しく見つけたものを上に並べる
-                    return fresh.length || list.length !== prev.length ? [...fresh, ...list].slice(0, MAX_ITEMS) : prev;
+                    return fresh.length || list.length !== before.length || prev !== before ? [...fresh, ...list].slice(0, MAX_ITEMS) : before;
                   });
                 }
               }
@@ -671,11 +741,16 @@ export function ThumbsApp() {
       newSinceRef.current = stamp;
       setNewSince(stamp);
       const media = got.filter((it) => it.kind !== "gated");
-      setItems((prev) => {
+      setItems((before) => {
+        // リンク切れの印の付いたものと同じ動画が届いたら、それを生き返らせる（生き返らせたものは、新しくは足さない）
+        const arrived = media.map((it) => it.data as unknown as MediaItem);
+        const revived = reviveArrivals(before, arrived, stamp);
+        const prev = revived.list;
+        const left = new Set(revived.rest);
         const known = new SeenMedia(prev);
         const ids = new Set(prev.map((i) => i.id));
         const add: Item[] = [];
-        for (const it of media) {
+        for (const it of media.filter((_, n) => left.has(arrived[n]))) {
           const m = it.data as unknown as MediaItem;
           if (!m || typeof m.id !== "string" || typeof m.src !== "string" || ids.has(m.id) || known.has(m) || isItemExcluded(m, excludesRef.current)) continue;
           ids.add(m.id);
@@ -956,6 +1031,74 @@ export function ThumbsApp() {
   };
 
   const hideItem = useCallback((id: string) => setItems((l) => l.filter((i) => i.id !== id)), []);
+  /** リンク切れの印を付ける（一覧からは消さない。消すのは手動） */
+  const markDead = useCallback(
+    (id: string) => setItems((l) => l.map((i) => (i.id === id && !i.dead ? { ...i, dead: Date.now(), checked: Date.now() } : i))),
+    [],
+  );
+
+  // --- 「復活したら保存」：サーバーが見張っている動画と、その状態 ---
+  const [revive, setRevive] = useState<Map<string, ReviveRow>>(new Map());
+  const [reviveOn, setReviveOn] = useState(false);
+  const reviveSaving = useRef(false);
+  const loadRevive = useCallback(async () => {
+    const res = await fetch("/api/thumbs/revive").catch(() => null);
+    if (!res?.ok) return;
+    const data = (await res.json().catch(() => null)) as { configured?: boolean; rows?: ReviveRow[] } | null;
+    if (!data?.configured) return;
+    setReviveOn(true);
+    setRevive(new Map((data.rows ?? []).map((r) => [r.fp, r])));
+    // 巡回・取得で見つけたまま保存されていないものがあれば、今すぐ保存してもらう（巡回を待たずに）
+    if (!reviveSaving.current && (data.rows ?? []).some((r) => r.status === "found")) {
+      reviveSaving.current = true;
+      void fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "save" }) })
+        .catch(() => null)
+        .finally(() => {
+          reviveSaving.current = false;
+          void loadRevive();
+        });
+    }
+  }, []);
+  useEffect(() => {
+    const first = setTimeout(() => void loadRevive(), 2500);
+    const timer = setInterval(() => void loadRevive(), 3 * 60 * 1000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [loadRevive]);
+  /** 🔔 を付ける・外す（指紋のない動画は見分けられないので付けられない） */
+  const setWatch = useCallback(
+    async (list: Item[], on: boolean) => {
+      const withPrint = list.filter((i) => i.kind === "video" && i.fp);
+      if (!withPrint.length) return 0;
+      const body = on
+        ? { action: "watch", items: withPrint.map((i) => ({ fp: i.fp, title: i.title, thumb: i.thumb, pageUrl: i.pageUrl })) }
+        : { action: "unwatch", fps: withPrint.map((i) => i.fp) };
+      await fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+      await loadRevive();
+      return withPrint.length;
+    },
+    [loadRevive],
+  );
+  /** 一覧から消す（保存した動画があるものは、保存した動画も消すか聞く） */
+  const removeItems = useCallback(
+    async (list: Item[]) => {
+      const saved = list.filter((i) => i.fp && revive.get(i.fp)?.status === "saved");
+      if (saved.length && !confirm(`保存した動画が ${saved.length} 本あります。保存した動画も消しますか？\n（「キャンセル」で、保存した動画のあるものは一覧に残します）`)) {
+        const keep = new Set(saved.map((i) => i.id));
+        list = list.filter((i) => !keep.has(i.id));
+      } else if (saved.length) {
+        await fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", fps: saved.map((i) => i.fp) }) }).catch(() => null);
+      }
+      const watching = list.filter((i) => i.fp && revive.has(i.fp) && revive.get(i.fp)?.status !== "saved");
+      if (watching.length) await setWatch(watching, false);
+      const ids = new Set(list.map((i) => i.id));
+      setItems((l) => l.filter((i) => !ids.has(i.id)));
+      void loadRevive();
+    },
+    [revive, setWatch, loadRevive],
+  );
   /** 画面で調べた再生時間を、一覧に覚えさせる（保存されるので、次からは調べ直さない） */
   const setDuration = useCallback(
     (id: string, duration: number) =>
@@ -1023,12 +1166,13 @@ export function ThumbsApp() {
       if (item.kind === "image" || isFresh(item, now) || asked.current.has(item.id)) continue;
       asked.current.add(item.id);
       void checkLink(item).then((r) => {
-        if (r === "yes") setItems((l) => l.map((i) => (i.id === item.id ? { ...i, checked: Date.now() } : i)));
-        else if (r === "no") setItems((l) => l.filter((i) => i.id !== item.id));
+        // 見られる：確かめた時刻を付ける（リンク切れの印があれば外す）／リンク切れ：印を付けて残す
+        if (r === "yes") setItems((l) => l.map((i) => (i.id === item.id ? { ...i, checked: Date.now(), dead: undefined } : i)));
+        else if (r === "no") markDead(item.id);
         else setUnsure((n) => n + 1);
       });
     }
-  }, [items, now]);
+  }, [items, now, markDead]);
   /** まだ確かめていない以前の動画（確かめられなかったものは数えない） */
   const waiting = Math.max(0, items.filter((i) => i.kind !== "image" && !isFresh(i, now)).length - unsure);
 
@@ -1039,9 +1183,11 @@ export function ThumbsApp() {
           (filter === "all" ||
             (filter === "new"
               ? newSince > 0 && (i.addedAt ?? 0) >= newSince
-              : filter === "image"
-                ? i.kind === "image"
-                : i.kind !== "image")) &&
+              : filter === "dead"
+                ? !!i.dead
+                : filter === "image"
+                  ? i.kind === "image"
+                  : i.kind !== "image")) &&
           (!jobFilter || i.jobId === jobFilter),
       ),
     [shown, filter, jobFilter, newSince],
@@ -1053,7 +1199,8 @@ export function ThumbsApp() {
     const scoped = jobFilter ? shown.filter((i) => i.jobId === jobFilter) : shown;
     const video = scoped.filter(isVideoLike).length;
     const fresh = newSince > 0 ? scoped.filter((i) => (i.addedAt ?? 0) >= newSince).length : 0;
-    return { all: scoped.length, image: scoped.length - video, video, new: fresh };
+    const dead = scoped.filter((i) => i.dead).length;
+    return { all: scoped.length, image: scoped.length - video, video, new: fresh, dead };
   }, [shown, jobFilter, newSince]);
 
   /**
@@ -1404,9 +1551,10 @@ export function ThumbsApp() {
                 ["image", "🖼 画像"],
                 ["video", "🎬 動画"],
                 ["new", "🆕 新着"],
+                ["dead", "⚠ リンク切れ"],
               ] as const
             )
-              .filter(([value]) => value !== "new" || counts.new > 0 || filter === "new")
+              .filter(([value]) => (value !== "new" && value !== "dead") || counts[value] > 0 || filter === value)
               .map(([value, label]) => (
               <button
                 key={value}
@@ -1464,6 +1612,43 @@ export function ThumbsApp() {
 
         {items.length === 0 && jobs.length === 0 && <EmptyState />}
 
+        {filter === "dead" && visible.length > 0 && (
+          <div className="mt-2 space-y-2 rounded-xl border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+            <p>
+              リンク切れの {visible.length} 件です。一覧には残してあります（消すのは手動）。
+              {reviveOn
+                ? "🔔 を付けた動画は、巡回・取得で同じ動画（同じファイル）が見つかったら、サーバーに保存します。"
+                : "「復活したら保存」は、サーバーの保存先（データベース・Blob）が使えるときだけ使えます。"}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {reviveOn && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void setWatch(visible, true).then((n) =>
+                      alert(n ? `${n} 本に 🔔 を付けました` : "🔔 を付けられる動画がありませんでした（見分ける指紋のない動画・画像には付けられません）"),
+                    )
+                  }
+                  className="rounded-full bg-amber-500 px-3 py-1.5 font-bold text-white"
+                >
+                  🔔 全部「復活したら保存」にする
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  const list = visible.filter((i) => !(i.fp && (revive.get(i.fp)?.status === "watch" || revive.get(i.fp)?.status === "saved")));
+                  if (!list.length) return alert("消せるものがありません（🔔・💾 の付いたものは残します）");
+                  if (confirm(`🔔・💾 の付いていないリンク切れ ${list.length} 件を一覧から消しますか？`)) void removeItems(list);
+                }}
+                className="rounded-full bg-white/70 px-3 py-1.5 font-bold text-amber-900 dark:bg-black/30 dark:text-amber-100"
+              >
+                🗑 印のないリンク切れを消す
+              </button>
+            </div>
+          </div>
+        )}
+
         <ul
           ref={gridRef}
           onTouchStart={onGridTouchStart}
@@ -1487,6 +1672,8 @@ export function ThumbsApp() {
                 small={tile <= 1}
                 onOpen={() => setViewer(index)}
                 onBroken={hideItem}
+                onDead={markDead}
+                revive={item.fp ? revive.get(item.fp) : undefined}
                 onDuration={setDuration}
               />
             </li>
@@ -1494,7 +1681,7 @@ export function ThumbsApp() {
         </ul>
         {waiting > 0 && (
           <p className="mt-2 text-center text-xs text-neutral-400">
-            🔍 以前の動画のリンク切れを裏で確認中… 残り {waiting} 件（一覧はそのまま見られます。切れていたものだけ消えます）
+            🔍 以前の動画のリンク切れを裏で確認中… 残り {waiting} 件（一覧はそのまま見られます。切れていたものには ⚠ の印が付きます）
           </p>
         )}
         {items.length > 0 && visible.length === 0 && waiting === 0 && (
@@ -1509,11 +1696,16 @@ export function ThumbsApp() {
           index={viewer}
           onIndex={setViewer}
           onClose={() => setViewer(null)}
-          onBroken={(id) => {
-            // 外したら次を表示する。最後の 1 件を外したときは、1 つ前（なければ閉じる）
+          onBroken={(id) => markDead(id)}
+          reviveOn={reviveOn}
+          revive={revive}
+          onWatch={(item, on) => void setWatch([item], on)}
+          onRemove={(item) => {
+            if (!confirm("一覧から消しますか？")) return;
+            // 消したら次を表示する。最後の 1 件を消したときは、1 つ前（なければ閉じる）
             const nextItem = visible[viewer + 1] ?? visible[viewer - 1];
             setViewerId(nextItem ? nextItem.id : null);
-            hideItem(id);
+            void removeItems([item]);
           }}
           onExclude={(host) => {
             if (!confirm(`${host} を除外リストに追加して、一覧から消しますか？\n（次からこのサイトは取得しません）`)) return;
@@ -1835,10 +2027,16 @@ function Thumb({
   small,
   onOpen,
   onBroken,
+  onDead,
+  revive,
   onDuration,
 }: {
   /** 今回の取得で増えたもの（NEW の印と枠を付ける） */
   isNew: boolean;
+  /** 読み込めなかった画像に、リンク切れの印を付ける */
+  onDead: (id: string) => void;
+  /** 「復活したら保存」の状態（見張っていなければ undefined） */
+  revive?: ReviveRow;
   item: Item;
   shape: Shape;
   /** 大きく表示しているとき（題名も出す） */
@@ -1913,7 +2111,7 @@ function Thumb({
 
   const onError = () => {
     if (attempt === 0) setAttempt(1);
-    else if (item.kind === "image") onBroken(item.id);
+    else if (item.kind === "image") onDead(item.id);
     else setImgFailed(true);
   };
 
@@ -1958,9 +2156,25 @@ function Thumb({
       onClick={onOpen}
       className={`group relative block w-full overflow-hidden rounded-lg bg-neutral-200 active:scale-[0.97] dark:bg-neutral-800 ${
         shape === "wide" ? "aspect-video" : "aspect-square"
-      } ${isNew ? "ring-2 ring-amber-400" : ""}`}
+      } ${isNew ? "ring-2 ring-amber-400" : ""} ${item.dead && revive?.status !== "saved" ? "opacity-60 grayscale" : ""}`}
     >
       {media}
+      {(item.dead || revive) && (
+        <span
+          className={`absolute left-1 rounded-md font-bold text-white shadow ${small ? "top-4 px-1 text-[8px]" : "top-7 px-1.5 py-0.5 text-[10px]"} ${
+            revive?.status === "saved" ? "bg-emerald-600/95" : item.dead ? "bg-neutral-700/95" : "bg-amber-500/95"
+          }`}
+        >
+          {revive?.status === "saved"
+            ? small
+              ? "💾"
+              : "💾 保存済み"
+            : [item.dead ? (small ? "⚠" : "⚠ リンク切れ") : "", revive ? (revive.status === "found" || revive.status === "saving" ? "⏳" : "🔔") : ""].filter(Boolean).join(" ")}
+        </span>
+      )}
+      {item.revivedAt && !item.dead && !small && (
+        <span className="absolute right-1 top-7 rounded-md bg-emerald-500/95 px-1.5 py-0.5 text-[10px] font-bold text-white shadow">🔁 復活</span>
+      )}
       {isNew && (
         <span
           className={`absolute right-1 top-1 rounded-md bg-amber-400 font-extrabold text-black shadow ${small ? "px-1 text-[8px]" : "px-1.5 py-0.5 text-[10px]"}`}
@@ -2101,16 +2315,28 @@ function Viewer({
   onClose,
   onExclude,
   onBroken,
+  reviveOn,
+  revive,
+  onWatch,
+  onRemove,
 }: {
   items: Item[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
   onExclude: (host: string) => void;
-  /** リンク切れで見られなかったものを一覧から外す */
+  /** リンク切れで見られなかったものに、リンク切れの印を付ける（一覧には残す） */
   onBroken: (id: string) => void;
+  /** 「復活したら保存」が使えるか（サーバーの保存先があるか） */
+  reviveOn: boolean;
+  revive: Map<string, ReviveRow>;
+  onWatch: (item: Item, on: boolean) => void;
+  /** 一覧から消す（手動） */
+  onRemove: (item: Item) => void;
 }) {
   const item = items[index];
+  const row = item.fp ? revive.get(item.fp) : undefined;
+  const saved = row?.status === "saved" && item.fp ? item.fp : null;
   /** リンク切れを外したことのお知らせ（次の動画に切り替わったあとも少し出しておく） */
   const [removed, setRemoved] = useState<string | null>(null);
   const [useProxy, setUseProxy] = useState(!!item.cookie);
@@ -2173,8 +2399,8 @@ function Viewer({
           setPlayError(`この動画はこの画面では再生できませんでした（${text || `HTTP ${res.status}`}）。「動画を直接開く」か「ダウンロード」を試してください。`);
           return;
         }
-        // 直接もサーバー経由も読めず、確かめてもリンク切れだった。一覧から外す（表示は次の動画に移る）
-        setRemoved(`リンク切れのため一覧から外しました（${text || `HTTP ${res.status}`}）`);
+        // 直接もサーバー経由も読めず、確かめてもリンク切れだった。リンク切れの印を付ける（一覧には残す）
+        setRemoved(`リンク切れでした（${text || `HTTP ${res.status}`}）。一覧に「⚠ リンク切れ」の印を付けて残しました`);
         onBroken(item.id);
       } else {
         const type = res.headers.get("content-type") ?? "不明";
@@ -2186,7 +2412,45 @@ function Viewer({
   }, [item, onBroken]);
 
   let body: React.ReactNode;
-  if (item.kind === "embed") {
+  if (saved) {
+    // 「復活したら保存」でサーバーに保存した動画（元のリンクが切れていても見られる）
+    body = (
+      <video key={`saved-${item.id}`} src={savedUrl(saved)} poster={item.thumb} controls autoPlay playsInline className="max-h-full max-w-full rounded-lg bg-black" />
+    );
+  } else if (item.dead) {
+    body = (
+      <div key={`dead-${item.id}`} className="max-w-sm space-y-3 rounded-xl bg-white/5 p-4 text-center text-sm">
+        {item.thumb && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.thumb} alt="" referrerPolicy="no-referrer" className="mx-auto max-h-48 rounded-lg opacity-60 grayscale" />
+        )}
+        <p className="font-bold">⚠ リンク切れ</p>
+        <p className="text-xs opacity-70">
+          元のファイルが消されたか、移動されました（{new Date(item.dead).toLocaleDateString("ja-JP")} に確認）。一覧には残してあります。
+        </p>
+        {item.kind === "video" &&
+          (!reviveOn ? (
+            <p className="text-[11px] opacity-60">「復活したら保存」は、サーバーの保存先（データベース・Blob）が使えるときだけ使えます</p>
+          ) : !item.fp ? (
+            <p className="text-[11px] opacity-60">この動画は、同じファイルかを見分ける指紋がないため、「復活したら保存」を付けられません</p>
+          ) : row?.status === "found" || row?.status === "saving" ? (
+            <p className="text-xs text-emerald-300">⏳ 同じ動画が見つかりました。サーバーに保存しています…</p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onWatch(item, !row)}
+              className={`w-full rounded-full py-2.5 text-sm font-bold ${row ? "bg-amber-500 text-black" : "bg-white/15"}`}
+            >
+              {row ? "🔔 復活したら保存：オン（タップで外す）" : "🔔 復活したら保存する"}
+            </button>
+          ))}
+        {row?.status === "failed" && row.note && <p className="text-[11px] text-red-300">前回の保存は失敗しました：{row.note}</p>}
+        {row && row.status === "watch" && (
+          <p className="text-[11px] opacity-60">巡回・取得で同じ動画（同じファイル）が見つかったら、サーバーに保存します</p>
+        )}
+      </div>
+    );
+  } else if (item.kind === "embed") {
     body = (
       <iframe
         key={item.id}
@@ -2286,7 +2550,19 @@ function Viewer({
             </a>
           )}
         </p>
-        <div className="flex gap-2">
+        {(saved || item.dead) && (
+          <div className="flex gap-2">
+            {saved && (
+              <a href={savedUrl(saved, true)} className="flex-1 rounded-full bg-emerald-600 py-2.5 text-center text-sm font-bold">
+                ⬇ 保存した動画をダウンロード
+              </a>
+            )}
+            <button type="button" onClick={() => onRemove(item)} className="flex-1 rounded-full bg-white/10 py-2.5 text-sm font-semibold">
+              🗑 一覧から消す
+            </button>
+          </div>
+        )}
+        <div className={`flex gap-2 ${item.dead ? "hidden" : ""}`}>
           {canDownload ? (
             <a
               href={proxyUrl(item, { download: true, name: fileName })}

@@ -55,6 +55,26 @@ export async function db(): Promise<Pool | null> {
         key text primary key,
         value jsonb not null
       );
+      create table if not exists thumbs_revive (
+        fp text primary key,
+        status text not null default 'watch',
+        title text,
+        thumb text,
+        page_url text,
+        found_src text,
+        found_page text,
+        found_referer text,
+        found_cookie text,
+        found_at timestamptz,
+        blob_path text,
+        size bigint,
+        content_type text,
+        saved_at timestamptz,
+        note text,
+        tries integer not null default 0,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
     `,
     )
     .then(() => undefined)

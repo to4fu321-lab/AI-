@@ -16,6 +16,7 @@
     "@sparticuz/chromium": "^153.0.0",
     "@supabase/supabase-js": "^2.110.5",
     "@types/pg": "^8.23.1",
+    "@vercel/blob": "^2.9.0",
     "hls.js": "^1.7.4",
     "next": "16.2.6",
     "pg": "^8.23.1",
