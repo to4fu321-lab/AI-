@@ -59,7 +59,9 @@ export async function getVideos(): Promise<BuzzVideo[]> {
       "id, platform, source_url, embed_id, title, ai_summary, category, region, channel_name, posted_at, published_at, likes, favorites, engagement_now, engagement_today, engagement_week"
     )
     .eq("is_published", true)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    // データベースにつながらないとき、トップページを長く待たせない（3 秒であきらめて見本の動画を出す）
+    .abortSignal(AbortSignal.timeout(3000));
 
   if (error) {
     console.error("Failed to fetch buzztube_videos:", error.message);
