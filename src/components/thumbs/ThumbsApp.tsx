@@ -2355,7 +2355,14 @@ function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => 
 /** 「復活したら保存」の保存先（Google ドライブ・Vercel Blob）の表示と、Google ドライブをつなぐ・切る */
 function DrivePanel({ drive, note, onChanged }: { drive: DriveInfo | null; note: string | null; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [test, setTest] = useState<{ ok: boolean; steps: { name: string; ok: boolean; ms: number; detail?: string }[] } | "running" | null>(null);
   if (!drive) return null;
+  const runTest = async () => {
+    setTest("running");
+    const res = await fetch("/api/thumbs/drive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "test" }) }).catch(() => null);
+    const data = res?.ok ? await res.json().catch(() => null) : null;
+    setTest(data ?? { ok: false, steps: [{ name: "サーバーに頼む", ok: false, ms: 0, detail: `返事がありませんでした（${res ? `HTTP ${res.status}` : "通信エラー"}）` }] });
+  };
   return (
     <div className="space-y-1.5 rounded-lg bg-white/60 px-2.5 py-2 dark:bg-black/20">
       {note && <p className="font-semibold">{note}</p>}
@@ -2378,6 +2385,14 @@ function DrivePanel({ drive, note, onChanged }: { drive: DriveInfo | null; note:
             className="rounded-full bg-black/10 px-2.5 py-1 font-semibold dark:bg-white/10"
           >
             つながりを切る
+          </button>
+          <button
+            type="button"
+            disabled={test === "running"}
+            onClick={() => void runTest()}
+            className="rounded-full bg-sky-600 px-2.5 py-1 font-semibold text-white disabled:opacity-60"
+          >
+            {test === "running" ? "🧪 テスト中…（30 秒ほど）" : "🧪 テスト保存"}
           </button>
         </p>
       ) : drive.configured ? (
@@ -2407,6 +2422,22 @@ function DrivePanel({ drive, note, onChanged }: { drive: DriveInfo | null; note:
             <li>この欄に出る「Google ドライブとつなぐ」を押して許可する</li>
           </ol>
         </details>
+      )}
+      {test && test !== "running" && (
+        <div className="rounded bg-black/5 px-2 py-1.5 dark:bg-white/5">
+          <p className="font-bold">{test.ok ? "✅ テスト成功：Google ドライブに保存できます" : "❌ テスト失敗"}</p>
+          <ul className="mt-1 space-y-0.5">
+            {test.steps.map((s) => (
+              <li key={s.name}>
+                {s.ok ? "✅" : "❌"} {s.name}
+                <span className="opacity-60">
+                  {" "}
+                  {(s.ms / 1000).toFixed(1)} 秒{s.detail ? `・${s.detail}` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

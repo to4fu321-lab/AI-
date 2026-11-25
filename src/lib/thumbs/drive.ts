@@ -248,3 +248,98 @@ export async function deleteFromDrive(fileId: string): Promise<void> {
   const token = await accessToken(s.refresh);
   await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } }).catch(() => {});
 }
+
+export interface DriveTestStep {
+  name: string;
+  ok: boolean;
+  ms: number;
+  detail?: string;
+}
+
+/**
+ * つながりの確かめ（画面の「テスト保存」）。本物のドライブに 9MB のテスト用ファイルを
+ * 分けて送って保存し、先頭と最後を読み戻して中身を比べ、消す。各段階の結果を返す
+ */
+export async function driveSelfTest(): Promise<{ ok: boolean; steps: DriveTestStep[] }> {
+  const steps: DriveTestStep[] = [];
+  const step = async <T>(name: string, run: () => Promise<{ value: T; detail?: string }>): Promise<T | null> => {
+    const t = Date.now();
+    try {
+      const { value, detail } = await run();
+      steps.push({ name, ok: true, ms: Date.now() - t, detail });
+      thumbsLog(`drive test ok: ${name}${detail ? ` (${detail})` : ""}`);
+      return value;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      steps.push({ name, ok: false, ms: Date.now() - t, detail });
+      thumbsLog(`drive test NG: ${name} ${detail}`);
+      return null;
+    }
+  };
+  const done = () => ({ ok: steps.every((s) => s.ok), steps });
+
+  const target = await step("つながりを読む", async () => {
+    const s = await loadState();
+    if (!s) throw new Error("つながっていません（もう一度「Google ドライブとつなぐ」を押してください）");
+    return { value: s, detail: s.email };
+  });
+  if (!target) return done();
+  const token = await step("Google から使う許可（アクセストークン）をもらう", async () => {
+    cachedToken = null;
+    return { value: await accessToken(target.refresh) };
+  });
+  if (!token) return done();
+  await step("保存先のフォルダがある", async () => {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(target.folderId)}?fields=id,name,trashed`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    const j = (await r.json().catch(() => ({}))) as { name?: string; trashed?: boolean };
+    if (!r.ok) throw new Error(`フォルダが見つかりません（HTTP ${r.status}）。ドライブで消した場合は、つなぎ直すと作り直します`);
+    if (j.trashed) throw new Error("フォルダがゴミ箱に入っています。ゴミ箱から戻すか、つなぎ直してください");
+    return { value: true, detail: j.name };
+  });
+
+  // 9MB（8MB の区切りをまたぐので、2 回に分けて送る）。中身は決まった並びにして、読み戻して比べる
+  const total = CHUNK + 1024 * 1024;
+  const byteAt = (i: number) => (i * 31 + (i >> 8) * 7) & 0xff;
+  let made = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (made >= total) return controller.close();
+      const n = Math.min(1024 * 1024, total - made);
+      const chunk = new Uint8Array(n);
+      for (let i = 0; i < n; i++) chunk[i] = byteAt(made + i);
+      made += n;
+      controller.enqueue(chunk);
+    },
+  });
+  const file = await step("9MB を 2 回に分けて送って保存", async () => {
+    const f = await uploadToDrive(target, "接続テスト（消えます）.bin", "application/octet-stream", body, total, AbortSignal.timeout(120000));
+    if (f.size !== total) throw new Error(`大きさが違います（${f.size} / ${total}）`);
+    return { value: f, detail: `${(total / 1024 / 1024).toFixed(0)}MB` };
+  });
+  if (!file) return done();
+  for (const [name, from] of [
+    ["先頭を読み戻して比べる", 0],
+    ["最後を読み戻して比べる（途中から読めるか）", total - 100],
+  ] as const) {
+    await step(name, async () => {
+      const r = await readFromDrive(file.id, `bytes=${from}-${from + 99}`);
+      const got = new Uint8Array(await r.arrayBuffer());
+      if (r.status !== 206) throw new Error(`途中から読めませんでした（HTTP ${r.status}）`);
+      if (got.length !== 100 || got.some((b, i) => b !== byteAt(from + i))) throw new Error("中身が違います");
+      return { value: true };
+    });
+  }
+  await step("テスト用ファイルを消す", async () => {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok && r.status !== 204) throw new Error(`消せませんでした（HTTP ${r.status}）。ドライブで手で消してください`);
+    return { value: true };
+  });
+  return done();
+}
