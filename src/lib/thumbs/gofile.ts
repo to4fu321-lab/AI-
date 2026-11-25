@@ -94,6 +94,9 @@ let chain: Promise<unknown> = Promise.resolve();
 /** ゲストの合言葉（同じサーバーが動いている間、1 時間使い回す） */
 let guest: { token: string; at: number } | null = null;
 
+/** 続けて止められた回数を、もう戻したか（同じサーバーで何度も書かないため） */
+let unblockedSaved = false;
+
 // --- 複数のサーバーで分け合う状態（データベースに置く） ---
 // 自動巡回（アメリカのサーバー）と画面からの取得（日本のサーバー）は別々のサーバーで動くので、
 // 「止められた」「前に聞いた時刻」「ゲストの合言葉」「使えないトークン」をサーバーの中だけで覚えていると、
@@ -113,12 +116,57 @@ async function setShared(key: string, value: unknown): Promise<void> {
     .catch(() => {});
 }
 
-/** 止められたことを、すべてのサーバーに知らせる */
+/**
+ * 止められたことを、すべてのサーバーに知らせる。
+ * 続けて止められるたびに待つ時間を倍にする（15 分 → 30 分 → 1 時間 → 2 時間 → 最大 4 時間）。うまく読めたら元に戻す
+ */
 async function block(ms: number, why: string, challenge: boolean) {
-  blockedUntil = Math.max(blockedUntil, Date.now() + ms);
-  blockedWhy = why;
+  const prev = await shared<{ until: number; count?: number }>("gofileBlock");
+  // 前に止められてから 6 時間以内なら「続けて止められた」
+  unblockedSaved = false;
+  const count = prev?.count && prev.until > Date.now() - 6 * 60 * 60 * 1000 ? prev.count + 1 : 1;
+  const wait = challenge ? ms : Math.min(ms * 2 ** (count - 1), 4 * 60 * 60 * 1000);
+  blockedUntil = Math.max(blockedUntil, Date.now() + wait);
+  blockedWhy = count > 1 ? `${why}・${count} 回続けて` : why;
   blockedByChallenge = challenge;
-  await setShared("gofileBlock", { until: blockedUntil, why, challenge });
+  await setShared("gofileBlock", { until: blockedUntil, why: blockedWhy, challenge, count });
+  thumbsLog(`gofile blocked ${Math.round(wait / 60000)}min (${blockedWhy})`);
+}
+
+async function clearBlockCount() {
+  if (unblockedSaved) return;
+  unblockedSaved = true;
+  const prev = await shared<{ until: number; count?: number }>("gofileBlock");
+  if (prev?.count) await setShared("gofileBlock", { until: 0, why: "", challenge: false, count: 0 });
+}
+
+// --- フォルダの中身の覚え（全サーバー共通） ---
+/** 読めたフォルダは 3 日、消されていた・空だったフォルダは 1 日、聞き直さない */
+const CACHE_OK_MS = 3 * 24 * 60 * 60 * 1000;
+const CACHE_GONE_MS = 24 * 60 * 60 * 1000;
+
+async function cached(code: string): Promise<GofileResult | null> {
+  const pool = await db().catch(() => null);
+  if (!pool) return null;
+  const r = await pool
+    .query<{ files: GofileFile[]; error: string | null; age: number }>("select files, error, extract(epoch from now() - at) * 1000 as age from thumbs_gofile_cache where code = $1", [code])
+    .catch(() => null);
+  const row = r?.rows[0];
+  if (!row || Number(row.age) > (row.error ? CACHE_GONE_MS : CACHE_OK_MS)) return null;
+  return row.error ? { files: [], error: row.error } : { files: row.files };
+}
+
+async function remember(code: string, files: GofileFile[], error?: string) {
+  const pool = await db().catch(() => null);
+  await pool
+    ?.query(
+      `insert into thumbs_gofile_cache (code, files, error, at) values ($1, $2, $3, now())
+       on conflict (code) do update set files = excluded.files, error = excluded.error, at = now()`,
+      [code, JSON.stringify(files), error ?? null],
+    )
+    .catch(() => {});
+  // 古い覚えは消す（たまに）
+  if (Math.random() < 0.02) await pool?.query("delete from thumbs_gofile_cache where at < now() - interval '7 days'").catch(() => {});
 }
 
 /** ほかのサーバーが止められていないか読む */
@@ -200,7 +248,7 @@ function describe(status: string): string {
   if (status === "error-notFound") return "Gofile のフォルダが見つかりません（削除された可能性があります）";
   if (status === "error-notPremium") return "この Gofile フォルダは、有料会員でないと読めない設定です";
   if (status === "error-rateLimit" || status === "HTTP 429" || status === "error-blocked") {
-    return "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。15 分ほど待ってから、もう一度取得してください（自動巡回も、それまでは Gofile に聞かずに待ちます）";
+    return "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。しばらく（15 分から、続けて止められるたびに長く、最大 4 時間）Gofile には聞かずに待ちます。自動巡回も同じように待ちます";
   }
   if (status === "error-token" || status === "error-wrongToken" || status === "HTTP 401") {
     return "Gofile が合言葉（アカウントトークン）を受け付けませんでした。「🔑 Gofile の設定」のトークンが正しいか確かめてください（空にするとゲストとして読みます）";
@@ -232,6 +280,12 @@ function paced<T>(run: () => Promise<T>): Promise<T> {
 export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string, allowBrowser = true): Promise<GofileResult> {
   let fixed = givenToken || process.env.GOFILE_TOKEN?.trim() || undefined;
   const notes: string[] = [];
+  // 前に（どのサーバーでも）読んだフォルダなら、Gofile には聞かずに覚えを使う
+  const hit = await cached(id);
+  if (hit) {
+    thumbsLog(`gofile ${id} files=${hit.files.length} 覚えを使用${hit.error ? `（${hit.error.slice(0, 40)}）` : ""}`);
+    return hit;
+  }
   await loadBlock();
   // 前に Gofile に断られたトークンは使わない（何度も断られると「聞きすぎ」で止められる）。ゲストで読む
   if (fixed) {
@@ -339,7 +393,18 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
   } catch {
     firstError ??= "error-browser";
   }
-  if (!files.length) return fail(firstError ?? "error-empty");
+  if (!files.length) {
+    // 消されていた・空だった・有料会員向け・パスワード付きは、しばらく聞き直さない（止められた・断られたは覚えない）
+    const lasting = !firstError || /notFound|notPremium|passwordRequired|empty/.test(firstError);
+    if (lasting) {
+      await clearBlockCount();
+      await remember(id, [], describe(firstError ?? "error-empty"));
+    }
+    return fail(firstError ?? "error-empty");
+  }
+  await clearBlockCount();
+  // 中のフォルダの途中で止められたときは、全部そろっていないので覚えない
+  if (!firstError) await remember(id, files);
   thumbsLog(`gofile ${id} files=${files.length} ${notes.join(" ／ ").slice(0, 300)}`);
   return { files };
 }

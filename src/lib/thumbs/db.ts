@@ -76,6 +76,13 @@ export async function db(): Promise<Pool | null> {
         updated_at timestamptz not null default now()
       );
       -- 指紋のない動画も見張れるように：名前の鍵と再生時間（名前で見つけたとき、長さが違えば別の動画）
+      -- Gofile のフォルダの中身（全サーバー共通の覚え。同じフォルダを何度も聞かない）
+      create table if not exists thumbs_gofile_cache (
+        code text primary key,
+        files jsonb not null,
+        error text,
+        at timestamptz not null default now()
+      );
       alter table thumbs_revive add column if not exists name_key text;
       alter table thumbs_revive add column if not exists duration real;
     `,
