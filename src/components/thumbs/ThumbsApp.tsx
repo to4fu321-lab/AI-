@@ -289,6 +289,86 @@ function checkLink(item: MediaItem): Promise<LinkState> {
 const isHls = (item: MediaItem) => /\.m3u8(\?|$)/i.test(item.src) || item.format === "M3U8";
 const isVideoLike = (item: MediaItem) => item.kind !== "image";
 
+/** 直接ダウンロードで、端末のメモリに貯めてよい上限（これより大きいものは、保存先を選べるとき以外はサーバー経由にする） */
+const DIRECT_MEMORY_MAX = 400 * 1024 * 1024;
+
+/** ファイルを端末に保存させる（URL を a[download] で開く） */
+function triggerDownload(href: string, name?: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  if (name) a.download = name;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
+ * 元のサイトから直接、端末にダウンロードする（Vercel のサーバーを通さないので、転送量がかからない）。
+ * ブラウザが別のサイトのファイルを読めるのは、そのサイトが許可（CORS）を出しているときだけ。
+ * 許可がない・合言葉（Cookie）が要る・大きすぎるときは false を返す（呼び出し元がサーバー経由に切り替える）
+ */
+async function downloadDirect(item: MediaItem, name: string | undefined, onProgress: (ratio: number | null) => void): Promise<boolean | "canceled"> {
+  if (item.cookie) return false; // Gofile などの合言葉は、ブラウザからは送れない
+  let res: Response;
+  try {
+    res = await fetch(item.src, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer", signal: AbortSignal.timeout(20000) });
+  } catch {
+    return false; // 許可（CORS）がない・つながらない
+  }
+  if (!res.ok || !res.body) return false;
+  const type = res.headers.get("content-type") ?? "";
+  if (/text\/html|json/i.test(type)) {
+    await res.body.cancel().catch(() => {});
+    return false; // 動画ではなくページが返ってきた（ログイン画面など）
+  }
+  const total = Number(res.headers.get("content-length")) || 0;
+  const reader = res.body.getReader();
+  // パソコンの Chrome などは、保存先を選んでそこへ少しずつ書ける（メモリに貯めない）
+  const picker = (window as unknown as { showSaveFilePicker?: (o: { suggestedName?: string }) => Promise<{ createWritable: () => Promise<WritableStreamDefaultWriter<Uint8Array> & { write: (c: Uint8Array) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker;
+  if (picker) {
+    let handle;
+    try {
+      handle = await picker({ suggestedName: name });
+    } catch {
+      await reader.cancel().catch(() => {});
+      return "canceled"; // 保存先選びを取り消した（サーバー経由にも切り替えない）
+    }
+    const out = await handle.createWritable();
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await out.write(value);
+      got += value.byteLength;
+      onProgress(total ? got / total : null);
+    }
+    await out.close();
+    return true;
+  }
+  if (total > DIRECT_MEMORY_MAX) {
+    await reader.cancel().catch(() => {});
+    return false;
+  }
+  const parts: Uint8Array[] = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.byteLength;
+    if (got > DIRECT_MEMORY_MAX) {
+      await reader.cancel().catch(() => {});
+      return false;
+    }
+    onProgress(total ? got / total : null);
+  }
+  const url = URL.createObjectURL(new Blob(parts as BlobPart[], { type: type || "application/octet-stream" }));
+  triggerDownload(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return true;
+}
+
 function hostOf(url: string) {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
@@ -2517,6 +2597,19 @@ function Viewer({
   const direct = item.src;
   const src = useProxy ? proxyUrl(item) : direct;
   const canDownload = item.kind !== "embed" && !isHls(item);
+  /** ダウンロードの状態（直接読んでいる途中の割合・どちらで落としたか） */
+  const [dl, setDl] = useState<{ id: string; state: "direct" | "server" | "done"; ratio: number | null } | null>(null);
+  const dlHere = dl?.id === item.id ? dl : null;
+  const download = async (target: Item) => {
+    const name = decodeURIComponent(new URL(target.src).pathname.split("/").pop() || "") || undefined;
+    setDl({ id: target.id, state: "direct", ratio: null });
+    const ok = await downloadDirect(target, name, (ratio) => setDl({ id: target.id, state: "direct", ratio })).catch(() => false);
+    if (ok === "canceled") return setDl(null);
+    if (ok) return setDl({ id: target.id, state: "done", ratio: 1 });
+    // 直接は読めなかった：サーバー経由で（転送量がかかる）
+    setDl({ id: target.id, state: "server", ratio: null });
+    triggerDownload(proxyUrl(target, { download: true, name }), name);
+  };
   /** 「ドライブに保存」の状態（動画ごと。別の動画に切り替えても、保存中のものは続く） */
   const [driveSaves, setDriveSaves] = useState<Record<string, { state: "saving" | "done" | "error"; id?: string; message?: string }>>({});
   const driveSave = driveSaves[item.id];
@@ -2743,17 +2836,22 @@ function Viewer({
             </a>
           </p>
         )}
+        {dlHere?.state === "done" && <p className="text-xs text-emerald-300">⬇ 元のサイトから直接ダウンロードしました（サーバーの転送量はかかっていません）</p>}
+        {dlHere?.state === "server" && (
+          <p className="text-xs opacity-70">⬇ このサイトは直接のダウンロードを許可していないため、サーバー経由でダウンロードしています</p>
+        )}
         {driveSave?.state === "saving" && <p className="text-xs opacity-70">⏳ ドライブに保存しています（大きい動画は数分かかります。ほかの動画を見ていても続きます）</p>}
         {driveSave?.state === "error" && <p className="text-xs text-red-300">ドライブに保存できませんでした：{driveSave.message}</p>}
         <div className={`flex gap-2 ${item.dead ? "hidden" : ""}`}>
           {canDownload ? (
-            <a
-              href={proxyUrl(item, { download: true, name: fileName })}
-              download={fileName ?? true}
-              className="flex-1 rounded-full bg-fuchsia-500 py-2.5 text-center text-sm font-bold"
+            <button
+              type="button"
+              disabled={dlHere?.state === "direct"}
+              onClick={() => void download(item)}
+              className="flex-1 rounded-full bg-fuchsia-500 py-2.5 text-center text-sm font-bold disabled:opacity-70"
             >
-              ⬇ ダウンロード
-            </a>
+              {dlHere?.state === "direct" ? `⬇ 直接読み込み中${dlHere.ratio !== null ? ` ${Math.round(dlHere.ratio * 100)}%` : "…"}` : "⬇ ダウンロード"}
+            </button>
           ) : (
             <span className="flex-1 rounded-full bg-white/10 py-2.5 text-center text-xs opacity-70">
               {item.kind === "embed" ? "埋め込み動画は保存できません" : "配信形式（HLS）のため保存できません"}
