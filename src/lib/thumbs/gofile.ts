@@ -1,5 +1,7 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import { getSession, dropSession } from "./browserSession";
+import { db } from "./db";
 import { thumbsLog } from "./safeFetch";
 
 /**
@@ -92,6 +94,67 @@ let chain: Promise<unknown> = Promise.resolve();
 /** ゲストの合言葉（同じサーバーが動いている間、1 時間使い回す） */
 let guest: { token: string; at: number } | null = null;
 
+// --- 複数のサーバーで分け合う状態（データベースに置く） ---
+// 自動巡回（アメリカのサーバー）と画面からの取得（日本のサーバー）は別々のサーバーで動くので、
+// 「止められた」「前に聞いた時刻」「ゲストの合言葉」「使えないトークン」をサーバーの中だけで覚えていると、
+// 片方が止められても、もう片方が聞き続けて、止められる時間が延びてしまう。データベースで共有する
+
+async function shared<T>(key: string): Promise<T | null> {
+  const pool = await db().catch(() => null);
+  if (!pool) return null;
+  const r = await pool.query<{ value: T }>("select value from thumbs_patrol_meta where key = $1", [key]).catch(() => null);
+  return r?.rows[0]?.value ?? null;
+}
+
+async function setShared(key: string, value: unknown): Promise<void> {
+  const pool = await db().catch(() => null);
+  await pool
+    ?.query("insert into thumbs_patrol_meta (key, value) values ($1, $2) on conflict (key) do update set value = excluded.value", [key, JSON.stringify(value)])
+    .catch(() => {});
+}
+
+/** 止められたことを、すべてのサーバーに知らせる */
+async function block(ms: number, why: string, challenge: boolean) {
+  blockedUntil = Math.max(blockedUntil, Date.now() + ms);
+  blockedWhy = why;
+  blockedByChallenge = challenge;
+  await setShared("gofileBlock", { until: blockedUntil, why, challenge });
+}
+
+/** ほかのサーバーが止められていないか読む */
+async function loadBlock() {
+  const b = await shared<{ until: number; why: string; challenge: boolean }>("gofileBlock");
+  if (b && b.until > blockedUntil) {
+    blockedUntil = b.until;
+    blockedWhy = b.why;
+    blockedByChallenge = b.challenge;
+  }
+}
+
+/**
+ * すべてのサーバーを合わせて、聞く間隔を GAP_MS 以上あける（データベースで順番の札を取る）。
+ * 自分の札の時刻まで待ってから聞く
+ */
+const GAP_MS = 2500;
+async function takeTurn(): Promise<void> {
+  const pool = await db().catch(() => null);
+  if (!pool) return;
+  const r = await pool
+    .query<{ at: string }>(
+      `insert into thumbs_patrol_meta (key, value) values ('gofilePace', jsonb_build_object('at', $1::bigint))
+       on conflict (key) do update set value = jsonb_build_object('at', greatest($1::bigint, (thumbs_patrol_meta.value->>'at')::bigint + $2::bigint))
+       returning value->>'at' as at`,
+      [Date.now(), GAP_MS],
+    )
+    .catch(() => null);
+  const at = Number(r?.rows[0]?.at ?? 0);
+  const wait = at - Date.now();
+  if (wait > 0) await sleep(Math.min(wait, 60000));
+}
+
+/** トークンそのものは置かず、見分けるための要約だけ置く */
+const tokenTag = (t: string) => createHash("sha256").update(`gofile:${t}`).digest("hex").slice(0, 16);
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ORIGIN = "https://gofile.io";
 
@@ -137,7 +200,7 @@ function describe(status: string): string {
   if (status === "error-notFound") return "Gofile のフォルダが見つかりません（削除された可能性があります）";
   if (status === "error-notPremium") return "この Gofile フォルダは、有料会員でないと読めない設定です";
   if (status === "error-rateLimit" || status === "HTTP 429" || status === "error-blocked") {
-    return "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。10 分ほど待ってから、もう一度取得してください";
+    return "Gofile が、このアプリのサーバーからの問い合わせを一時的に止めています（短い時間に聞きすぎたため）。15 分ほど待ってから、もう一度取得してください（自動巡回も、それまでは Gofile に聞かずに待ちます）";
   }
   if (status === "error-token" || status === "error-wrongToken" || status === "HTTP 401") {
     return "Gofile が合言葉（アカウントトークン）を受け付けませんでした。「🔑 Gofile の設定」のトークンが正しいか確かめてください（空にするとゲストとして読みます）";
@@ -152,11 +215,12 @@ function describe(status: string): string {
   return `Gofile が答えませんでした（${status}）`;
 }
 
-/** 1 件ずつ、2 秒以上あけて聞く */
+/** 1 件ずつ、間をあけて聞く（このサーバーの中で順番に並び、さらに全サーバー共通の札を取る） */
 function paced<T>(run: () => Promise<T>): Promise<T> {
   const job = chain.then(async () => {
-    const wait = lastAsk + 2000 - Date.now();
+    const wait = lastAsk + GAP_MS - Date.now();
     if (wait > 0) await sleep(wait);
+    await takeTurn();
     lastAsk = Date.now();
     return run();
   });
@@ -166,8 +230,17 @@ function paced<T>(run: () => Promise<T>): Promise<T> {
 
 /** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
 export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string, allowBrowser = true): Promise<GofileResult> {
-  const fixed = givenToken || process.env.GOFILE_TOKEN?.trim() || undefined;
+  let fixed = givenToken || process.env.GOFILE_TOKEN?.trim() || undefined;
   const notes: string[] = [];
+  await loadBlock();
+  // 前に Gofile に断られたトークンは使わない（何度も断られると「聞きすぎ」で止められる）。ゲストで読む
+  if (fixed) {
+    const bad = await shared<{ tag: string; at: number }>("gofileBadToken");
+    if (bad && bad.tag === tokenTag(fixed) && Date.now() - bad.at < 24 * 60 * 60 * 1000) {
+      notes.push("設定したトークンは Gofile に断られたため、ゲストで読みます");
+      fixed = undefined;
+    }
+  }
   const fail = (status: string): GofileResult => {
     const error = describe(status);
     thumbsLog(`gofile ${id} files=0 ${status} ${notes.join(" ／ ").slice(0, 300)}`);
@@ -190,35 +263,38 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
     dropSession(ORIGIN);
     // Gofile がこのサーバーのブラウザに「人間かどうかの確認」を出していて、Gofile のページが読み込まれない。
     // 開き直しても同じなので（1 回 16 秒ほどかかる）、30 分は聞きに行かない。確認を機械で通り抜けることはしない
-    blockedUntil = Date.now() + 30 * 60 * 1000;
-    blockedWhy = "人間かどうかの確認";
-    blockedByChallenge = true;
+    await block(30 * 60 * 1000, "人間かどうかの確認", true);
     return fail("error-challenge");
   }
 
-  let token = fixed;
-  if (!token) {
-    if (!guest || Date.now() - guest.at > 60 * 60 * 1000) {
-      const made = await paced(() => page.evaluate(MAKE_GUEST)).catch(() => ({ http: 0, status: "error-network", token: null }));
-      notes.push(`ゲスト登録：${made.status}`);
-      if (!made.token) {
-        if (made.http === 429) {
-          blockedUntil = Date.now() + 10 * 60 * 1000;
-          blockedWhy = "ゲスト登録で 429";
-          blockedByChallenge = false;
-        }
-        return fail(made.http === 429 ? "error-rateLimit" : "error-guest");
-      }
-      guest = { token: made.token, at: Date.now() };
+  /** ゲストの合言葉（全サーバーで 1 つを使い回す。作りすぎると止められる） */
+  const guestToken = async (): Promise<string | null> => {
+    if (!guest || Date.now() - guest.at > 6 * 60 * 60 * 1000) {
+      const g = await shared<{ token: string; at: number }>("gofileGuest");
+      if (g?.token && Date.now() - g.at < 6 * 60 * 60 * 1000) guest = g;
     }
-    token = guest.token;
-  } else notes.push("設定したトークンを使用");
+    if (guest && Date.now() - guest.at < 6 * 60 * 60 * 1000) return guest.token;
+    const made = await paced(() => page.evaluate(MAKE_GUEST)).catch(() => ({ http: 0, status: "error-network", token: null }));
+    notes.push(`ゲスト登録：${made.status}`);
+    if (!made.token) {
+      if (made.http === 429) await block(15 * 60 * 1000, "ゲスト登録で 429", false);
+      firstError ??= made.http === 429 ? "error-rateLimit" : "error-guest";
+      return null;
+    }
+    guest = { token: made.token, at: Date.now() };
+    await setShared("gofileGuest", guest);
+    return guest.token;
+  };
+  let firstError: string | undefined;
+  let token = fixed ?? (await guestToken());
+  if (!token) return fail(firstError ?? "error-guest");
+  if (fixed) notes.push("設定したトークンを使用");
+  /** 合言葉で断られたら、この回はもう聞かない（断られ続けると「聞きすぎ」で止められる） */
+  let stop = false;
 
   const files: GofileFile[] = [];
-  let firstError: string | undefined;
-  const cookie = `gofile.io|accountToken=${token}`;
-  const visit = async (folder: string, level: number) => {
-    if (level > 2 || files.length >= 300 || signal.aborted || Date.now() < blockedUntil) return;
+  const visit = async (folder: string, level: number, retried = false): Promise<void> => {
+    if (stop || level > 2 || files.length >= 300 || signal.aborted || Date.now() < blockedUntil) return;
     const answer = await paced(() => page.evaluate(ASK, folder, token!)).catch(
       (err): Answer => ({ http: 0, status: "error-browser", json: null, why: err instanceof Error ? err.message.slice(0, 100) : String(err) }),
     );
@@ -226,12 +302,26 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
     if (answer.status !== "ok" || !answer.json) {
       // 聞きすぎ・接続元を止められた。続けて聞くと長引くので、10 分は聞かない
       if (answer.http === 429 || answer.status === "error-rateLimit") {
-        blockedUntil = Date.now() + 10 * 60 * 1000;
-        blockedWhy = `${answer.status}`;
-        blockedByChallenge = false;
+        await block(15 * 60 * 1000, `${answer.status}`, false);
+        stop = true;
       }
-      // ゲストの合言葉が使えなくなっていたら、次は作り直す
-      if (!fixed && (answer.http === 401 || /token/i.test(answer.status))) guest = null;
+      if (answer.http === 401 || /token/i.test(answer.status)) {
+        if (fixed && token === fixed) {
+          // 設定したトークンが断られた：覚えておいて（24 時間は使わない）、ゲストに切り替えて 1 回だけ聞き直す
+          await setShared("gofileBadToken", { tag: tokenTag(fixed), at: Date.now() });
+          notes.push("設定したトークンが断られたので、ゲストに切り替え");
+          const g = await guestToken();
+          if (g && !retried) {
+            token = g;
+            return visit(folder, level, true);
+          }
+        } else {
+          // ゲストの合言葉が使えなくなっていた：次は作り直す
+          guest = null;
+          await setShared("gofileGuest", { token: "", at: 0 });
+        }
+        stop = true;
+      }
       firstError ??= answer.status;
       return;
     }
@@ -240,7 +330,7 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
       firstError ??= data.password || data.passwordStatus ? "error-passwordRequired" : "error-notPremium";
       return;
     }
-    const found = parseContents(answer.json, id, cookie);
+    const found = parseContents(answer.json, id, `gofile.io|accountToken=${token}`);
     files.push(...found.files.slice(0, 300 - files.length));
     for (const n of found.nested) await visit(n, level + 1);
   };
