@@ -3,16 +3,15 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { db, getMailbox, UserError, type MailboxRow } from "./db";
 
 /**
- * Gmail とのつながり（許可の受け取り・保存・取り消し）。メールの調べは scan.ts。
+ * Gmail とのつながり（許可の受け取り・保存・取り消し）。メールの調べは scan.ts と sources/。
  *
- * - 権限は https://mail.google.com/。Gmail を IMAP で読むには、Google がこの権限しか認めていない。
- *   この権限では送信・削除もできてしまうが、このアプリは「読むだけ」の開き方（EXAMINE）でしか使わない
- * - 読むのはヘッダ（差出人・件名・日付）だけ。本文は取りにいかない
+ * - 権限は gmail.readonly（読むだけ）。送信・削除・ラベルの変更はできない。
+ *   公開するときの Google の審査は「必要最小限の権限」が条件なので、読むだけで足りるこのアプリは、これより広い権限を求めない
  * - Gmail を読む合言葉（リフレッシュトークン）は暗号化してデータベースに保存する
  * 使うには、Vercel の環境変数 GOOGLE_MIGRATE_CLIENT_ID・GOOGLE_MIGRATE_CLIENT_SECRET（Google Cloud の OAuth クライアント）が要る
  */
 
-export const GMAIL_SCOPE = "https://mail.google.com/";
+export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 
 const clientId = () => process.env.GOOGLE_MIGRATE_CLIENT_ID?.trim() || "";
 const clientSecret = () => process.env.GOOGLE_MIGRATE_CLIENT_SECRET?.trim() || "";

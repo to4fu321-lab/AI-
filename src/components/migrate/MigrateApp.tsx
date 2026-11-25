@@ -135,9 +135,7 @@ export function MigrateApp() {
                 <h2 className="text-base font-black">メールボックス</h2>
                 {ready && <button type="button" className={primary} onClick={() => window.location.assign("/api/migrate/oauth/connect")}>＋ Gmail をつなぐ</button>}
               </div>
-              <p className="mt-1 text-xs text-neutral-500">
-                Gmail を「読むだけ」の開き方で調べます。読むのは差出人・件名・日付だけで、本文は読みません。Google の許可の画面には「メールの送信・削除」も出ますが（Gmail を IMAP で読むための決まりです）、このアプリは使いません。
-              </p>
+              <p className="mt-1 text-xs text-neutral-500">読むだけの許可でつなぎます。読むのは差出人・件名・日付だけで、本文は読みません。</p>
               {state.mailboxes.length === 0 && <p className="mt-3 text-sm text-neutral-500">まだつないでいません。</p>}
               <ul className="mt-3 space-y-3">
                 {state.mailboxes.map((m) => {
