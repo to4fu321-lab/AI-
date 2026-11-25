@@ -21,6 +21,11 @@ export async function readHead(res: Response, n: number): Promise<Uint8Array> {
 }
 
 const latin1 = (b: Uint8Array) => new TextDecoder("latin1").decode(b);
+/**
+ * PNG の印（先頭 8 バイト）。TextDecoder の "latin1" は実は Windows-1252 なので、
+ * 0x89 が「‰」になってしまい、文字で "\x89PNG" と比べても一致しない。バイトのまま比べる
+ */
+const isPng = (b: Uint8Array) => b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
 
 /** HLS（配信形式）の目次ファイルか */
 export function looksLikePlaylist(b: Uint8Array): boolean {
@@ -71,7 +76,7 @@ export function mediaMime(b: Uint8Array): string | null {
   if (b[0] === 0x30 && b[1] === 0x26 && b[2] === 0xb2 && b[3] === 0x75) return "video/x-ms-asf";
   if (b[0] === 0 && b[1] === 0 && b[2] === 1 && (b[3] === 0xba || b[3] === 0xb3)) return "video/mpeg";
   if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
-  if (text.startsWith("\x89PNG")) return "image/png";
+  if (isPng(b)) return "image/png";
   if (text.startsWith("GIF8")) return "image/gif";
   if (text.startsWith("RIFF") && text.slice(8, 12) === "WEBP") return "image/webp";
   if (text.startsWith("BM")) return "image/bmp";
@@ -95,7 +100,7 @@ export function looksLikeImage(b: Uint8Array): boolean {
   if (b.length < 4) return false;
   const text = latin1(b);
   if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true;
-  if (text.startsWith("\x89PNG") || text.startsWith("GIF8") || text.startsWith("BM")) return true;
+  if (isPng(b) || text.startsWith("GIF8") || text.startsWith("BM")) return true;
   if (text.startsWith("RIFF") && text.slice(8, 12) === "WEBP") return true;
   if (text.slice(4, 8) === "ftyp" && /^(?:avif|avis|heic|heix|mif1|msf1)/.test(text.slice(8, 12))) return true;
   return false;
