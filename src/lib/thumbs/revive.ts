@@ -62,6 +62,11 @@ const EXT_BY_TYPE: Record<string, string> = {
   "video/3gpp": "3gp",
   "video/mpeg": "mpg",
   "video/ogg": "ogv",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/avif": "avif",
 };
 
 export async function listRevive(): Promise<ReviveRow[]> {
@@ -243,9 +248,17 @@ export async function saveFound(budgetMs: number): Promise<{ saved: number; fail
 }
 
 /** 1 本を元のサイトから読みながら、そのまま Blob に書く（サーバーには貯めない） */
-async function saveOne(fp: string, src: string, referer: string | undefined, cookie: string | undefined, budgetMs: number, title?: string | null) {
+async function saveOne(
+  fp: string,
+  src: string,
+  referer: string | undefined,
+  cookie: string | undefined,
+  budgetMs: number,
+  title?: string | null,
+  opts: { driveOnly?: boolean; images?: boolean } = {},
+) {
   const signal = AbortSignal.timeout(Math.max(10000, budgetMs));
-  const headers: Record<string, string> = { accept: "video/*,*/*;q=0.5" };
+  const headers: Record<string, string> = { accept: opts.images ? "video/*,image/*,*/*;q=0.5" : "video/*,*/*;q=0.5" };
   if (referer) headers.referer = referer;
   const { res } = await safeFetch(src, { headers, signal, timeoutMs: 30000, streamBody: true, jar: CookieJar.withItemCookie(undefined, cookie) });
   if (!res.ok || !res.body) {
@@ -275,9 +288,9 @@ async function saveOne(fp: string, src: string, referer: string | undefined, coo
     at += c.byteLength;
   }
   const type = mediaMime(head.subarray(0, 512));
-  if (!type || !type.startsWith("video/")) {
+  if (!type || !(type.startsWith("video/") || (opts.images && type.startsWith("image/")))) {
     await reader.cancel().catch(() => {});
-    throw new Error("中身が動画ではありませんでした（リンク先が変わった可能性があります）");
+    throw new Error(opts.images ? "中身が動画・画像ではありませんでした（ページや確認画面が返ってきました）" : "中身が動画ではありませんでした（リンク先が変わった可能性があります）");
   }
   const path = pathOf(fp, EXT_BY_TYPE[type] ?? "mp4");
   // 大きさの上限を超えたら止める（大きさを名乗らないサーバーのため、数えながら流す）
@@ -307,9 +320,14 @@ async function saveOne(fp: string, src: string, referer: string | undefined, coo
   // Google ドライブがつながっていれば、ドライブの「サムネ収集（復活保存）」フォルダへ。なければ Vercel Blob（非公開）へ
   const drive = await driveTarget();
   if (drive) {
-    const name = `${(title || fp).replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 100)}.${EXT_BY_TYPE[type] ?? "mp4"}`;
+    const base = (title || fp).replace(/\.[a-z0-9]{2,5}$/i, "");
+    const name = `${base.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 100)}.${EXT_BY_TYPE[type] ?? "mp4"}`;
     const file = await uploadToDrive(drive, name, type, counted, Number.isFinite(total) && total > 0 ? total : undefined, signal);
     return { path: `drive:${file.id}`, size: file.size || size, type };
+  }
+  if (opts.driveOnly) {
+    await reader.cancel().catch(() => {});
+    throw new Error("Google ドライブがつながっていません");
   }
   if (!blobConfigured()) {
     await reader.cancel().catch(() => {});
@@ -317,6 +335,16 @@ async function saveOne(fp: string, src: string, referer: string | undefined, coo
   }
   await put(path, counted, { access: "private", contentType: type, multipart: true, allowOverwrite: true, addRandomSuffix: false, abortSignal: signal });
   return { path, size, type };
+}
+
+/**
+ * 一覧の動画・画像を、その場で Google ドライブに保存する（画面の「ドライブに保存」）。
+ * サーバーが元のサイトから読みながら、そのままドライブへ流す（スマホの通信・容量を使わない）
+ */
+export async function saveUrlToDrive(item: { src: string; referer?: string; cookie?: string; title?: string; budgetMs: number }) {
+  const name = item.title?.trim() || decodeURIComponent(new URL(item.src).pathname.split("/").pop() || "") || "保存した動画";
+  const r = await saveOne("", item.src, item.referer, item.cookie, item.budgetMs, name, { driveOnly: true, images: true });
+  return { id: r.path.replace(/^drive:/, ""), size: r.size, type: r.type };
 }
 
 /** 保存した動画を読む（Range に対応。見つからなければ null） */

@@ -1743,6 +1743,7 @@ export function ThumbsApp() {
           onBroken={(id) => markDead(id)}
           reviveOn={reviveOn}
           revive={revive}
+          driveOn={!!drive?.connected}
           onWatch={(item, on) => void setWatch([item], on)}
           onRemove={(item) => {
             if (!confirm("一覧から消しますか？")) return;
@@ -2452,6 +2453,7 @@ function Viewer({
   onBroken,
   reviveOn,
   revive,
+  driveOn,
   onWatch,
   onRemove,
 }: {
@@ -2465,6 +2467,8 @@ function Viewer({
   /** 「復活したら保存」が使えるか（サーバーの保存先があるか） */
   reviveOn: boolean;
   revive: Map<string, ReviveRow>;
+  /** Google ドライブがつながっているか（つながっていれば「ドライブに保存」を出す） */
+  driveOn: boolean;
   onWatch: (item: Item, on: boolean) => void;
   /** 一覧から消す（手動） */
   onRemove: (item: Item) => void;
@@ -2513,6 +2517,25 @@ function Viewer({
   const direct = item.src;
   const src = useProxy ? proxyUrl(item) : direct;
   const canDownload = item.kind !== "embed" && !isHls(item);
+  /** 「ドライブに保存」の状態（動画ごと。別の動画に切り替えても、保存中のものは続く） */
+  const [driveSaves, setDriveSaves] = useState<Record<string, { state: "saving" | "done" | "error"; id?: string; message?: string }>>({});
+  const driveSave = driveSaves[item.id];
+  const saveToDrive = async (target: Item) => {
+    setDriveSaves((m) => ({ ...m, [target.id]: { state: "saving" } }));
+    const res = await fetch("/api/thumbs/drive", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "save",
+        item: { src: target.src, pageUrl: target.pageUrl, referer: target.referer, cookie: target.cookie, title: target.title ?? fileName },
+      }),
+    }).catch(() => null);
+    const data = (res ? await res.json().catch(() => null) : null) as { ok?: boolean; id?: string; error?: string } | null;
+    setDriveSaves((m) => ({
+      ...m,
+      [target.id]: data?.ok && data.id ? { state: "done", id: data.id } : { state: "error", message: data?.error ?? (res ? `HTTP ${res.status}` : "通信が切れました") },
+    }));
+  };
   const fileName = decodeURIComponent(new URL(item.src).pathname.split("/").pop() || "") || undefined;
 
   /** 直接もサーバー経由も駄目だったとき、サーバー経由で少しだけ取りに行って理由を調べる */
@@ -2712,6 +2735,16 @@ function Viewer({
             </button>
           </div>
         )}
+        {driveSave?.state === "done" && driveSave.id && (
+          <p className="text-xs text-emerald-300">
+            ✅ Google ドライブの「サムネ収集（復活保存）」フォルダに保存しました ・{" "}
+            <a href={`https://drive.google.com/file/d/${encodeURIComponent(driveSave.id)}/view`} target="_blank" rel="noopener noreferrer" className="underline">
+              ドライブで開く
+            </a>
+          </p>
+        )}
+        {driveSave?.state === "saving" && <p className="text-xs opacity-70">⏳ ドライブに保存しています（大きい動画は数分かかります。ほかの動画を見ていても続きます）</p>}
+        {driveSave?.state === "error" && <p className="text-xs text-red-300">ドライブに保存できませんでした：{driveSave.message}</p>}
         <div className={`flex gap-2 ${item.dead ? "hidden" : ""}`}>
           {canDownload ? (
             <a
@@ -2725,6 +2758,17 @@ function Viewer({
             <span className="flex-1 rounded-full bg-white/10 py-2.5 text-center text-xs opacity-70">
               {item.kind === "embed" ? "埋め込み動画は保存できません" : "配信形式（HLS）のため保存できません"}
             </span>
+          )}
+          {canDownload && driveOn && (
+            <button
+              type="button"
+              disabled={driveSave?.state === "saving"}
+              onClick={() => void saveToDrive(item)}
+              className="rounded-full bg-sky-600 px-3 py-2.5 text-sm font-bold disabled:opacity-60"
+              title="サーバーが元のサイトから読んで、Google ドライブに直接保存します（スマホの通信は使いません）"
+            >
+              {driveSave?.state === "saving" ? "⏳ 保存中" : driveSave?.state === "done" ? "✅ 保存済" : "📁 ドライブへ"}
+            </button>
           )}
           <button
             type="button"
