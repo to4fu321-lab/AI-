@@ -3,6 +3,7 @@ import { del, get, put } from "@vercel/blob";
 import { db } from "./db";
 import { deleteFromDrive, driveConfigured, driveTarget, readFromDrive, uploadToDrive } from "./drive";
 import { CookieJar, safeFetch, thumbsLog } from "./safeFetch";
+import { isReviveKey, nameKey, urlKey } from "./reviveKey";
 import { mediaMime } from "./sniff";
 import type { MediaItem } from "./types";
 
@@ -44,8 +45,8 @@ export interface ReviveRow {
   driveId: string | null;
 }
 
-/** 指紋として正しい形か（"大きさ:要約"） */
-export const isPrint = (fp: unknown): fp is string => typeof fp === "string" && /^\d{1,13}:[a-z0-9]{2,40}$/.test(fp);
+/** 見張りの鍵として正しい形か（指紋 "大きさ:要約"・URL の鍵 "u:…"・名前の鍵 "n:…"） */
+export const isPrint = isReviveKey;
 
 /** 保管場所での名前（指紋の「:」などは使えないので置き換える） */
 const pathOf = (fp: string, ext: string) => `revive/${fp.replace(/[^a-z0-9]/gi, "_")}.${ext}`;
@@ -95,21 +96,24 @@ export async function listRevive(): Promise<ReviveRow[]> {
 }
 
 /** 見張りを始める（保存済みのものは、そのまま） */
-export async function watchPrints(list: { fp: string; title?: string; thumb?: string; pageUrl?: string }[]): Promise<number> {
+export async function watchPrints(list: { fp: string; title?: string; thumb?: string; pageUrl?: string; duration?: number }[]): Promise<number> {
   const pool = await db();
   if (!pool) return 0;
   let n = 0;
   for (const w of list.slice(0, 500)) {
     if (!isPrint(w.fp)) continue;
+    const duration = typeof w.duration === "number" && Number.isFinite(w.duration) && w.duration > 0 ? w.duration : null;
     await pool.query(
-      `insert into thumbs_revive (fp, title, thumb, page_url) values ($1, $2, $3, $4)
+      `insert into thumbs_revive (fp, title, thumb, page_url, name_key, duration) values ($1, $2, $3, $4, $5, $6)
        on conflict (fp) do update set
          status = case when thumbs_revive.status in ('saved', 'found', 'saving') then thumbs_revive.status else 'watch' end,
          title = coalesce(thumbs_revive.title, excluded.title),
          thumb = coalesce(thumbs_revive.thumb, excluded.thumb),
          page_url = coalesce(thumbs_revive.page_url, excluded.page_url),
+         name_key = coalesce(thumbs_revive.name_key, excluded.name_key),
+         duration = coalesce(thumbs_revive.duration, excluded.duration),
          updated_at = now()`,
-      [w.fp, w.title?.slice(0, 300) ?? null, w.thumb?.slice(0, 2000) ?? null, w.pageUrl?.slice(0, 2000) ?? null],
+      [w.fp, w.title?.slice(0, 300) ?? null, w.thumb?.slice(0, 2000) ?? null, w.pageUrl?.slice(0, 2000) ?? null, nameKey(w.title), duration],
     );
     n++;
   }
@@ -137,36 +141,57 @@ export async function unwatchPrints(fps: string[], withFile: boolean): Promise<n
 }
 
 /** 見張っている指紋（見張り中・失敗したもの）。巡回・取得の最初に読む */
-export async function watchedPrints(): Promise<Set<string>> {
-  if (!reviveConfigured()) return new Set();
+/** 見張っているものの一覧（鍵 → 見張りの行）。指紋・URL の鍵のほか、名前の鍵でも引ける */
+export type Watched = Map<string, { fp: string; duration: number | null; byName: boolean }>;
+
+export async function watchedPrints(): Promise<Watched> {
+  const out: Watched = new Map();
+  if (!reviveConfigured()) return out;
   const pool = await db().catch(() => null);
-  if (!pool) return new Set();
-  const r = await pool.query<{ fp: string }>("select fp from thumbs_revive where status in ('watch', 'failed') limit 20000");
-  return new Set(r.rows.map((x) => x.fp));
+  if (!pool) return out;
+  const r = await pool.query<{ fp: string; name_key: string | null; duration: number | null }>(
+    "select fp, name_key, duration from thumbs_revive where status in ('watch', 'failed') limit 20000",
+  );
+  for (const x of r.rows) {
+    out.set(x.fp, { fp: x.fp, duration: x.duration, byName: false });
+    if (x.name_key && !out.has(x.name_key)) out.set(x.name_key, { fp: x.fp, duration: x.duration, byName: true });
+  }
+  return out;
 }
 
 /**
  * 巡回・取得で見つけた動画のうち、見張っている指紋と同じものを「見つけた」にする（保存は saveFound で）。
  * 見つけた数を返す
  */
-export async function noticeFound(items: MediaItem[], watched: Set<string>): Promise<number> {
+export async function noticeFound(items: MediaItem[], watched: Watched): Promise<number> {
   if (!watched.size) return 0;
-  const hits = items.filter((m) => m.kind === "video" && m.fp && watched.has(m.fp));
+  const hits: { m: MediaItem; fp: string }[] = [];
+  for (const m of items) {
+    if (m.kind !== "video") continue;
+    // 確かな順に：指紋 → ファイルの URL → 名前（名前のときは、長さがわかれば長さも同じものだけ）
+    for (const k of [m.fp, urlKey(m), nameKey(m.title)]) {
+      const w = k ? watched.get(k) : undefined;
+      if (!w) continue;
+      if (w.byName && w.duration && m.duration && Math.abs(w.duration - m.duration) > 3) continue;
+      if (!hits.some((h) => h.fp === w.fp)) hits.push({ m, fp: w.fp });
+      break;
+    }
+  }
   if (!hits.length) return 0;
   const pool = await db().catch(() => null);
   if (!pool) return 0;
   let n = 0;
-  for (const m of hits) {
+  for (const { m, fp } of hits) {
     const r = await pool.query(
       `update thumbs_revive set status = 'found', found_src = $2, found_page = $3, found_referer = $4, found_cookie = $5,
          found_at = now(), note = null, updated_at = now(), thumb = coalesce(thumb, $6), title = coalesce(title, $7)
        where fp = $1 and status in ('watch', 'failed')`,
-      [m.fp, m.src, m.pageUrl, m.referer ?? m.pageUrl, m.cookie ?? null, m.thumb ?? null, m.title ?? null],
+      [fp, m.src, m.pageUrl, m.referer ?? m.pageUrl, m.cookie ?? null, m.thumb ?? null, m.title ?? null],
     );
     if (r.rowCount) {
-      watched.delete(m.fp!);
+      for (const [k, w] of watched) if (w.fp === fp) watched.delete(k);
       n++;
-      thumbsLog(`revive found ${m.fp} ${m.src.slice(0, 100)}`);
+      thumbsLog(`revive found ${fp} ${m.src.slice(0, 100)}`);
     }
   }
   return n;

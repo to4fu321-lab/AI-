@@ -8,6 +8,7 @@ import { formatDuration } from "@/lib/thumbs/duration";
 import { dedupeMedia, mediaKey, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { videoApiUrls } from "@/lib/thumbs/videoApis";
+import { reviveKeyOf } from "@/lib/thumbs/reviveKey";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
@@ -19,7 +20,12 @@ type Item = MediaItem & {
   dead?: number;
   /** リンク切れから、同じ動画が見つかって生き返った時刻 */
   revivedAt?: number;
+  /** 「復活したら保存」の見張りの鍵（付けたときのもの。URL が変わっても同じ見張りを指すように覚えておく） */
+  rk?: string;
 };
+
+/** 見張りの鍵（付けたときの鍵があればそれ。なければ指紋、指紋もなければファイルの URL から） */
+const rkOf = (item: Item): string | undefined => item.rk ?? reviveKeyOf(item);
 
 /** 「復活したら保存」の見張り（サーバーが覚えているもの） */
 type ReviveRow = {
@@ -1099,14 +1105,19 @@ export function ThumbsApp() {
       clearInterval(timer);
     };
   }, [loadRevive]);
-  /** 🔔 を付ける・外す（指紋のない動画は見分けられないので付けられない） */
+  /** 🔔 を付ける・外す（動画ファイルだけ。指紋がなければ、ファイルの URL・ファイル名で見分ける） */
   const setWatch = useCallback(
     async (list: Item[], on: boolean) => {
-      const withPrint = list.filter((i) => i.kind === "video" && i.fp);
+      const withPrint = list.filter((i) => i.kind === "video" && rkOf(i));
       if (!withPrint.length) return 0;
+      if (on) {
+        // 付けたときの鍵を一覧に覚えさせる（あとで URL や指紋が変わっても、同じ見張りを指せるように）
+        const keys = new Map(withPrint.map((i) => [i.id, rkOf(i)!]));
+        setItems((l) => l.map((i) => (keys.has(i.id) && !i.rk ? { ...i, rk: keys.get(i.id) } : i)));
+      }
       const body = on
-        ? { action: "watch", items: withPrint.map((i) => ({ fp: i.fp, title: i.title, thumb: i.thumb, pageUrl: i.pageUrl })) }
-        : { action: "unwatch", fps: withPrint.map((i) => i.fp) };
+        ? { action: "watch", items: withPrint.map((i) => ({ fp: rkOf(i), title: i.title, thumb: i.thumb, pageUrl: i.pageUrl, duration: i.duration })) }
+        : { action: "unwatch", fps: withPrint.map((i) => rkOf(i)) };
       await fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
       await loadRevive();
       return withPrint.length;
@@ -1116,14 +1127,14 @@ export function ThumbsApp() {
   /** 一覧から消す（保存した動画があるものは、保存した動画も消すか聞く） */
   const removeItems = useCallback(
     async (list: Item[]) => {
-      const saved = list.filter((i) => i.fp && revive.get(i.fp)?.status === "saved");
+      const saved = list.filter((i) => revive.get(rkOf(i) ?? "")?.status === "saved");
       if (saved.length && !confirm(`保存した動画が ${saved.length} 本あります。保存した動画も消しますか？\n（「キャンセル」で、保存した動画のあるものは一覧に残します）`)) {
         const keep = new Set(saved.map((i) => i.id));
         list = list.filter((i) => !keep.has(i.id));
       } else if (saved.length) {
-        await fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", fps: saved.map((i) => i.fp) }) }).catch(() => null);
+        await fetch("/api/thumbs/revive", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", fps: saved.map((i) => rkOf(i)) }) }).catch(() => null);
       }
-      const watching = list.filter((i) => i.fp && revive.has(i.fp) && revive.get(i.fp)?.status !== "saved");
+      const watching = list.filter((i) => { const r = revive.get(rkOf(i) ?? ""); return r && r.status !== "saved"; });
       if (watching.length) await setWatch(watching, false);
       const ids = new Set(list.map((i) => i.id));
       setItems((l) => l.filter((i) => !ids.has(i.id)));
@@ -1659,7 +1670,7 @@ export function ThumbsApp() {
                   type="button"
                   onClick={() =>
                     void setWatch(visible, true).then((n) =>
-                      alert(n ? `${n} 本に 🔔 を付けました` : "🔔 を付けられる動画がありませんでした（見分ける指紋のない動画・画像には付けられません）"),
+                      alert(n ? `${n} 本に 🔔 を付けました` : "🔔 を付けられる動画がありませんでした（画像・埋め込み動画には付けられません）"),
                     )
                   }
                   className="rounded-full bg-amber-500 px-3 py-1.5 font-bold text-white"
@@ -1670,7 +1681,7 @@ export function ThumbsApp() {
               <button
                 type="button"
                 onClick={() => {
-                  const list = visible.filter((i) => !(i.fp && (revive.get(i.fp)?.status === "watch" || revive.get(i.fp)?.status === "saved")));
+                  const list = visible.filter((i) => !["watch", "saved", "found", "saving"].includes(revive.get(rkOf(i) ?? "")?.status ?? ""));
                   if (!list.length) return alert("消せるものがありません（🔔・💾 の付いたものは残します）");
                   if (confirm(`🔔・💾 の付いていないリンク切れ ${list.length} 件を一覧から消しますか？`)) void removeItems(list);
                 }}
@@ -1706,7 +1717,7 @@ export function ThumbsApp() {
                 onOpen={() => setViewer(index)}
                 onBroken={hideItem}
                 onDead={markDead}
-                revive={item.fp ? revive.get(item.fp) : undefined}
+                revive={revive.get(rkOf(item) ?? "")}
                 onDuration={setDuration}
               />
             </li>
@@ -2428,8 +2439,9 @@ function Viewer({
   onRemove: (item: Item) => void;
 }) {
   const item = items[index];
-  const row = item.fp ? revive.get(item.fp) : undefined;
-  const saved = row?.status === "saved" && item.fp ? item.fp : null;
+  const key = rkOf(item);
+  const row = key ? revive.get(key) : undefined;
+  const saved = row?.status === "saved" && key ? key : null;
   /** リンク切れを外したことのお知らせ（次の動画に切り替わったあとも少し出しておく） */
   const [removed, setRemoved] = useState<string | null>(null);
   const [useProxy, setUseProxy] = useState(!!item.cookie);
@@ -2524,8 +2536,8 @@ function Viewer({
         {item.kind === "video" &&
           (!reviveOn ? (
             <p className="text-[11px] opacity-60">「復活したら保存」は、サーバーの保存先（データベース・Blob）が使えるときだけ使えます</p>
-          ) : !item.fp ? (
-            <p className="text-[11px] opacity-60">この動画は、同じファイルかを見分ける指紋がないため、「復活したら保存」を付けられません</p>
+          ) : !key ? (
+            <p className="text-[11px] opacity-60">この動画は見分ける手がかりがないため、「復活したら保存」を付けられません</p>
           ) : row?.status === "found" || row?.status === "saving" ? (
             <p className="text-xs text-emerald-300">⏳ 同じ動画が見つかりました。サーバーに保存しています…</p>
           ) : (
@@ -2539,7 +2551,11 @@ function Viewer({
           ))}
         {row?.status === "failed" && row.note && <p className="text-[11px] text-red-300">前回の保存は失敗しました：{row.note}</p>}
         {row && row.status === "watch" && (
-          <p className="text-[11px] opacity-60">巡回・取得で同じ動画（同じファイル）が見つかったら、サーバーに保存します</p>
+          <p className="text-[11px] opacity-60">
+            {/^\d/.test(key ?? "")
+              ? "巡回・取得で同じ動画（同じファイル）が見つかったら、サーバーに保存します"
+              : "巡回・取得で、同じ URL か同じファイル名の動画が見つかったら、サーバーに保存します（中身の指紋がない動画なので、名前を変えて上げ直されたものは見つけられません）"}
+          </p>
         )}
       </div>
     );

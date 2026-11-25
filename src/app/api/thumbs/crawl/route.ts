@@ -1,4 +1,4 @@
-import { noticeFound, watchedPrints } from "@/lib/thumbs/revive";
+import { noticeFound, watchedPrints, type Watched } from "@/lib/thumbs/revive";
 import { guardApi } from "@/lib/access/locks";
 import { MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { crawl, type CrawlProgress, markStuck, MAX_PENDING, MAX_PRINTS, MAX_QUEUE, MAX_RESERVE, MAX_SEEN } from "@/lib/thumbs/crawl";
@@ -142,7 +142,7 @@ export async function POST(request: Request) {
         Number(process.env.THUMBS_HARD_MS) || Math.max(10000, startedAt + (maxDuration - 12) * 1000 - Date.now()),
       );
       // 「復活したら保存」で見張っている動画（同じ指紋の動画が見つかったら、保存待ちにする）
-      const watched = await watchedPrints().catch(() => new Set<string>());
+      const watched = await watchedPrints().catch((): Watched => new Map());
       try {
         for await (const event of crawl(raw, options, abort.signal, deadline, resume, progress)) {
           if (closed) break;

@@ -46,9 +46,10 @@ export async function POST(request: Request) {
         .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
         .map((x) => ({
           fp: str(x.fp, 60) ?? "",
-          title: str(x.title, 300),
+          title: typeof x.title === "string" ? x.title.slice(0, 300) : undefined,
           thumb: str(x.thumb, 2000)?.match(/^https?:\/\//) ? str(x.thumb, 2000) : undefined,
           pageUrl: str(x.pageUrl, 2000)?.match(/^https?:\/\//) ? str(x.pageUrl, 2000) : undefined,
+          duration: typeof x.duration === "number" ? x.duration : undefined,
         }))
         .filter((x) => isPrint(x.fp));
       return Response.json({ watched: await watchPrints(items) });
