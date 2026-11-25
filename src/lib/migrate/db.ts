@@ -1,5 +1,5 @@
 import "server-only";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import type { Mailbox, Service, Signal, Status } from "./types";
 
 /**
@@ -34,7 +34,7 @@ export async function db(): Promise<Pool> {
         id uuid primary key default gen_random_uuid(),
         email text not null unique,
         token_enc text not null default '',     -- Gmail を読む合言葉（AES-256-GCM で暗号化）
-        scan jsonb not null default '{}',       -- （使っていない。前の読み方の名残）
+        scan jsonb not null default '{}',       -- 続きの場所（中身は読み方ごとに違う）
         scanned integer not null default 0,     -- これまでに読んだメールの数
         last_scan timestamptz,
         created_at timestamptz not null default now()
@@ -56,12 +56,11 @@ export async function db(): Promise<Pool> {
         updated_at timestamptz not null default now(),
         unique (mailbox_id, domain)
       );
-      -- IMAP で調べるための続きの情報（サーバーが進めるので、画面を閉じても続く）
-      alter table migrate_mailboxes add column if not exists requested boolean not null default false; -- 調べる途中か
-      alter table migrate_mailboxes add column if not exists lock_until timestamptz;                   -- 今どこかが進めている（二重に動かさない）
-      alter table migrate_mailboxes add column if not exists uid_validity text;                        -- 「すべてのメール」の番号の世代
-      alter table migrate_mailboxes add column if not exists done_uid bigint not null default 0;      -- この番号まで調べ終えた
-      alter table migrate_mailboxes add column if not exists remaining integer not null default 0;    -- 今回の残り
+      -- 調べを裏で進めるための情報（サーバーが進めるので、画面を閉じても続く）
+      alter table migrate_mailboxes add column if not exists source text not null default 'gmail-api';  -- 読み方（sources/ の部品の名前）
+      alter table migrate_mailboxes add column if not exists requested boolean not null default false;  -- 調べる途中か
+      alter table migrate_mailboxes add column if not exists lock_until timestamptz;                    -- 今どこかが進めている（二重に動かさない）
+      alter table migrate_mailboxes add column if not exists remaining integer not null default 0;     -- 今回の残り（分からない読み方では 0）
       alter table migrate_mailboxes add column if not exists error text not null default '';
     `,
     )
@@ -78,12 +77,13 @@ export interface MailboxRow {
   id: string;
   email: string;
   token_enc: string;
+  source: string;
+  /** 続きの場所（中身は読み方ごとに違う） */
+  scan: Record<string, unknown>;
   scanned: number;
   last_scan: Date | null;
   requested: boolean;
   lock_until: Date | null;
-  uid_validity: string | null;
-  done_uid: string;
   remaining: number;
   error: string;
 }
@@ -139,4 +139,20 @@ export async function getMailbox(id: string): Promise<MailboxRow> {
   const r = await (await db()).query<MailboxRow>("select * from migrate_mailboxes where id = $1", [uuid(id)]);
   if (!r.rows[0]) throw new UserError("メールボックスが見つかりません");
   return r.rows[0];
+}
+
+/** いくつかの書き込みを「全部できたか、全部なかったか」にまとめる（数えた結果と続きの場所がずれないように） */
+export async function transaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await (await db()).connect();
+  try {
+    await client.query("begin");
+    const result = await run(client);
+    await client.query("commit");
+    return result;
+  } catch (err) {
+    await client.query("rollback").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }

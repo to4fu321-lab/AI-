@@ -1,33 +1,25 @@
 import "server-only";
-import { ImapFlow } from "imapflow";
-import { db, getMailbox, UserError, type MailboxRow, type ServiceRow } from "./db";
-import { accessToken, RECONNECT } from "./gmail";
-import { GMAIL_QUERY, isPersonalDomain, parseFrom, readRawHeaders, serviceDomain, signalsOf } from "./parse";
+import type { PoolClient } from "pg";
+import { db, getMailbox, transaction, UserError, type MailboxRow, type ServiceRow } from "./db";
+import { isPersonalDomain, parseFrom, serviceDomain, signalsOf } from "./parse";
+import { gmailApi } from "./sources/gmailApi";
+import { imap } from "./sources/imap";
+import { RetryLater, type Header, type MailSession, type MailSource } from "./sources/types";
 import type { Signal } from "./types";
 
 /**
- * メールの調べ（IMAP）。
+ * メールの調べの進行役。
  *
- * - Gmail の側で検索して（X-GM-RAW）、当てはまったメールの番号だけを受け取る
- * - そのメールのヘッダ（差出人・件名・日付）だけを、まとめて受け取る（本文は取らない）
- * - 「すべてのメール」を読むだけの開き方（EXAMINE）で開く。既読にもならない
- * - 進めるのはサーバー。画面を閉じても続き、時間切れで止まっても定期実行（/api/cron/migrate-scan）が続きから進める
+ * - メールを読むのは sources/ の部品（メール会社ごとに差し替える）。ここは、数える・保存する・時間で区切る・二重に動かさない、を受け持つ
+ * - 進めるのはサーバー。画面を閉じても続く。時間で区切れたら次の回へ引き継ぎ、止まっても定期実行（/api/cron/migrate-scan）が続きから進める
+ * - 数えた結果と「続きの場所」は、ひとまとめに保存する（片方だけ進んで二重に数えることがない）
  */
 
-/** 1 回にヘッダを受け取る数（受け取るたびに、数えた結果と続きの場所を保存する） */
-const BATCH = 500;
+/** 読み方の部品。メールボックスの source 欄の名前で選ぶ */
+const SOURCES: Record<string, MailSource> = { "gmail-api": gmailApi, imap };
+
 /** 「今どこかが進めている」印の長さ。関数の時間の上限（5 分）より長くして、二重に動かさない */
 const LOCK = "6 minutes";
-/** つなぐ先。ふだんは Gmail。MIGRATE_IMAP_HOST は、手元で偽の IMAP サーバーを使って確かめるときだけ使う */
-const IMAP = process.env.MIGRATE_IMAP_HOST
-  ? { host: process.env.MIGRATE_IMAP_HOST, port: Number(process.env.MIGRATE_IMAP_PORT || 143), secure: false }
-  : { host: "imap.gmail.com", port: 993, secure: true };
-
-interface Header {
-  from: string;
-  subject: string;
-  at: number;
-}
 
 interface Tally {
   count: number;
@@ -62,9 +54,8 @@ const SUBJECT_KEEP = 5;
 const NAME_KEEP = 8;
 
 /** まとめた分を、データベースの今の数に足しこむ（仕分けの状態やメモは変えない） */
-async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void> {
+async function merge(pool: PoolClient, mailboxId: string, found: Map<string, Tally>): Promise<void> {
   if (!found.size) return;
-  const pool = await db();
   const existing = (await pool.query<ServiceRow>("select * from migrate_services where mailbox_id = $1 and domain = any($2)", [mailboxId, [...found.keys()]])).rows;
   const byDomain = new Map(existing.map((r) => [r.domain, r]));
   const rows = [...found].map(([domain, t]) => {
@@ -104,10 +95,9 @@ async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void
 }
 
 /** 数えた結果を空にする（仕分けの状態・開くページ・メモは残す） */
-async function clearCounts(mailboxId: string): Promise<void> {
-  const pool = await db();
-  await pool.query("update migrate_services set count = 0, names = '{}', signals = '{}', subjects = '[]', first_at = null, last_at = null where mailbox_id = $1", [mailboxId]);
-  await pool.query("update migrate_mailboxes set scanned = 0, done_uid = 0, remaining = 0, uid_validity = null, last_scan = null where id = $1", [mailboxId]);
+async function clearCounts(client: PoolClient, mailboxId: string): Promise<void> {
+  await client.query("update migrate_services set count = 0, names = '{}', signals = '{}', subjects = '[]', first_at = null, last_at = null where mailbox_id = $1", [mailboxId]);
+  await client.query("update migrate_mailboxes set scan = '{}', scanned = 0, remaining = 0, last_scan = null where id = $1", [mailboxId]);
 }
 
 /** 調べ始める（印を付けるだけ。進めるのは runScan） */
@@ -116,7 +106,7 @@ export async function requestScan(mailboxId: string): Promise<void> {
   await (await db()).query("update migrate_mailboxes set requested = true, error = '' where id = $1", [box.id]);
 }
 
-/** 止める（進めている所は、受け取り中の 1 回分を終えたところで止まる） */
+/** 止める（進めている所は、読んでいるひとかたまりを終えたところで止まる） */
 export async function stopScan(mailboxId: string): Promise<void> {
   const box = await getMailbox(mailboxId);
   await (await db()).query("update migrate_mailboxes set requested = false where id = $1", [box.id]);
@@ -126,22 +116,23 @@ export async function stopScan(mailboxId: string): Promise<void> {
 export async function resetScan(mailboxId: string): Promise<void> {
   const box = await getMailbox(mailboxId);
   if (box.requested || (box.lock_until && box.lock_until > new Date())) throw new UserError("調べている途中は数え直せません。「止める」を押して、少し待ってからにしてください");
-  await clearCounts(box.id);
+  await transaction((client) => clearCounts(client, box.id));
 }
 
 /** 止まった理由を、画面に出せる言葉にする */
 function reason(err: unknown): string {
   if (err instanceof UserError) return err.message;
   const e = err as { authenticationFailed?: boolean; message?: string; responseText?: string };
-  if (e?.authenticationFailed) return "Gmail に入れませんでした。読み方を変えたため、もう一度「＋ Gmail をつなぐ」からつなぎ直してください";
+  if (e?.authenticationFailed) return "メールに入れませんでした。もう一度つなぎ直してください";
   return `読み取りが途中で止まりました（${(e?.responseText || e?.message || String(err)).slice(0, 120)}）。「調べる」でもう一度続きから進めます`;
 }
 
 /**
- * 調べを進める。deadline（ミリ秒の時刻）を過ぎたら、続きの場所を保存してやめる。
- * ほかで進めている最中なら何もしない
+ * 調べを進める。deadline（ミリ秒の時刻）を過ぎたら、そこでやめる（続きの場所は、ひとかたまりごとに保存してある）。
+ * 返す値：done＝終わった／止めた、more＝時間で区切れた（すぐ続きを進めてよい）、later＝相手が混み合っている（しばらく置く）、
+ * busy＝ほかで進めている最中か、調べる印がない
  */
-export async function runScan(mailboxId: string, deadline: number): Promise<void> {
+export async function runScan(mailboxId: string, deadline: number): Promise<"done" | "more" | "later" | "busy"> {
   const pool = await db();
   const claimed = await pool.query<MailboxRow>(
     `update migrate_mailboxes set lock_until = now() + interval '${LOCK}'
@@ -149,74 +140,66 @@ export async function runScan(mailboxId: string, deadline: number): Promise<void
     [mailboxId],
   );
   const box = claimed.rows[0];
-  if (!box) return;
-  let client: ImapFlow | null = null;
+  if (!box) return "busy";
+  let session: MailSession | null = null;
   try {
-    client = new ImapFlow({ ...IMAP, auth: { user: box.email, accessToken: await accessToken(box) }, logger: false });
-    await client.connect();
-    const all = (await client.list()).find((m) => m.specialUse === "\\All");
-    if (!all) throw new UserError("Gmail の「すべてのメール」が見つかりませんでした");
-    const lock = await client.getMailboxLock(all.path, { readOnly: true });
-    try {
-      const mailbox = client.mailbox;
-      if (!mailbox) throw new UserError("Gmail の「すべてのメール」を開けませんでした");
-      // 開いた時点の「次の番号」。これより後に届いたメールは、次回の調べで読む
-      const uidNext = Number(mailbox.uidNext);
-      const validity = String(mailbox.uidValidity);
-      let done = Number(box.done_uid);
-      let scanned = box.scanned;
-      if (box.uid_validity !== validity) {
-        // 初めて、または Gmail 側で番号が振り直された：最初から数える
-        await clearCounts(box.id);
-        await pool.query("update migrate_mailboxes set uid_validity = $2 where id = $1", [box.id, validity]);
-        done = 0;
-        scanned = 0;
-      }
-      const found = await client.search({ gmraw: GMAIL_QUERY, uid: `${done + 1}:*` }, { uid: true });
-      const uids = (found || []).filter((u) => u > done && u < uidNext).sort((a, b) => a - b);
-      await pool.query("update migrate_mailboxes set remaining = $2 where id = $1", [box.id, uids.length]);
-
-      for (let i = 0; i < uids.length; i += BATCH) {
-        if (Date.now() > deadline) return;
-        const still = await pool.query<{ requested: boolean }>("select requested from migrate_mailboxes where id = $1", [box.id]);
-        if (!still.rows[0]?.requested) return;
-        const batch = uids.slice(i, i + BATCH);
-        const headers: Header[] = [];
-        for await (const msg of client.fetch(batch.join(","), { uid: true, internalDate: true, headers: ["from", "subject"] }, { uid: true })) {
-          if (!msg.headers) continue;
-          const h = readRawHeaders(msg.headers.toString("utf8"));
-          headers.push({ ...h, at: msg.internalDate ? new Date(msg.internalDate).getTime() : 0 });
-        }
-        await merge(box.id, tally(headers, box.email));
-        done = batch[batch.length - 1];
-        scanned += batch.length;
-        await pool.query("update migrate_mailboxes set done_uid = $2, scanned = $3, remaining = $4 where id = $1", [box.id, done, scanned, uids.length - i - batch.length]);
-      }
-      // 読み終えた：開いた時点までは全部見た
-      await pool.query(
-        "update migrate_mailboxes set done_uid = $2, requested = false, remaining = 0, last_scan = now(), error = '' where id = $1",
-        [box.id, Math.max(done, uidNext - 1)],
-      );
-    } finally {
-      lock.release();
+    const source = SOURCES[box.source];
+    if (!source) throw new UserError(`このメールボックスの読み方（${box.source}）は、まだ用意されていません`);
+    session = await source.open(box, box.scan ?? {});
+    for (;;) {
+      if (Date.now() > deadline) return "more";
+      const still = await pool.query<{ requested: boolean }>("select requested from migrate_mailboxes where id = $1", [box.id]);
+      if (!still.rows[0]?.requested) return "done";
+      const batch = await session.next();
+      await transaction(async (client) => {
+        if (batch.reset) await clearCounts(client, box.id);
+        await merge(client, box.id, tally(batch.headers, box.email));
+        await client.query(
+          `update migrate_mailboxes set scan = $2::jsonb, scanned = scanned + $3, remaining = $4, error = '',
+             requested = requested and not $5, last_scan = case when $5 then now() else last_scan end
+           where id = $1`,
+          [box.id, JSON.stringify(batch.cursor), batch.read, batch.remaining ?? 0, batch.done],
+        );
+      });
+      if (batch.done) return "done";
     }
   } catch (err) {
+    if (err instanceof RetryLater) {
+      // 調べる印は残す。定期実行が、しばらくしてから続きを進める
+      await pool.query("update migrate_mailboxes set error = $2 where id = $1", [box.id, "Gmail が混み合っているので、少し休んでいます。15 分以内に自動で続きを進めます"]).catch(() => {});
+      return "later";
+    }
     console.error("[migrate] scan", err);
-    const message = err instanceof UserError && err.message === RECONNECT ? RECONNECT : reason(err);
-    await pool.query("update migrate_mailboxes set requested = false, error = $2 where id = $1", [box.id, message]).catch(() => {});
+    await pool.query("update migrate_mailboxes set requested = false, error = $2 where id = $1", [box.id, reason(err)]).catch(() => {});
+    return "done";
   } finally {
-    await client?.logout().catch(() => {});
+    await session?.close().catch(() => {});
     await pool.query("update migrate_mailboxes set lock_until = null where id = $1", [box.id]).catch(() => {});
   }
 }
 
-/** 定期実行から呼ぶ：途中のままのメールボックスを、時間のかぎり進める */
-export async function runPending(deadline: number): Promise<number> {
+/** 定期実行から呼ぶ：途中のままのメールボックスを、時間のかぎり進める。時間で区切れたものがあれば true */
+export async function runPending(deadline: number): Promise<{ pending: number; more: boolean }> {
   const pool = await db();
   const rows = (await pool.query<{ id: string }>("select id from migrate_mailboxes where requested and (lock_until is null or lock_until < now()) order by created_at")).rows;
+  let more = false;
   for (const r of rows) {
-    if (Date.now() > deadline) break;
-    await runScan(r.id, deadline);
+    if (Date.now() > deadline) {
+      more = true;
+      break;
+    }
+    if ((await runScan(r.id, deadline)) === "more") more = true;
   }
-  return rows.length;
+  return { pending: rows.length, more };
+}
+
+/**
+ * 続きを進める回を、もう 1 つ起こす（時間で区切れたとき）。
+ * 自分の定期実行の入口を呼ぶ。入口はすぐ返事を返して裏で進めるので、ここでは返事を受け取るまで待つ。
+ * 届かなくても、15 分ごとの定期実行が拾う
+ */
+export async function kick(origin: string): Promise<void> {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return;
+  await fetch(`${origin}/api/cron/migrate-scan`, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15000) }).catch((err) => console.error("[migrate] kick", err));
 }
