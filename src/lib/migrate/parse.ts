@@ -72,6 +72,14 @@ export function signalsOf(subject: string): Signal[] {
   return SIGNALS.filter(([, re]) => re.test(subject)).map(([s]) => s);
 }
 
+/** IMAP で受け取った生のヘッダ（From と Subject）から、差出人と件名を取り出す */
+export function readRawHeaders(raw: string): { from: string; subject: string } {
+  // 折り返された行（次の行が空白で始まる）を 1 行に戻す
+  const text = raw.replace(/\r?\n[ \t]+/g, " ");
+  const get = (name: string) => new RegExp(`^${name}:[ \\t]*(.*)$`, "im").exec(text)?.[1]?.trim() ?? "";
+  return { from: get("from"), subject: decodeHeader(get("subject")).trim().slice(0, 120) };
+}
+
 /** Gmail の検索に渡す絞り込み（アカウントに関係しそうなメールだけを読む） */
 export const GMAIL_QUERY =
   "-in:chats {subject:登録 subject:確認 subject:認証 subject:ようこそ subject:パスワード subject:アカウント subject:会員 subject:ログイン subject:領収 subject:注文 subject:請求 subject:購入 subject:予約 " +
