@@ -5,9 +5,10 @@ import type { AppState, Status } from "@/lib/migrate/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// 「調べる」は 1 回の呼び出しで読めるだけ読み、続きは画面がもう一度呼ぶ
+// 「調べる」は 1 回の呼び出しで読めるだけ読み、続きは画面がもう一度呼ぶ。
+// 一覧 1 回分（50 通・約 13 秒）と、混み合ったときの待ち（最大 12 秒）は途中で止めないので、時間の目安に余裕を残す
 export const maxDuration = 60;
-const SCAN_BUDGET_MS = 35_000;
+const SCAN_BUDGET_MS = 25_000;
 
 type Body = Record<string, unknown>;
 

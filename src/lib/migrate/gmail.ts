@@ -109,15 +109,21 @@ export async function disconnect(id: string): Promise<void> {
 }
 
 /** Gmail の API を読む（混み合っているときは少し待ってやり直す） */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function gmail(token: string, path: string): Promise<unknown> {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`${API}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
     if (res.ok) return res.json();
-    const busy = res.status === 429 || res.status >= 500 || (res.status === 403 && /rateLimit|quota/i.test(await res.clone().text()));
-    if (busy && attempt < 4) {
-      await new Promise((r) => setTimeout(r, 800 * 2 ** attempt));
+    const body = await res.text().catch(() => "");
+    // 読む速さの上限に当たった（1 人あたり 1 分に使える量を超えた）
+    const limited = res.status === 429 || (res.status === 403 && /rateLimit|quota/i.test(body));
+    // 待つのは最大 4 + 8 秒（1 回の呼び出しが Vercel の時間の上限を超えないように）
+    if ((limited || res.status >= 500) && attempt < 2) {
+      await sleep((limited ? 4000 : 800) * 2 ** attempt);
       continue;
     }
+    if (limited) throw new UserError("Gmail の読み取りが混み合っています。1 分ほど待ってから「続きを調べる」を押してください（読み終えた所から再開します）");
     if (res.status === 401) throw new UserError(RECONNECT);
     if (res.status === 403) throw new UserError("Gmail を読む許可がありません。Google Cloud で Gmail API を有効にしたか、つなぐときに「メールの閲覧」を許可したか確かめてください");
     throw new Error(`Gmail の読み取りに失敗しました（HTTP ${res.status}）`);
@@ -214,8 +220,13 @@ async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void
   );
 }
 
-/** 同時に読む数（Gmail の 1 秒あたりの上限に余裕を残す） */
-const PARALLEL = 10;
+/**
+ * 読む速さ。Gmail API は 1 人あたり 1 分に 6,000 単位まで使え、1 通のヘッダを読むと 20 単位、一覧を取ると 5 単位を使う。
+ * 1 秒に 4 通（1 分に 4,800 単位）にして、上限に余裕を残す
+ */
+const PER_SECOND = 4;
+/** 一覧を 1 回に取る数（読み終えるたびに続きの場所を保存するので、小さいほど止まっても損が少ない） */
+const PAGE = 50;
 
 /**
  * メールを調べる。時間のかぎり読み進め、どこまで読んだかを保存して返す。
@@ -232,15 +243,18 @@ export async function scan(mailboxId: string, budgetMs: number): Promise<ScanRes
   const q = GMAIL_QUERY + (state.after ? ` after:${state.after}` : "");
 
   for (;;) {
-    const list = (await gmail(token, `/messages?${new URLSearchParams({ q, maxResults: "100", fields: "messages/id,nextPageToken", ...(state.pageToken ? { pageToken: state.pageToken } : {}) })}`)) as {
+    const list = (await gmail(token, `/messages?${new URLSearchParams({ q, maxResults: String(PAGE), fields: "messages/id,nextPageToken", ...(state.pageToken ? { pageToken: state.pageToken } : {}) })}`)) as {
       messages?: { id: string }[];
       nextPageToken?: string;
     };
     const ids = (list.messages ?? []).map((m) => m.id);
     const headers: Header[] = [];
-    for (let i = 0; i < ids.length; i += PARALLEL) {
-      const got = await Promise.all(ids.slice(i, i + PARALLEL).map((id) => readHeader(token, id)));
+    for (let i = 0; i < ids.length; i += PER_SECOND) {
+      const started = Date.now();
+      const got = await Promise.all(ids.slice(i, i + PER_SECOND).map((id) => readHeader(token, id)));
       headers.push(...got.filter((h): h is Header => !!h));
+      // 1 秒に PER_SECOND 通を超えないように待つ
+      if (i + PER_SECOND < ids.length) await sleep(Math.max(0, 1000 - (Date.now() - started)));
     }
     await merge(box.id, tally(headers, box.email));
     read += ids.length;
