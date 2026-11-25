@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SIGNAL_LABEL, STATUS_LABEL, type AppState, type Mailbox, type ScanResult, type Service, type Signal, type Status } from "@/lib/migrate/types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { SIGNAL_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Signal, type Status } from "@/lib/migrate/types";
 
 /** アカウント引っ越しの API を呼ぶ（失敗したら、画面に出せる日本語の理由つきで投げる） */
 async function api<T>(action: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -32,9 +32,6 @@ export function MigrateApp() {
   const [box, setBox] = useState("");
   const [likelyOnly, setLikelyOnly] = useState(true);
   const [origin, setOrigin] = useState("");
-  /** 調べている最中のメールボックスと、この回に読んだ数 */
-  const [scanning, setScanning] = useState<{ id: string; read: number } | null>(null);
-  const stop = useRef(false);
 
   const reload = useCallback(async () => {
     try {
@@ -58,31 +55,17 @@ export function MigrateApp() {
     void start();
   }, [reload]);
 
-  const runScan = async (m: Mailbox) => {
-    stop.current = false;
-    setError("");
-    setScanning({ id: m.id, read: 0 });
-    let read = 0;
-    try {
-      for (;;) {
-        const r = await api<ScanResult>("scan", { mailboxId: m.id });
-        read += r.read;
-        setScanning({ id: m.id, read });
-        await reload();
-        if (r.done) {
-          setNotice(`${m.email}：${read.toLocaleString()} 通を調べ終えました。`);
-          break;
-        }
-        if (stop.current) {
-          setNotice(`${m.email}：途中で止めました（「続きを調べる」で再開できます）。`);
-          break;
-        }
-      }
-    } catch (e) {
-      setError(message(e));
-    }
-    setScanning(null);
-    await reload();
+  // サーバーが調べている間は、数秒ごとに進み具合を読み直す（画面を閉じても、調べるのはサーバーで続く）
+  const anyScanning = !!state?.mailboxes.some((m) => m.scanning);
+  useEffect(() => {
+    if (!anyScanning) return;
+    const timer = setInterval(() => void reload(), 3000);
+    return () => clearInterval(timer);
+  }, [anyScanning, reload]);
+
+  const startScan = async (m: Mailbox) => {
+    await act("scan", { mailboxId: m.id });
+    setNotice(`${m.email} を調べ始めました。画面を閉じても、サーバーで最後まで進みます。`);
   };
 
   const act = async (action: string, body: Record<string, unknown>) => {
@@ -152,35 +135,36 @@ export function MigrateApp() {
                 <h2 className="text-base font-black">メールボックス</h2>
                 {ready && <button type="button" className={primary} onClick={() => window.location.assign("/api/migrate/oauth/connect")}>＋ Gmail をつなぐ</button>}
               </div>
-              <p className="mt-1 text-xs text-neutral-500">読むだけの許可でつなぎます。読むのは差出人・件名・日付だけで、本文は読みません。</p>
+              <p className="mt-1 text-xs text-neutral-500">
+                Gmail を「読むだけ」の開き方で調べます。読むのは差出人・件名・日付だけで、本文は読みません。Google の許可の画面には「メールの送信・削除」も出ますが（Gmail を IMAP で読むための決まりです）、このアプリは使いません。
+              </p>
               {state.mailboxes.length === 0 && <p className="mt-3 text-sm text-neutral-500">まだつないでいません。</p>}
               <ul className="mt-3 space-y-3">
                 {state.mailboxes.map((m) => {
-                  const busy = scanning?.id === m.id;
                   return (
                     <li key={m.id} className="rounded-xl bg-neutral-100 p-3 dark:bg-neutral-800/60">
                       <p className="break-all text-sm font-bold">{m.email}</p>
                       <p className="mt-0.5 text-xs text-neutral-500">
-                        {busy
-                          ? `調べています… この回 ${scanning.read.toLocaleString()} 通`
-                          : m.scanning
-                            ? `途中まで調べました（${m.scanned.toLocaleString()} 通）`
-                            : m.last_scan
-                              ? `${day(m.last_scan)} に調べました（これまで ${m.scanned.toLocaleString()} 通）`
+                        {m.scanning
+                          ? `調べています…${m.remaining ? ` 残り ${m.remaining.toLocaleString()} 通` : ""}（これまで ${m.scanned.toLocaleString()} 通）。画面を閉じても続きます`
+                          : m.last_scan
+                            ? `${day(m.last_scan)} に調べました（これまで ${m.scanned.toLocaleString()} 通）`
+                            : m.scanned
+                              ? `途中まで調べました（${m.scanned.toLocaleString()} 通）`
                               : "まだ調べていません"}
                       </p>
+                      {m.error && <p className="mt-1 text-xs font-semibold text-red-600 dark:text-red-400">{m.error}</p>}
                       <div className="mt-2 flex flex-wrap gap-2">
-                        {busy ? (
-                          <button type="button" className={ghost} onClick={() => (stop.current = true)}>止める</button>
+                        {m.scanning ? (
+                          <button type="button" className={ghost} onClick={() => void act("stop", { mailboxId: m.id })}>止める</button>
                         ) : (
                           <>
-                            <button type="button" className={primary} disabled={!!scanning} onClick={() => void runScan(m)}>
-                              {m.scanning ? "続きを調べる" : m.last_scan ? "新しく届いた分を調べる" : "調べる"}
+                            <button type="button" className={primary} onClick={() => void startScan(m)}>
+                              {m.last_scan ? "新しく届いた分を調べる" : m.scanned ? "続きを調べる" : "調べる"}
                             </button>
                             <button
                               type="button"
                               className={ghost}
-                              disabled={!!scanning}
                               onClick={() => confirm(`${m.email} の件数を空にして、最初から調べ直せるようにします（仕分け・メモは残ります）。`) && void act("reset", { mailboxId: m.id })}
                             >
                               数え直す
@@ -188,7 +172,6 @@ export function MigrateApp() {
                             <button
                               type="button"
                               className={ghost}
-                              disabled={!!scanning}
                               onClick={() => confirm(`${m.email} とのつながりを切り、このメールボックスの一覧（仕分け・メモを含む）を消します。`) && void act("disconnect", { mailboxId: m.id })}
                             >
                               つながりを切る

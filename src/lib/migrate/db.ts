@@ -34,7 +34,7 @@ export async function db(): Promise<Pool> {
         id uuid primary key default gen_random_uuid(),
         email text not null unique,
         token_enc text not null default '',     -- Gmail を読む合言葉（AES-256-GCM で暗号化）
-        scan jsonb not null default '{}',       -- 調べている途中の続き（どこまで読んだか）
+        scan jsonb not null default '{}',       -- （使っていない。前の読み方の名残）
         scanned integer not null default 0,     -- これまでに読んだメールの数
         last_scan timestamptz,
         created_at timestamptz not null default now()
@@ -56,6 +56,13 @@ export async function db(): Promise<Pool> {
         updated_at timestamptz not null default now(),
         unique (mailbox_id, domain)
       );
+      -- IMAP で調べるための続きの情報（サーバーが進めるので、画面を閉じても続く）
+      alter table migrate_mailboxes add column if not exists requested boolean not null default false; -- 調べる途中か
+      alter table migrate_mailboxes add column if not exists lock_until timestamptz;                   -- 今どこかが進めている（二重に動かさない）
+      alter table migrate_mailboxes add column if not exists uid_validity text;                        -- 「すべてのメール」の番号の世代
+      alter table migrate_mailboxes add column if not exists done_uid bigint not null default 0;      -- この番号まで調べ終えた
+      alter table migrate_mailboxes add column if not exists remaining integer not null default 0;    -- 今回の残り
+      alter table migrate_mailboxes add column if not exists error text not null default '';
     `,
     )
     .then(() => undefined)
@@ -67,23 +74,18 @@ export async function db(): Promise<Pool> {
   return pool;
 }
 
-/** 調べている途中の続き */
-export interface ScanState {
-  /** 次に読むページ（あれば途中） */
-  pageToken?: string;
-  /** 今回の調べを始めた時刻（秒） */
-  startedAt?: number;
-  /** この時刻より後のメールだけ読む（前回読み終えた所。秒） */
-  after?: number;
-}
-
 export interface MailboxRow {
   id: string;
   email: string;
   token_enc: string;
-  scan: ScanState;
   scanned: number;
   last_scan: Date | null;
+  requested: boolean;
+  lock_until: Date | null;
+  uid_validity: string | null;
+  done_uid: string;
+  remaining: number;
+  error: string;
 }
 
 export interface ServiceRow {
@@ -113,7 +115,7 @@ export function uuid(value: unknown): string {
 
 /** ブラウザに返す形（合言葉は入れない） */
 export function toMailbox(row: MailboxRow): Mailbox {
-  return { id: row.id, email: row.email, scanned: row.scanned, scanning: !!row.scan?.startedAt, last_scan: iso(row.last_scan) };
+  return { id: row.id, email: row.email, scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error };
 }
 
 export function toService(row: ServiceRow): Service {

@@ -1,13 +1,15 @@
 import { guardApi } from "@/lib/access/locks";
 import { db, toMailbox, toService, UserError, uuid, type MailboxRow, type ServiceRow } from "@/lib/migrate/db";
-import { disconnect, googleConfigured, resetScan, scan } from "@/lib/migrate/gmail";
+import { after } from "next/server";
+import { disconnect, googleConfigured } from "@/lib/migrate/gmail";
+import { requestScan, resetScan, runScan, stopScan } from "@/lib/migrate/scan";
 import type { AppState, Status } from "@/lib/migrate/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// 「調べる」は 1 回の呼び出しで読めるだけ読み、続きは画面がもう一度呼ぶ
-export const maxDuration = 60;
-const SCAN_BUDGET_MS = 35_000;
+// 「調べる」は返事をすぐ返し、そのあと裏で（after）時間のかぎり進める。残りは定期実行が続きから進める
+export const maxDuration = 300;
+const SCAN_BUDGET_MS = 240_000;
 
 type Body = Record<string, unknown>;
 
@@ -32,20 +34,30 @@ const ACTIONS: Record<string, (b: Body) => Promise<unknown>> = {
     }
   },
 
-  /** メールを調べる（続きがあれば done: false） */
+  /** メールを調べ始める（返事はすぐ返す。進めるのはサーバーなので、画面を閉じても続く） */
   async scan(b) {
-    return scan(str(b.mailboxId, 64), SCAN_BUDGET_MS);
+    const id = uuid(b.mailboxId);
+    const deadline = Date.now() + SCAN_BUDGET_MS;
+    await requestScan(id);
+    after(() => runScan(id, deadline));
+    return { ok: true };
+  },
+
+  /** 調べるのを止める */
+  async stop(b) {
+    await stopScan(uuid(b.mailboxId));
+    return { ok: true };
   },
 
   /** 数え直すために、調べた結果を空にする */
   async reset(b) {
-    await resetScan(str(b.mailboxId, 64));
+    await resetScan(uuid(b.mailboxId));
     return { ok: true };
   },
 
   /** つながりを切る */
   async disconnect(b) {
-    await disconnect(str(b.mailboxId, 64));
+    await disconnect(uuid(b.mailboxId));
     return { ok: true };
   },
 

@@ -10,9 +10,13 @@ export interface Mailbox {
   id: string;
   email: string;
   scanned: number;
-  /** 調べている途中（続きがある） */
+  /** 調べている途中（サーバーが進めている。画面を閉じても続く） */
   scanning: boolean;
+  /** 今回の調べで、残りの通数（数え始める前は 0） */
+  remaining: number;
   last_scan: string | null;
+  /** 前回の調べが止まった理由（なければ空） */
+  error: string;
 }
 
 export interface Service {
@@ -34,12 +38,4 @@ export interface AppState {
   setup: { db: boolean; google: boolean };
   mailboxes: Mailbox[];
   services: Service[];
-}
-
-export interface ScanResult {
-  /** この回に読んだメールの数 */
-  read: number;
-  /** 全部読み終えたか（false なら、もう一度呼ぶと続きから読む） */
-  done: boolean;
-  scanned: number;
 }
