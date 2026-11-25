@@ -296,7 +296,7 @@ function Setup({ setup, origin }: { setup: AppState["setup"]; origin: string }) 
       <h2 className="font-black">はじめの設定</h2>
       <ol className="mt-2 list-decimal space-y-2 pl-5">
         <li className={setup.db ? "opacity-50" : ""}>
-          {setup.db ? "✅ " : ""}Supabase の SQL Editor で <code>supabase/migrate.sql</code> を実行する（表を作る）。
+          {setup.db ? "✅ " : ""}データベース（Vercel につないだ Neon。環境変数 <code>DATABASE_URL</code>）を用意する。表は自動で作られます。
         </li>
         <li className={setup.google ? "opacity-50" : ""}>
           {setup.google ? "✅ " : ""}Google Cloud で OAuth クライアント（種類：ウェブ アプリケーション）を作り、「承認済みのリダイレクト URI」に次を登録する。

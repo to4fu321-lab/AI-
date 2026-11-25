@@ -1,6 +1,6 @@
 import "server-only";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { db, getMailbox, must, UserError, type MailboxRow, type ScanState, type ServiceRow } from "./db";
+import { db, getMailbox, UserError, type MailboxRow, type ScanState, type ServiceRow } from "./db";
 import { decodeHeader, GMAIL_QUERY, isPersonalDomain, parseFrom, serviceDomain, signalsOf } from "./parse";
 import type { ScanResult, Signal } from "./types";
 
@@ -96,7 +96,7 @@ export async function finishConnect(code: string, origin: string): Promise<{ ema
   const profile = (await gmail(json.access_token, "/profile")) as { emailAddress?: string };
   const email = profile.emailAddress?.toLowerCase();
   if (!email) throw new Error("つないだアドレスを確かめられませんでした");
-  must(await db().from("migrate_mailboxes").upsert({ email, token_enc: seal(json.refresh_token) }, { onConflict: "email" }));
+  await (await db()).query("insert into migrate_mailboxes (email, token_enc) values ($1, $2) on conflict (email) do update set token_enc = excluded.token_enc", [email, seal(json.refresh_token)]);
   return { email };
 }
 
@@ -105,7 +105,7 @@ export async function disconnect(id: string): Promise<void> {
   const box = await getMailbox(id);
   const refresh = open(box.token_enc);
   if (refresh) await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(refresh)}`, { method: "POST" }).catch(() => {});
-  must(await db().from("migrate_mailboxes").delete().eq("id", id));
+  await (await db()).query("delete from migrate_mailboxes where id = $1", [box.id]);
 }
 
 /** Gmail の API を読む（混み合っているときは少し待ってやり直す） */
@@ -175,8 +175,8 @@ const NAME_KEEP = 8;
 /** まとめた分を、データベースの今の数に足しこむ（仕分けの状態やメモは変えない） */
 async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void> {
   if (!found.size) return;
-  const c = db();
-  const existing = must(await c.from("migrate_services").select("*").eq("mailbox_id", mailboxId).in("domain", [...found.keys()])) as ServiceRow[];
+  const pool = await db();
+  const existing = (await pool.query<ServiceRow>("select * from migrate_services where mailbox_id = $1 and domain = any($2)", [mailboxId, [...found.keys()]])).rows;
   const byDomain = new Map(existing.map((r) => [r.domain, r]));
   const rows = [...found].map(([domain, t]) => {
     const old = byDomain.get(domain);
@@ -190,10 +190,9 @@ async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void
       .sort((a, b) => b.t - a.t)
       .filter((x) => !seen.has(x.s) && seen.add(x.s))
       .slice(0, SUBJECT_KEEP);
-    const first = Math.min(t.first, old?.first_at ? Date.parse(old.first_at) : Infinity);
-    const last = Math.max(t.last, old?.last_at ? Date.parse(old.last_at) : 0);
+    const first = Math.min(t.first, old?.first_at?.getTime() ?? Infinity);
+    const last = Math.max(t.last, old?.last_at?.getTime() ?? 0);
     return {
-      mailbox_id: mailboxId,
       domain,
       name: top[0]?.[0] ?? "",
       names: Object.fromEntries(top),
@@ -202,10 +201,17 @@ async function merge(mailboxId: string, found: Map<string, Tally>): Promise<void
       subjects,
       first_at: first && Number.isFinite(first) ? new Date(first).toISOString() : null,
       last_at: last ? new Date(last).toISOString() : null,
-      updated_at: new Date().toISOString(),
     };
   });
-  must(await c.from("migrate_services").upsert(rows, { onConflict: "mailbox_id,domain" }));
+  await pool.query(
+    `insert into migrate_services (mailbox_id, domain, name, names, count, signals, subjects, first_at, last_at)
+     select $1, x.domain, x.name, x.names, x.count, x.signals, x.subjects, x.first_at, x.last_at
+     from jsonb_to_recordset($2::jsonb) as x(domain text, name text, names jsonb, count integer, signals jsonb, subjects jsonb, first_at timestamptz, last_at timestamptz)
+     on conflict (mailbox_id, domain) do update set
+       name = excluded.name, names = excluded.names, count = excluded.count, signals = excluded.signals,
+       subjects = excluded.subjects, first_at = excluded.first_at, last_at = excluded.last_at, updated_at = now()`,
+    [mailboxId, JSON.stringify(rows)],
+  );
 }
 
 /** 同時に読む数（Gmail の 1 秒あたりの上限に余裕を残す） */
@@ -242,7 +248,7 @@ export async function scan(mailboxId: string, budgetMs: number): Promise<ScanRes
     const done = !list.nextPageToken;
     // 読み終えたら、次回は今回の開始より後だけ読む（境目の取りこぼしを防ぐため 1 分重ねる）
     const next: ScanState = done ? { after: state.startedAt - 60 } : { ...state, pageToken: list.nextPageToken };
-    must(await db().from("migrate_mailboxes").update({ scan: next, scanned, ...(done ? { last_scan: new Date().toISOString() } : {}) }).eq("id", box.id));
+    await (await db()).query("update migrate_mailboxes set scan = $2::jsonb, scanned = $3, last_scan = case when $4 then now() else last_scan end where id = $1", [box.id, JSON.stringify(next), scanned, done]);
     if (done) return { read, done: true, scanned };
     state.pageToken = list.nextPageToken;
     if (Date.now() > until) return { read, done: false, scanned };
@@ -251,7 +257,8 @@ export async function scan(mailboxId: string, budgetMs: number): Promise<ScanRes
 
 /** 調べた結果を数え直すために空にする（仕分けの状態・開くページ・メモは残す） */
 export async function resetScan(mailboxId: string): Promise<void> {
-  const c = db();
-  must(await c.from("migrate_services").update({ count: 0, names: {}, signals: {}, subjects: [], first_at: null, last_at: null }).eq("mailbox_id", mailboxId));
-  must(await c.from("migrate_mailboxes").update({ scan: {}, scanned: 0, last_scan: null }).eq("id", mailboxId));
+  const box = await getMailbox(mailboxId);
+  const pool = await db();
+  await pool.query("update migrate_services set count = 0, names = '{}', signals = '{}', subjects = '[]', first_at = null, last_at = null where mailbox_id = $1", [box.id]);
+  await pool.query("update migrate_mailboxes set scan = '{}', scanned = 0, last_scan = null where id = $1", [box.id]);
 }

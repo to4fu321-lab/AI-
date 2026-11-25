@@ -1,5 +1,5 @@
 import { guardApi } from "@/lib/access/locks";
-import { allServices, db, must, toMailbox, toService, UserError, type MailboxRow } from "@/lib/migrate/db";
+import { db, toMailbox, toService, UserError, uuid, type MailboxRow, type ServiceRow } from "@/lib/migrate/db";
 import { disconnect, googleConfigured, resetScan, scan } from "@/lib/migrate/gmail";
 import type { AppState, Status } from "@/lib/migrate/types";
 
@@ -19,11 +19,12 @@ const ACTIONS: Record<string, (b: Body) => Promise<unknown>> = {
   async state(): Promise<AppState> {
     const setup = { db: true, google: googleConfigured() };
     try {
+      const pool = await db();
       const [boxes, services] = await Promise.all([
-        db().from("migrate_mailboxes").select("*").order("created_at").then((r) => must(r) as MailboxRow[]),
-        allServices(),
+        pool.query<MailboxRow>("select * from migrate_mailboxes order by created_at"),
+        pool.query<ServiceRow>("select * from migrate_services order by count desc, id"),
       ]);
-      return { setup, mailboxes: boxes.map(toMailbox), services: services.map(toService) };
+      return { setup, mailboxes: boxes.rows.map(toMailbox), services: services.rows.map(toService) };
     } catch (e) {
       // 設定がまだのときも画面は開けるようにして、何が足りないかを見せる
       if (e instanceof UserError) return { setup: { ...setup, db: false }, mailboxes: [], services: [] };
@@ -50,18 +51,18 @@ const ACTIONS: Record<string, (b: Body) => Promise<unknown>> = {
 
   /** 仕分け・開くページ・メモを変える */
   async update(b) {
-    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    const id = uuid(b.id);
+    const pool = await db();
     if (typeof b.status === "string") {
       if (!STATUSES.includes(b.status as Status)) throw new UserError("仕分けの種類が違います");
-      patch.status = b.status;
+      await pool.query("update migrate_services set status = $2, updated_at = now() where id = $1", [id, b.status]);
     }
     if (typeof b.login_url === "string") {
       const url = str(b.login_url, 500).trim();
       if (url && !/^https:\/\/[^\s]+$/.test(url)) throw new UserError("開くページは https:// から始まる URL を入れてください");
-      patch.login_url = url;
+      await pool.query("update migrate_services set login_url = $2, updated_at = now() where id = $1", [id, url]);
     }
-    if (typeof b.note === "string") patch.note = str(b.note, 2000);
-    must(await db().from("migrate_services").update(patch).eq("id", str(b.id, 64)));
+    if (typeof b.note === "string") await pool.query("update migrate_services set note = $2, updated_at = now() where id = $1", [id, str(b.note, 2000)]);
     return { ok: true };
   },
 };
