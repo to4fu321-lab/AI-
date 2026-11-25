@@ -75,6 +75,9 @@ export async function db(): Promise<Pool | null> {
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()
       );
+      -- 指紋のない動画も見張れるように：名前の鍵と再生時間（名前で見つけたとき、長さが違えば別の動画）
+      alter table thumbs_revive add column if not exists name_key text;
+      alter table thumbs_revive add column if not exists duration real;
     `,
     )
     .then(() => undefined)

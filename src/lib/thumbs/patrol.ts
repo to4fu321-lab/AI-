@@ -2,7 +2,7 @@ import "server-only";
 import { crawl } from "./crawl";
 import { db } from "./db";
 import { thumbsLog } from "./safeFetch";
-import { noticeFound, saveFound, watchedPrints } from "./revive";
+import { noticeFound, saveFound, watchedPrints, type Watched } from "./revive";
 import type { CrawlOptions, MediaItem } from "./types";
 
 /**
@@ -67,7 +67,7 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
   const known = (await pool.query<{ code: string }>("select code from thumbs_patrol_gofile order by at desc limit 5000")).rows.map((r) => r.code);
 
   // 「復活したら保存」で見張っている動画の指紋
-  const watched = await watchedPrints().catch(() => new Set<string>());
+  const watched = await watchedPrints().catch((): Watched => new Map());
   let revived = 0;
   let ran = 0;
   let total = 0;
