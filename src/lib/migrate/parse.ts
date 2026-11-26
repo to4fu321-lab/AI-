@@ -116,6 +116,15 @@ const SUBJECT_WORDS =
   'subject:receipt subject:order subject:invoice subject:payment subject:subscription subject:"sign in" subject:"log in" subject:login subject:"sign up"';
 export const GMAIL_QUERY_ACCOUNT = `-in:chats -category:promotions -category:social {${SUBJECT_WORDS}}`;
 export const GMAIL_QUERY_PROMO = "-in:chats category:promotions";
+/**
+ * 1 段目と 2 段目のあいだに読む段（RECENT）：直近 1 年に届いた全部のメール（広告とソーシャルを除く）。
+ * 件名に手がかりが無いサービスも拾い、「このアドレスに、最近なにが届いているか」を取りこぼさないため。
+ * 迷惑メールとゴミ箱は、Gmail の検索がもともと外す（なりすましが多いので、台帳には入れない）
+ */
+export const GMAIL_QUERY_RECENT = "-in:chats -category:promotions -category:social";
+export const RECENT_WINDOW = "newer_than:1y";
+/** RECENT の段で、1 回の調べで読む数の上限 */
+export const RECENT_MAX = 10_000;
 /** 2 段目で読む数の上限（1 回の調べで）。広告の多い差出人を見つけるには、新しい方から数百通で足りる */
 export const PROMO_SAMPLE = 300;
 /** 2 段目を初めて読むとき、どこまでさかのぼるか */

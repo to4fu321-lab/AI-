@@ -126,6 +126,17 @@ const MIGRATIONS: string[] = [
       alter table migrate_mailboxes add column if not exists retiring boolean not null default false;  -- このアドレスをやめたい（毎日、自動で見張る）
       alter table migrate_services add column if not exists status_at timestamptz;                     -- 仕分けを変えた時刻（「変更できた」のあとに届いたメールを見分ける）
   `,
+  // 4：ふるいの最後の層（LLM）。だれが分類を決めたかの印と、LLM の答えを覚えておく表
+  `
+      alter table migrate_messages add column if not exists kind_source text not null default 'rule';  -- rule＝決まりで決めた／llm＝LLM が決めた
+      create index if not exists migrate_messages_box_kind on migrate_messages (mailbox_id, kind, kind_source);
+      create table if not exists migrate_llm_cache (
+        key text primary key,                   -- ドメインと件名の形から作ったハッシュ（件名そのものは入れない）
+        kind text not null,
+        model text not null,
+        created_at timestamptz not null default now()
+      );
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {

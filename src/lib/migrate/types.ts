@@ -52,7 +52,7 @@ export interface Service {
 
 export interface AppState {
   /** 設定の状態。tokenKey は、合言葉の暗号化に専用の鍵（MIGRATE_TOKEN_KEY）を使っているか */
-  setup: { db: boolean; google: boolean; tokenKey: boolean };
+  setup: { db: boolean; google: boolean; tokenKey: boolean; llm: boolean };
   /** ログインしている利用者（していなければ null。そのときは一覧も空） */
   user: { email: string; name: string } | null;
   mailboxes: Mailbox[];

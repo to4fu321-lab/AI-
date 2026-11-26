@@ -199,6 +199,11 @@ export function MigrateApp() {
               <p className="mt-1 text-xs text-neutral-500">
                 読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。認証コードやログイン通知のメールは、件名を保存しません。それ以外の件名も、番号や URL は伏せてから記録します。
               </p>
+              {!state.setup.llm && (
+                <p className="mt-2 text-xs text-neutral-500">
+                  AI による仕上げの分類は、まだ使えません（Vercel の環境変数 <code>ANTHROPIC_API_KEY</code> が未設定）。決まりで分類できなかったメールは「そのほかのお知らせ」のままになります。
+                </p>
+              )}
               {!state.setup.tokenKey && (
                 <p className="mt-2 rounded-xl bg-amber-100 p-3 text-xs font-semibold text-amber-900 dark:bg-amber-950 dark:text-amber-100">
                   メールボックスをつなぐ前に、合言葉を守る鍵の設定が必要です。Vercel の環境変数 <code>MIGRATE_TOKEN_KEY</code> に、32 文字以上のでたらめな文字列を入れて、デプロイし直してください。
