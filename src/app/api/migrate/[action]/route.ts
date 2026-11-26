@@ -4,7 +4,7 @@ import { guardApi } from "@/lib/access/locks";
 import { currentUser, deleteAccount, destroySession, sessionCookie, type User } from "@/lib/migrate/auth";
 import { UserError, uuid } from "@/lib/migrate/db";
 import { disconnect, googleConfigured, tokenKeyConfigured } from "@/lib/migrate/gmail";
-import { loadLedger, updateService } from "@/lib/migrate/ledger";
+import { loadLedger, setRetiring, updateService } from "@/lib/migrate/ledger";
 import { kick, requestScan, resetScan, runScan, selfOrigin, stopScan } from "@/lib/migrate/scan";
 import type { AppState } from "@/lib/migrate/types";
 
@@ -49,6 +49,12 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
   /** つながりを切る */
   async disconnect(user, b) {
     await disconnect(user.id, uuid(b.mailboxId));
+    return { ok: true };
+  },
+
+  /** 「このアドレスをやめたい」の印を付ける・外す */
+  async retire(user, b) {
+    await setRetiring(user.id, b.mailboxId, b.retiring);
     return { ok: true };
   },
 

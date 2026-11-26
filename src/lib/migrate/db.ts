@@ -121,6 +121,11 @@ const MIGRATIONS: string[] = [
       update migrate_services set count = 0, names = '{}', signals = '{}', subjects = '[]', first_at = null, last_at = null;
       update migrate_mailboxes set scan = '{}', scanned = 0, remaining = 0, last_scan = null, requested = false;
   `,
+  // 3：卒業までの道すじ（やめたいアドレスの印、仕分けを変えた時刻）
+  `
+      alter table migrate_mailboxes add column if not exists retiring boolean not null default false;  -- このアドレスをやめたい（毎日、自動で見張る）
+      alter table migrate_services add column if not exists status_at timestamptz;                     -- 仕分けを変えた時刻（「変更できた」のあとに届いたメールを見分ける）
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {
@@ -178,6 +183,7 @@ export interface MailboxRow {
   requested: boolean;
   lock_until: Date | null;
   lock_token: string | null;
+  retiring: boolean;
   remaining: number;
   error: string;
 }
@@ -198,6 +204,7 @@ export interface ServiceRow {
   status: Status;
   login_url: string;
   note: string;
+  status_at: Date | null;
 }
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
@@ -211,11 +218,13 @@ export function uuid(value: unknown): string {
 
 /** ブラウザに返す形（合言葉は入れない） */
 export function toMailbox(row: MailboxRow, kinds: Partial<Record<Kind, number>> = {}): Mailbox {
-  return { id: row.id, email: row.email, scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds };
+  return { id: row.id, email: row.email, scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds, retiring: row.retiring, graduation: null };
 }
 
-export function toService(row: ServiceRow): Service {
+export function toService(row: ServiceRow, stillArriving: Service["stillArriving"] = null): Service {
   return {
+    status_at: iso(row.status_at),
+    stillArriving,
     id: row.id,
     mailbox_id: row.mailbox_id,
     domain: row.domain,

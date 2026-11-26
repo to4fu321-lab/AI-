@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { KINDS, type Kind } from "@/lib/migrate/classify";
+import { QUIET_DAYS, type Graduation } from "@/lib/migrate/graduate";
 import { LEVEL_LABEL, type Level } from "@/lib/migrate/judge";
 import { KIND_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Status } from "@/lib/migrate/types";
 
@@ -248,6 +249,11 @@ export function MigrateApp() {
                           </>
                         )}
                       </div>
+                      <label className="mt-3 flex items-center gap-2 text-xs font-semibold text-neutral-700 dark:text-neutral-200">
+                        <input type="checkbox" checked={m.retiring} onChange={(e) => void act("retire", { mailboxId: m.id, retiring: e.target.checked })} />
+                        このアドレスを、やめたい（毎日 1 回、自動で見張ります）
+                      </label>
+                      {m.graduation && <GraduationPanel g={m.graduation} />}
                     </li>
                   );
                 })}
@@ -350,6 +356,11 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
           </ul>
         </details>
       )}
+      {s.stillArriving && (
+        <p className="mt-2 rounded-lg bg-rose-100 p-2 text-xs font-semibold text-rose-800 dark:bg-rose-950 dark:text-rose-200">
+          「変更できた」にしたあとも、{day(s.stillArriving.lastAt)} に重要なメールが届いています（{s.stillArriving.count} 通）。まだこのアドレスが使われているようです。登録アドレスの変更が済んでいるか、もう一度確かめてください。
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {/* 届いた通数が少ない差出人には、その差出人のサイトへの案内を出さない（なりすましメールの差出人へ誘導しないため）。自分で URL を入れれば出る */}
         {s.status !== "skip" && (s.login_url || !s.judgment.unproven) && (
@@ -361,6 +372,34 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <button type="button" className="text-xs font-semibold text-neutral-500 underline" onClick={onEditUrl}>開くページを直す</button>
       </div>
     </li>
+  );
+}
+
+/** やめるまでの進み具合。3 つの条件を順に見せ、全部そろったら「やめて大丈夫」と出す */
+function GraduationPanel({ g }: { g: Graduation }) {
+  const steps: [boolean, string][] = [
+    ...(g.scanned ? [] : ([[false, "まず「調べる」を押して、最後まで調べてください"]] as [boolean, string][])),
+    [g.todo === 0, g.todo === 0 ? "頼っているサービスは、すべて仕分けました" : `頼っている（かもしれない）サービスが、あと ${g.todo} 件あります。「移行する」→「変更できた」か、「不要」に仕分けてください`],
+    [g.leaking === 0, g.leaking === 0 ? "「変更できた」にしたサービスから、そのあと重要なメールは届いていません" : `「変更できた」にしたのに、まだ重要なメールが届いているサービスが ${g.leaking} 件あります`],
+    [
+      g.waitDays === 0,
+      g.quietDays === null
+        ? "重要なメールは、1 通も見つかっていません"
+        : g.waitDays === 0
+          ? `重要なメールが届かなくなって ${g.quietDays} 日たちました（目安は ${QUIET_DAYS} 日）`
+          : `重要なメールが最後に届いたのは ${day(g.lastNeededAt)}（${g.quietDays} 日前）です。あと ${g.waitDays} 日、届かないことを確かめます`,
+    ],
+  ];
+  return (
+    <div className={`mt-2 rounded-xl p-3 text-xs ${g.ready ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : "bg-white text-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"}`}>
+      <p className="text-sm font-black">{g.ready ? "🎉 このアドレスは、やめて大丈夫です" : "まだ、やめないでください"}</p>
+      <ul className="mt-1 space-y-1">
+        {steps.map(([ok, text]) => (
+          <li key={text}>{ok ? "✅" : "⬜"} {text}</li>
+        ))}
+      </ul>
+      {g.ready && <p className="mt-1 text-neutral-600 dark:text-neutral-300">念のため、やめる前に、銀行・役所・家族との連絡など、メールが年に 1 回しか来ない大事な相手がいないか思い出してください。</p>}
+    </div>
   );
 }
 

@@ -24,6 +24,8 @@ const SOURCES: Record<string, MailSource> = { "gmail-api": gmailApi, imap };
 const LOCK = "6 minutes";
 /** 定期実行の 1 回で、同時に進めるメールボックスの数 */
 const PARALLEL = 4;
+/** 「やめたい」印の付いたアドレスを、自動で調べる間隔 */
+const WATCH_INTERVAL = "24 hours";
 /** 件名の見本として残す数 */
 const SUBJECT_KEEP = 5;
 /** 1 つのメールボックスで記録する通数の上限（1 人が、際限なく記録を増やせないように） */
@@ -165,6 +167,38 @@ async function rebuild(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id
   );
 }
 
+/**
+ * 分類の決まりが新しくなっていたら、記録済みのメールを分類し直す（メール会社から読み直さない）。
+ * ログイン・本人確認のメールは件名を保存していないので、分類はそのまま（版の印だけ進める）
+ */
+async function reclassify(box: Pick<MailboxRow, "id" | "user_id">): Promise<void> {
+  for (;;) {
+    const more = await transaction(async (client) => {
+      const old = await client.query<{ id: string; domain: string; kind: Kind; subject: string; labels: string[]; has_unsubscribe: boolean; precedence: string }>(
+        "select id, domain, kind, subject, labels, has_unsubscribe, precedence from migrate_messages where mailbox_id = $1 and rules_version < $2 order by id limit 2000 for update",
+        [box.id, RULES_VERSION],
+      );
+      if (!old.rows.length) return false;
+      const changed = old.rows.flatMap((r) => {
+        if (LOGIN_KINDS.includes(r.kind)) return [];
+        const kind = classify({ subject: r.subject, labels: r.labels, listUnsubscribe: r.has_unsubscribe, precedence: r.precedence });
+        return kind === r.kind ? [] : [{ id: r.id, kind, subject: LOGIN_SUBJECT[kind] ?? r.subject }];
+      });
+      if (changed.length) {
+        await client.query(
+          `update migrate_messages m set kind = x.kind, subject = x.subject
+           from jsonb_to_recordset($1::jsonb) as x(id bigint, kind text, subject text) where m.id = x.id and m.mailbox_id = $2`,
+          [JSON.stringify(changed), box.id],
+        );
+      }
+      await client.query("update migrate_messages set rules_version = $2 where id = any($1::bigint[])", [old.rows.map((r) => r.id), RULES_VERSION]);
+      await rebuild(client, box, [...new Set(old.rows.map((r) => r.domain))]);
+      return old.rows.length === 2000;
+    });
+    if (!more) return;
+  }
+}
+
 /** 記録と集計を空にする（仕分けの状態・開くページ・メモは残す） */
 async function clearCounts(client: PoolClient, mailboxId: string): Promise<void> {
   await client.query("delete from migrate_messages where mailbox_id = $1", [mailboxId]);
@@ -229,6 +263,7 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
   try {
     const source = SOURCES[box.source];
     if (!source) throw new UserError("このメールボックスの読み方は、まだ用意されていません");
+    await reclassify(box);
     session = await source.open(box, box.scan ?? {});
     for (;;) {
       if (Date.now() > deadline) return "more";
@@ -275,6 +310,13 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
  */
 export async function runPending(deadline: number): Promise<{ pending: number; more: boolean }> {
   const pool = await db();
+  // 「やめたい」印の付いたアドレスは、1 日 1 回、自動で新しく届いた分を調べる（移したあとも届いていないか見張るため）。
+  // つながりが切れているもの・止まった理由が残っているものは、自動では動かさない
+  await pool.query(
+    `update migrate_mailboxes set requested = true
+     where retiring and not requested and user_id is not null and token_enc <> '' and error = ''
+       and last_scan is not null and last_scan < now() - interval '${WATCH_INTERVAL}'`,
+  );
   const rows = (
     await pool.query<{ id: string }>(
       `select id from migrate_mailboxes where requested and user_id is not null and (lock_until is null or lock_until < now())
