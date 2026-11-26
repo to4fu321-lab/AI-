@@ -72,6 +72,7 @@ export function Library({
   onRemoveExclude,
   gofileToken,
   onGofileToken,
+  appOrigin,
   now,
   onRun,
   onSave,
@@ -89,6 +90,8 @@ export function Library({
   /** Gofile のアカウントトークン（空なら未設定） */
   gofileToken: string;
   onGofileToken: (token: string) => void;
+  /** このアプリのアドレス（ブックマークレットに入れる） */
+  appOrigin: string;
   /** 「〇分前」の基準時刻（描画のたびに変わらないよう親から渡す） */
   now: number;
   onRun: (url: string, settings: CrawlSettings) => void;
@@ -142,7 +145,7 @@ export function Library({
       </section>
 
       <ExcludeList excludes={excludes} onAdd={onAddExclude} onRemove={onRemoveExclude} />
-      <GofileSetting token={gofileToken} onChange={onGofileToken} />
+      <GofileSetting token={gofileToken} onChange={onGofileToken} appOrigin={appOrigin} />
 
       {history.length > 0 && (
         <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
@@ -200,7 +203,7 @@ export function Library({
 }
 
 /** Gofile のアカウントトークンの設定（Gofile がゲスト登録を断るときに使う） */
-function GofileSetting({ token, onChange }: { token: string; onChange: (token: string) => void }) {
+function GofileSetting({ token, onChange, appOrigin }: { token: string; onChange: (token: string) => void; appOrigin: string }) {
   const [value, setValue] = useState(token);
   const [error, setError] = useState<string | null>(null);
   const [prev, setPrev] = useState(token);
@@ -251,8 +254,57 @@ function GofileSetting({ token, onChange }: { token: string; onChange: (token: s
             トークンを消す
           </button>
         )}
+        <TokenBookmarklet appOrigin={appOrigin} />
         <PatrolTokens myToken={token} />
       </div>
+    </details>
+  );
+}
+
+/**
+ * gofile.io で押すと、そのブラウザの Gofile のトークン（ゲスト、またはログインしているアカウント）を、このアプリに渡すブックマークレット。
+ * トークンはアドレスの「#」より後ろで渡すので、サーバーには送られず、受け取ったらすぐアドレスから消す
+ */
+export function gofileTokenBookmarklet(appOrigin: string): string {
+  return `javascript:(function(){var o=${JSON.stringify(appOrigin)};if(!/(^|\.)gofile\.io$/.test(location.hostname)){alert('gofile.io のページを開いてから押してください');return;}var t=(document.cookie.match(/(?:^|;\s*)accountToken=([A-Za-z0-9]+)/)||[])[1];try{t=t||localStorage.getItem('accountToken')||localStorage.getItem('token');var a=window.appdata;if(!t&&a)t=a.accountToken||a.token||(a.user&&a.user.token);}catch(e){}if(!t||!/^[A-Za-z0-9]{10,128}$/.test(t)){alert('トークンが見つかりませんでした。gofile.io のページが全部表示されるまで待ってから、もう一度押してください');return;}location.href=o+'/thumbs#gofile-token='+t;})();`;
+}
+
+function TokenBookmarklet({ appOrigin }: { appOrigin: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!appOrigin) return null;
+  const code = gofileTokenBookmarklet(appOrigin);
+  return (
+    <details className="mt-3 border-t border-neutral-100 pt-2 dark:border-neutral-800">
+      <summary className="cursor-pointer font-bold text-neutral-500">⚡ トークンを楽に入れる（ブックマークレット）</summary>
+      <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[11px] leading-relaxed text-neutral-400">
+        <li>下の「コードをコピー」を押す</li>
+        <li>
+          何かのページをブックマークに追加し、そのブックマークを編集して、名前を「サムネ収集にトークンを送る」、URL を貼り付けたコードに書き換える
+          （iPhone の Safari：ブックマーク → 編集 → 追加したブックマークをタップ）
+        </li>
+        <li>
+          <a href="https://gofile.io/" target="_blank" rel="noopener noreferrer" className="underline">
+            gofile.io
+          </a>
+          を開いて、表示されるまで待つ（開くだけでゲストのアカウントができます。ログインしていれば自分のアカウント）
+        </li>
+        <li>そのページでブックマーク「サムネ収集にトークンを送る」を押す → このアプリが開いて、トークンが入ります</li>
+      </ol>
+      <div className="mt-1.5 flex gap-2">
+        <button
+          type="button"
+          onClick={() =>
+            void navigator.clipboard?.writeText(code).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2500);
+            })
+          }
+          className="rounded-full bg-neutral-900 px-3 py-1 font-bold text-white dark:bg-white dark:text-neutral-900"
+        >
+          {copied ? "コピーしました ✓" : "コードをコピー"}
+        </button>
+      </div>
+      <textarea readOnly value={code} rows={2} aria-label="ブックマークに入れるコード" className="mt-1.5 w-full rounded-md border border-neutral-200 bg-neutral-50 p-1.5 font-mono text-[10px] text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900" />
     </details>
   );
 }
