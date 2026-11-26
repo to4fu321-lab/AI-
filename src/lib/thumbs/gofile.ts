@@ -1,7 +1,7 @@
 import "server-only";
-import { createHash } from "node:crypto";
 import { getSession, dropSession } from "./browserSession";
 import { db } from "./db";
+import { BAD_TOKEN_MS, badTokens, markBad, tokenTag } from "./gofileTokens";
 import { thumbsLog } from "./safeFetch";
 
 /**
@@ -200,8 +200,6 @@ async function takeTurn(): Promise<void> {
   if (wait > 0) await sleep(Math.min(wait, 60000));
 }
 
-/** トークンそのものは置かず、見分けるための要約だけ置く */
-const tokenTag = (t: string) => createHash("sha256").update(`gofile:${t}`).digest("hex").slice(0, 16);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ORIGIN = "https://gofile.io";
@@ -277,8 +275,9 @@ function paced<T>(run: () => Promise<T>): Promise<T> {
 }
 
 /** フォルダの中身を聞く（中のフォルダも 2 段まで。ファイルは 300 個まで） */
-export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string, allowBrowser = true): Promise<GofileResult> {
-  let fixed = givenToken || process.env.GOFILE_TOKEN?.trim() || undefined;
+export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: string | string[], allowBrowser = true): Promise<GofileResult> {
+  /** 使ってよいトークン（上から順に。断られたら次へ。全部だめならゲスト） */
+  let queue = [...new Set([...(Array.isArray(givenToken) ? givenToken : givenToken ? [givenToken] : []), ...(process.env.GOFILE_TOKEN?.trim() ? [process.env.GOFILE_TOKEN.trim()] : [])])];
   const notes: string[] = [];
   // 前に（どのサーバーでも）読んだフォルダなら、Gofile には聞かずに覚えを使う
   const hit = await cached(id);
@@ -287,14 +286,14 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
     return hit;
   }
   await loadBlock();
-  // 前に Gofile に断られたトークンは使わない（何度も断られると「聞きすぎ」で止められる）。ゲストで読む
-  if (fixed) {
-    const bad = await shared<{ tag: string; at: number }>("gofileBadToken");
-    if (bad && bad.tag === tokenTag(fixed) && Date.now() - bad.at < 24 * 60 * 60 * 1000) {
-      notes.push("設定したトークンは Gofile に断られたため、ゲストで読みます");
-      fixed = undefined;
-    }
+  // 前に Gofile に断られたトークンは使わない（何度も断られると「聞きすぎ」で止められる）
+  if (queue.length) {
+    const bad = await badTokens();
+    const before = queue.length;
+    queue = queue.filter((t) => !(bad[tokenTag(t)] && Date.now() - bad[tokenTag(t)] < BAD_TOKEN_MS));
+    if (queue.length < before) notes.push(`断られたトークン ${before - queue.length} 個は使いません`);
   }
+  let fixed: string | undefined = queue.shift();
   const fail = (status: string): GofileResult => {
     const error = describe(status);
     thumbsLog(`gofile ${id} files=0 ${status} ${notes.join(" ／ ").slice(0, 300)}`);
@@ -361,9 +360,18 @@ export async function gofileFiles(id: string, signal: AbortSignal, givenToken?: 
       }
       if (answer.http === 401 || /token/i.test(answer.status)) {
         if (fixed && token === fixed) {
-          // 設定したトークンが断られた：覚えておいて（24 時間は使わない）、ゲストに切り替えて 1 回だけ聞き直す
-          await setShared("gofileBadToken", { tag: tokenTag(fixed), at: Date.now() });
-          notes.push("設定したトークンが断られたので、ゲストに切り替え");
+          // 設定したトークンが断られた（無効・期限切れ）：覚えておいて（24 時間は使わない）、次のトークンに切り替えて聞き直す。
+          // 次がなければゲストで 1 回だけ
+          await markBad(fixed);
+          const next = queue.shift();
+          if (next) {
+            notes.push(`トークン（…${fixed.slice(-4)}）が断られたので、次のトークン（…${next.slice(-4)}）に切り替え`);
+            fixed = next;
+            token = next;
+            return visit(folder, level, retried);
+          }
+          notes.push(`トークン（…${fixed.slice(-4)}）が断られたので、ゲストに切り替え`);
+          fixed = undefined;
           const g = await guestToken();
           if (g && !retried) {
             token = g;

@@ -870,7 +870,7 @@ export async function* crawl(
       seenGofile.add(id);
       // ブラウザで開くのは時間がかかる（1 回 20〜40 秒）ので、区切りの時刻まで余裕があるときだけ
       const browserOk = allowBrowser && !gofileBrowserFailed && options.render !== "off" && Date.now() < deadline - 5000;
-      const r: GofileResult = await gofileFiles(id, signal, options.gofileToken, browserOk).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
+      const r: GofileResult = await gofileFiles(id, signal, options.gofileTokens?.length ? options.gofileTokens : options.gofileToken, browserOk).catch(() => ({ files: [], error: "Gofile に接続できませんでした" }));
       error ??= r.error;
       detail ??= r.detail;
       if (r.error && browserOk && /ブラウザ/.test(r.detail ?? "")) gofileBrowserFailed = true;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /** 取得の設定（登録サイトと履歴に一緒に保存して、同じ条件で取り直せるようにする） */
 export interface CrawlSettings {
@@ -251,8 +251,100 @@ function GofileSetting({ token, onChange }: { token: string; onChange: (token: s
             トークンを消す
           </button>
         )}
+        <PatrolTokens myToken={token} />
       </div>
     </details>
+  );
+}
+
+type PatrolToken = { tag: string; label: string; tail: string; badAt: number | null };
+
+/**
+ * 自動巡回で使う Gofile のトークン（利用者ごとに 1 つずつ、最大 5 つ）。
+ * 巡回は上から順に使い、トークンが断られたら（無効・期限切れ）次のトークンに自動で切り替える
+ */
+function PatrolTokens({ myToken }: { myToken: string }) {
+  const [tokens, setTokens] = useState<PatrolToken[] | null>(null);
+  const [max, setMax] = useState(5);
+  const [label, setLabel] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void fetch("/api/thumbs/gofile-tokens")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { configured?: boolean; max?: number; tokens?: PatrolToken[] } | null) => {
+        if (!d?.configured) return;
+        setTokens(d.tokens ?? []);
+        if (d.max) setMax(d.max);
+      })
+      .catch(() => {});
+  }, []);
+  if (!tokens) return null;
+  const post = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    setNote(null);
+    const res = await fetch("/api/thumbs/gofile-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+    const d = (res ? await res.json().catch(() => null) : null) as { tokens?: PatrolToken[]; error?: string } | null;
+    if (d?.tokens) setTokens(d.tokens);
+    if (!res?.ok) setNote(d?.error ?? "保存できませんでした");
+    setBusy(false);
+  };
+  const mine = myToken ? tokens.find((t) => t.tail === myToken.slice(-4)) : undefined;
+  return (
+    <div className="mt-3 border-t border-neutral-100 pt-2 dark:border-neutral-800">
+      <p className="font-bold text-neutral-500">🔁 自動巡回で使うトークン（{tokens.length}/{max}）</p>
+      <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
+        利用者ごとに 1 つずつ足せます。巡回は上から順に使い、トークンが断られたら（無効・期限切れ）次のトークンに自動で切り替えます。
+        Gofile がサーバー全体を「聞きすぎ」で止めたときは、どのトークンでも同じなので、切り替えずに待ちます。
+      </p>
+      {tokens.length === 0 && <p className="text-[11px] text-neutral-400">まだありません（ゲストとして読みます）</p>}
+      <ul className="space-y-1">
+        {tokens.map((t, i) => (
+          <li key={t.tag} className="flex items-center gap-2 text-[11px]">
+            <span className="w-4 text-neutral-400">{i + 1}.</span>
+            <span className="font-semibold">{t.label}</span>
+            <span className="font-mono text-neutral-400">…{t.tail}</span>
+            {t.badAt ? (
+              <span className="text-red-500" title={`${new Date(t.badAt).toLocaleString("ja-JP")} に断られました`}>
+                ⚠ 無効になっています（入れ直してください）
+              </span>
+            ) : (
+              <span className="text-emerald-600 dark:text-emerald-400">使えます</span>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => confirm(`「${t.label}」のトークンを巡回から外しますか？`) && void post({ action: "remove", tag: t.tag })}
+              className="ml-auto text-neutral-400 underline hover:text-red-500"
+            >
+              外す
+            </button>
+          </li>
+        ))}
+      </ul>
+      {myToken && !mine && tokens.length < max && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void post({ action: "add", label, token: myToken });
+          }}
+          className="mt-2 flex gap-2"
+        >
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="名前（例：自分・Aさん）"
+            maxLength={30}
+            className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+          />
+          <button type="submit" disabled={busy} className="shrink-0 rounded-full bg-sky-600 px-3 py-1.5 font-bold text-white disabled:opacity-60">
+            上のトークンを巡回にも使う
+          </button>
+        </form>
+      )}
+      {myToken && mine && <p className="mt-1.5 text-[11px] text-neutral-400">上のトークンは「{mine.label}」として巡回に入っています</p>}
+      {note && <p className="mt-1 text-[11px] text-red-500">{note}</p>}
+    </div>
   );
 }
 
