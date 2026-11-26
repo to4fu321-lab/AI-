@@ -313,17 +313,25 @@ function PatrolTokens({ myToken }: { myToken: string }) {
   const [tokens, setTokens] = useState<PatrolToken[] | null>(null);
   const [max, setMax] = useState(5);
   const [label, setLabel] = useState("");
+  /** 一覧に直接足すトークン（この端末の設定とは別に、何個でも続けて足せる） */
+  const [newLabel, setNewLabel] = useState("");
+  const [newToken, setNewToken] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    void fetch("/api/thumbs/gofile-tokens")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: { configured?: boolean; max?: number; tokens?: PatrolToken[] } | null) => {
-        if (!d?.configured) return;
-        setTokens(d.tokens ?? []);
-        if (d.max) setMax(d.max);
-      })
-      .catch(() => {});
+    const load = () =>
+      void fetch("/api/thumbs/gofile-tokens")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: { configured?: boolean; max?: number; tokens?: PatrolToken[] } | null) => {
+          if (!d?.configured) return;
+          setTokens(d.tokens ?? []);
+          if (d.max) setMax(d.max);
+        })
+        .catch(() => {});
+    load();
+    // ほかの場所（ブックマークレットのお知らせ）で足したら、読み直す
+    window.addEventListener("thumbs-gofile-tokens", load);
+    return () => window.removeEventListener("thumbs-gofile-tokens", load);
   }, []);
   if (!tokens) return null;
   const post = async (body: Record<string, unknown>) => {
@@ -334,6 +342,7 @@ function PatrolTokens({ myToken }: { myToken: string }) {
     if (d?.tokens) setTokens(d.tokens);
     if (!res?.ok) setNote(d?.error ?? "保存できませんでした");
     setBusy(false);
+    return !!res?.ok;
   };
   const mine = myToken ? tokens.find((t) => t.tail === myToken.slice(-4)) : undefined;
   return (
@@ -389,6 +398,44 @@ function PatrolTokens({ myToken }: { myToken: string }) {
         </form>
       )}
       {myToken && mine && <p className="mt-1.5 text-[11px] text-neutral-400">上のトークンは「{mine.label}」として巡回に入っています</p>}
+      {tokens.length < max && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const t = newToken.trim();
+            if (!/^[A-Za-z0-9]{10,128}$/.test(t)) return setNote("英数字だけのトークンを貼り付けてください");
+            if (await post({ action: "add", label: newLabel, token: t })) {
+              setNewToken("");
+              setNewLabel("");
+            }
+          }}
+          className="mt-2 space-y-1.5 rounded-lg bg-neutral-50 p-2 dark:bg-neutral-950"
+        >
+          <p className="text-[11px] font-semibold text-neutral-500">＋ トークンを足す（ほかの人のぶんも、ここから続けて足せます）</p>
+          <div className="flex gap-2">
+            <input
+              value={newLabel}
+              onChange={(e) => setNewLabel(e.target.value)}
+              placeholder="名前"
+              maxLength={30}
+              className="w-24 shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+            />
+            <input
+              value={newToken}
+              onChange={(e) => setNewToken(e.target.value)}
+              placeholder="トークンを貼り付け"
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
+              className="min-w-0 flex-1 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-[16px] text-neutral-900 outline-none placeholder:text-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+            />
+          </div>
+          <button type="submit" disabled={busy || !newToken.trim()} className="rounded-full bg-sky-600 px-3 py-1.5 font-bold text-white disabled:opacity-50">
+            巡回に足す
+          </button>
+        </form>
+      )}
       {note && <p className="mt-1 text-[11px] text-red-500">{note}</p>}
     </div>
   );

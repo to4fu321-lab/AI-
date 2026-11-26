@@ -2458,8 +2458,10 @@ function TokenArrived({ token, onClose }: { token: string; onClose: () => void }
     setState("busy");
     const res = await fetch("/api/thumbs/gofile-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "add", label, token }) }).catch(() => null);
     const d = (res ? await res.json().catch(() => null) : null) as { error?: string } | null;
-    if (res?.ok) setState("done");
-    else {
+    if (res?.ok) {
+      setState("done");
+      window.dispatchEvent(new Event("thumbs-gofile-tokens"));
+    } else {
       setState("error");
       setMessage(d?.error ?? "巡回に足せませんでした");
     }
