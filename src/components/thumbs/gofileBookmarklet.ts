@@ -38,3 +38,44 @@ export function gofileTokenBookmarklet(appOrigin: string): string {
   const code = BODY.replace(/\n\s*/g, "");
   return `javascript:${code}(${JSON.stringify(appOrigin)});`;
 }
+
+/**
+ * X の検索結果（ログインしている本人のブラウザ）で押すと、画面を少しずつ下へ動かしながら Gofile のリンクを集め、
+ * このアプリへ渡すブックマークレット。X は画面に見えている投稿しかページに残さないので、動かしながら集める。
+ * 集めたフォルダの番号はアドレスの「#」より後ろで渡す（サーバーには送られない）
+ */
+const X_BODY = String.raw`(function(o){
+if(!/(^|\.)(x|twitter)\.com$/.test(location.hostname)){alert('X（x.com）の検索結果を開いてから押してください');return;}
+var ids={},n=0,still=0,round=0;
+var box=document.createElement('div');
+box.style.cssText='position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:2147483647;background:#0ea5e9;color:#fff;font:bold 14px sans-serif;padding:10px 16px;border-radius:999px;box-shadow:0 4px 16px rgba(0,0,0,.3)';
+document.body.appendChild(box);
+function grab(){
+  var t=(document.body.innerText||'')+' ';
+  document.querySelectorAll('a[href],[title]').forEach(function(a){t+=' '+(a.getAttribute('title')||'')+' '+(a.textContent||'');});
+  var re=/gofile\.io\/d\/([A-Za-z0-9_-]{4,40})/g,m,before=n;
+  while((m=re.exec(t))){if(!ids[m[1]]){ids[m[1]]=1;n++;}}
+  return n>before;
+}
+function step(){
+  round++;
+  still=grab()?0:still+1;
+  box.textContent='🔎 Gofile のリンクを集めています… '+n+' 件（'+round+'/30）';
+  if(round<30&&still<5){window.scrollBy(0,Math.round(innerHeight*0.9));setTimeout(step,1300);return;}
+  box.remove();
+  var list=Object.keys(ids);
+  if(!list.length){alert('Gofile のリンクが見つかりませんでした（検索結果が表示されてから、もう一度押してください）');return;}
+  location.href=o+'/thumbs#gofile-ids='+list.slice(0,200).join(',')+'&from='+encodeURIComponent(location.href.slice(0,500));
+}
+step();
+})`;
+
+export function xGofileBookmarklet(appOrigin: string): string {
+  return `javascript:${X_BODY.replace(/\n\s*/g, "")}(${JSON.stringify(appOrigin)});`;
+}
+
+/** X の検索：Gofile のリンクを含む投稿を、新しい順に（hours 時間以内） */
+export function xGofileSearchUrl(hours: number): string {
+  const q = `url:gofile.io within_time:${hours}h`;
+  return `https://x.com/search?q=${encodeURIComponent(q)}&src=typed_query&f=live`;
+}
