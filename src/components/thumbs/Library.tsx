@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { gofileTokenBookmarklet } from "./gofileBookmarklet";
 
 /** 取得の設定（登録サイトと履歴に一緒に保存して、同じ条件で取り直せるようにする） */
 export interface CrawlSettings {
@@ -261,14 +262,6 @@ function GofileSetting({ token, onChange, appOrigin }: { token: string; onChange
   );
 }
 
-/**
- * gofile.io で押すと、そのブラウザの Gofile のトークン（ゲスト、またはログインしているアカウント）を、このアプリに渡すブックマークレット。
- * トークンはアドレスの「#」より後ろで渡すので、サーバーには送られず、受け取ったらすぐアドレスから消す
- */
-export function gofileTokenBookmarklet(appOrigin: string): string {
-  return `javascript:(function(){var o=${JSON.stringify(appOrigin)};if(!/(^|\.)gofile\.io$/.test(location.hostname)){alert('gofile.io のページを開いてから押してください');return;}var t=(document.cookie.match(/(?:^|;\s*)accountToken=([A-Za-z0-9]+)/)||[])[1];try{t=t||localStorage.getItem('accountToken')||localStorage.getItem('token');var a=window.appdata;if(!t&&a)t=a.accountToken||a.token||(a.user&&a.user.token);}catch(e){}if(!t||!/^[A-Za-z0-9]{10,128}$/.test(t)){alert('トークンが見つかりませんでした。gofile.io のページが全部表示されるまで待ってから、もう一度押してください');return;}location.href=o+'/thumbs#gofile-token='+t;})();`;
-}
-
 function TokenBookmarklet({ appOrigin }: { appOrigin: string }) {
   const [copied, setCopied] = useState(false);
   if (!appOrigin) return null;
@@ -288,7 +281,8 @@ function TokenBookmarklet({ appOrigin }: { appOrigin: string }) {
           </a>
           を開いて、表示されるまで待つ（開くだけでゲストのアカウントができます。ログインしていれば自分のアカウント）
         </li>
-        <li>そのページでブックマーク「サムネ収集にトークンを送る」を押す → このアプリが開いて、トークンが入ります</li>
+        <li>そのページ（できれば「My Profile」）でブックマーク「サムネ収集にトークンを送る」を押す → このアプリが開いて、トークンが入ります</li>
+        <li>「見つけられませんでした」と出たら、My Profile の「API token」の横のコピーボタンを押してから、出てきた欄に貼り付けます</li>
       </ol>
       <div className="mt-1.5 flex gap-2">
         <button
