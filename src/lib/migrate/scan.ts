@@ -100,6 +100,8 @@ async function insertRows(client: PoolClient, box: Pick<MailboxRow, "id" | "user
     return;
   } catch (err) {
     await client.query("rollback to savepoint ingest");
+    // メールボックスが消えた（調べている途中で、利用者がつながりを切った）ときは、1 通ずつ試しても同じ。そのまま止める
+    if ((err as { code?: string })?.code === "23503") throw err;
     console.error("[migrate] ingest batch failed; retrying row by row", (err as { code?: string })?.code ?? "");
   }
   for (const row of rows) {
