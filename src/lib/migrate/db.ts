@@ -137,6 +137,29 @@ const MIGRATIONS: string[] = [
         created_at timestamptz not null default now()
       );
   `,
+  // 5：AI 秘書（MCP）とつなぐための鍵。利用者ごとに何本でも作れ、鍵ごとに見せるメールボックスを絞れる
+  `
+      create table if not exists migrate_grants (
+        id uuid primary key default gen_random_uuid(),
+        user_id uuid not null references migrate_users(id) on delete cascade,
+        name text not null,                     -- 利用者が付けた名前（「Claude Desktop」など）
+        token_hash text not null unique,        -- 鍵のハッシュ。鍵そのものは保存しない（作ったときに 1 回だけ見せる）
+        token_hint text not null,               -- 見分け用に、鍵の先頭の数文字
+        mailbox_ids uuid[],                     -- 見せるメールボックス（null ならすべて）
+        created_at timestamptz not null default now(),
+        last_used_at timestamptz,
+        revoked_at timestamptz
+      );
+      create index if not exists migrate_grants_user on migrate_grants (user_id);
+      -- 鍵ごとの呼び出しの記録（回数の上限と、どの AI がいつ何を見たかの記録）
+      create table if not exists migrate_grant_calls (
+        id bigint generated always as identity primary key,
+        grant_id uuid not null references migrate_grants(id) on delete cascade,
+        tool text not null,
+        at timestamptz not null default now()
+      );
+      create index if not exists migrate_grant_calls_grant_at on migrate_grant_calls (grant_id, at desc);
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {

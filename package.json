@@ -13,6 +13,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^1.12.0",
     "@ffmpeg/core": "^0.12.10",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@sparticuz/chromium": "^153.0.0",
     "@supabase/supabase-js": "^2.110.5",
     "@types/pg": "^8.23.1",
@@ -26,7 +27,8 @@
     "react-dom": "19.2.4",
     "server-only": "^0.0.1",
     "tldts": "^7.6.0",
-    "web-push": "^4.0.0"
+    "web-push": "^4.0.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

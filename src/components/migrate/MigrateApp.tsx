@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { KINDS, type Kind } from "@/lib/migrate/classify";
 import { QUIET_DAYS, type Graduation } from "@/lib/migrate/graduate";
 import { LEVEL_LABEL, type Level } from "@/lib/migrate/judge";
+import type { Grant } from "@/lib/migrate/grants";
 import { KIND_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Status } from "@/lib/migrate/types";
 
 /** アカウント引っ越しの API を呼ぶ（失敗したら、画面に出せる日本語の理由つきで投げる） */
@@ -301,6 +302,8 @@ export function MigrateApp() {
               </section>
             )}
 
+            <AgentsPanel state={state} origin={origin} reload={reload} setError={setError} />
+
             <p className="pt-4 text-center text-xs text-neutral-400">
               <button
                 type="button"
@@ -377,6 +380,109 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <button type="button" className="text-xs font-semibold text-neutral-500 underline" onClick={onEditUrl}>開くページを直す</button>
       </div>
     </li>
+  );
+}
+
+/**
+ * AI 秘書（Claude Desktop・Claude Code など）とつなぐ鍵。
+ * 作った鍵は、その場で 1 回だけ見せる（閉じたら二度と見られない。なくしたら取り消して作り直す）
+ */
+function AgentsPanel({ state, origin, reload, setError }: { state: AppState; origin: string; reload: () => Promise<void>; setError: (m: string) => void }) {
+  const [name, setName] = useState("Claude Desktop");
+  const [scope, setScope] = useState<string[] | null>(null);
+  const [issued, setIssued] = useState<{ token: string; grant: Grant } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const url = `${origin}/api/mcp/migrate`;
+
+  const create = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setIssued(await api<{ token: string; grant: Grant }>("grantCreate", { name, mailboxIds: scope }));
+      await reload();
+    } catch (e) {
+      setError(message(e));
+    }
+    setBusy(false);
+  };
+  const revoke = async (g: Grant) => {
+    if (!confirm(`「${g.name}」の鍵を取り消します。この鍵を使っている AI 秘書は、すぐに使えなくなります。`)) return;
+    try {
+      await api("grantRevoke", { id: g.id });
+      if (issued?.grant.id === g.id) setIssued(null);
+      await reload();
+    } catch (e) {
+      setError(message(e));
+    }
+  };
+  const toggle = (id: string, on: boolean) => {
+    const current = scope ?? state.mailboxes.map((m) => m.id);
+    const next = on ? [...new Set([...current, id])] : current.filter((x) => x !== id);
+    setScope(next.length === state.mailboxes.length ? null : next);
+  };
+
+  return (
+    <section className={card}>
+      <h2 className="text-base font-black">AI 秘書とつなぐ（MCP）</h2>
+      <p className="mt-1 text-xs text-neutral-500">
+        Claude Desktop や Claude Code などの AI 秘書から、つないだアドレスの台帳と、メールの記録（ヘッダだけ）を読めるようにします。鍵ごとに、見せるアドレスを選べます。鍵はいつでも取り消せます。
+      </p>
+
+      {issued && (
+        <div className="mt-3 rounded-xl bg-amber-100 p-3 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+          <p className="font-black">鍵ができました。この画面を閉じると、二度と表示されません。いま控えてください。</p>
+          <p className="mt-2 font-semibold">鍵</p>
+          <code className="mt-1 block break-all rounded bg-white/70 p-2 dark:bg-black/30">{issued.token}</code>
+          <p className="mt-2 font-semibold">つなぎ先（URL）</p>
+          <code className="mt-1 block break-all rounded bg-white/70 p-2 dark:bg-black/30">{url}</code>
+          <p className="mt-2 font-semibold">Claude Code の場合（端末で 1 回実行）</p>
+          <code className="mt-1 block break-all rounded bg-white/70 p-2 dark:bg-black/30">{`claude mcp add --transport http account-migrate ${url} --header "Authorization: Bearer ${issued.token}"`}</code>
+          <p className="mt-2 font-semibold">Claude Desktop の場合（設定ファイル claude_desktop_config.json の mcpServers に足す）</p>
+          <code className="mt-1 block whitespace-pre-wrap break-all rounded bg-white/70 p-2 dark:bg-black/30">
+            {JSON.stringify({ "account-migrate": { command: "npx", args: ["-y", "mcp-remote", url, "--header", "Authorization:${AUTH_HEADER}"], env: { AUTH_HEADER: `Bearer ${issued.token}` } } }, null, 2)}
+          </code>
+          <p className="mt-2">鍵は、パスワードと同じように扱ってください。人に見せたり、チャットに貼ったりしないでください。</p>
+          <button type="button" className={`${ghost} mt-2`} onClick={() => setIssued(null)}>控えたので閉じる</button>
+        </div>
+      )}
+
+      {state.grants.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {state.grants.map((g) => (
+            <li key={g.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-neutral-100 p-3 text-xs dark:bg-neutral-800/60">
+              <div className="min-w-0">
+                <p className="font-bold">{g.name}<span className="ml-2 font-normal text-neutral-500">{g.hint}…</span></p>
+                <p className="mt-0.5 text-neutral-500">
+                  見せるアドレス：{g.mailboxes ? g.mailboxes.join("、") || "（なし）" : "すべて"} ／ 最後に使った日：{g.last_used_at ? day(g.last_used_at) : "まだ"} ／ 直近 24 時間 {g.calls24h} 回
+                </p>
+              </div>
+              <button type="button" className={ghost} onClick={() => void revoke(g)}>取り消す</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-3 space-y-2 text-xs">
+        <label className="block font-semibold">
+          鍵の名前（どの AI 秘書に渡すか）
+          <input className={`${input} mt-1`} value={name} maxLength={40} onChange={(e) => setName(e.target.value)} />
+        </label>
+        {state.mailboxes.length > 0 && (
+          <fieldset>
+            <legend className="font-semibold">見せるアドレス</legend>
+            {state.mailboxes.map((m) => (
+              <label key={m.id} className="mt-1 flex items-center gap-2">
+                <input type="checkbox" checked={!scope || scope.includes(m.id)} onChange={(e) => toggle(m.id, e.target.checked)} />
+                <span className="break-all">{m.email}</span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        <button type="button" className={primary} disabled={busy || (scope !== null && scope.length === 0)} onClick={() => void create()}>
+          鍵を作る
+        </button>
+      </div>
+    </section>
   );
 }
 
