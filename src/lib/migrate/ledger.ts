@@ -1,6 +1,7 @@
 import "server-only";
 import type { Kind } from "./classify";
-import { db, toMailbox, toService, UserError, uuid, type MailboxRow, type ServiceRow } from "./db";
+import { db, getMailbox, toMailbox, toService, UserError, uuid, type MailboxRow, type ServiceRow } from "./db";
+import { graduation, NEEDED_KINDS } from "./graduate";
 import type { Mailbox, Service, Status } from "./types";
 
 /**
@@ -14,14 +15,34 @@ const STATUSES: Status[] = ["new", "move", "skip", "done"];
 /** その人のメールボックスと、サービスの一覧 */
 export async function loadLedger(userId: string): Promise<{ mailboxes: Mailbox[]; services: Service[] }> {
   const pool = await db();
-  const [boxes, services, kinds] = await Promise.all([
+  const [boxes, services, kinds, still] = await Promise.all([
     pool.query<MailboxRow>("select * from migrate_mailboxes where user_id = $1 order by created_at", [userId]),
     pool.query<ServiceRow>("select * from migrate_services where user_id = $1 order by count desc, id", [userId]),
     pool.query<{ mailbox_id: string; kind: Kind; n: number }>("select mailbox_id, kind, count(*)::int as n from migrate_messages where user_id = $1 group by mailbox_id, kind", [userId]),
+    // 「変更できた」にしたあとも届いている、重要なメール（まだ古いアドレスが使われている印）
+    pool.query<{ id: string; n: number; last: Date }>(
+      `select s.id, count(*)::int as n, max(m.at) as last
+       from migrate_services s join migrate_messages m on m.mailbox_id = s.mailbox_id and m.domain = s.domain
+       where s.user_id = $1 and s.status = 'done' and s.status_at is not null and m.at > s.status_at and m.kind = any($2)
+       group by s.id`,
+      [userId, NEEDED_KINDS],
+    ),
   ]);
   const byBox = new Map<string, Partial<Record<Kind, number>>>();
   for (const k of kinds.rows) byBox.set(k.mailbox_id, { ...(byBox.get(k.mailbox_id) ?? {}), [k.kind]: k.n });
-  return { mailboxes: boxes.rows.map((b) => toMailbox(b, byBox.get(b.id))), services: services.rows.map(toService) };
+  const stillBy = new Map(still.rows.map((r) => [r.id, { count: r.n, lastAt: r.last.toISOString() }]));
+  const list = services.rows.map((s) => toService(s, stillBy.get(s.id) ?? null));
+  const mailboxes = boxes.rows.map((b) => {
+    const m = toMailbox(b, byBox.get(b.id));
+    return b.retiring ? { ...m, graduation: graduation(list.filter((s) => s.mailbox_id === b.id), !!b.last_scan) } : m;
+  });
+  return { mailboxes, services: list };
+}
+
+/** 「このアドレスをやめたい」の印を付ける・外す（付けると、毎日自動で見張る） */
+export async function setRetiring(userId: string, mailboxId: unknown, retiring: unknown): Promise<void> {
+  const box = await getMailbox(userId, uuid(mailboxId));
+  await (await db()).query("update migrate_mailboxes set retiring = $3 where id = $1 and user_id = $2", [box.id, userId, retiring === true]);
 }
 
 /** サービスの仕分け・開くページ・メモを変える */
@@ -36,6 +57,7 @@ export async function updateService(userId: string, serviceId: unknown, patch: {
   if (typeof patch.status === "string") {
     if (!STATUSES.includes(patch.status as Status)) throw new UserError("仕分けの種類が違います");
     set("status", patch.status);
+    sets.push("status_at = now()");
   }
   if (typeof patch.login_url === "string") {
     const url = patch.login_url.slice(0, 500).trim();

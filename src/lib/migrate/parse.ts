@@ -112,7 +112,7 @@ const SUBJECT_WORDS =
   "subject:登録 subject:確認 subject:認証 subject:コード subject:ようこそ subject:パスワード subject:アカウント subject:ログイン subject:サインイン subject:セキュリティ subject:ワンタイム " +
   "subject:領収 subject:注文 subject:請求 subject:購入 subject:予約 subject:支払 subject:発送 " +
   "subject:welcome subject:verify subject:verification subject:confirm subject:password subject:passcode subject:code subject:account subject:activate subject:security " +
-  "subject:ロック subject:本人確認 subject:利用 subject:引き落とし subject:更新 subject:チャージ subject:locked subject:alert subject:link " +
+  "subject:ロック subject:本人確認 subject:引き落とし subject:チャージ subject:発送 subject:locked subject:alert " +
   'subject:receipt subject:order subject:invoice subject:payment subject:subscription subject:"sign in" subject:"log in" subject:login subject:"sign up"';
 export const GMAIL_QUERY_ACCOUNT = `-in:chats -category:promotions -category:social {${SUBJECT_WORDS}}`;
 export const GMAIL_QUERY_PROMO = "-in:chats category:promotions";

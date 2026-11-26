@@ -1,5 +1,6 @@
 /** アカウント引っ越し：画面とサーバーの両方で使う型 */
 import type { Kind } from "./classify";
+import type { Graduation } from "./graduate";
 import type { Judgment } from "./judge";
 
 export type Status = "new" | "move" | "skip" | "done";
@@ -20,6 +21,10 @@ export interface Mailbox {
   error: string;
   /** 記録したメールの、種類ごとの通数（必要なメールと広告の内訳） */
   kinds: Partial<Record<Kind, number>>;
+  /** このアドレスをやめたい（印を付けると、毎日自動で見張る） */
+  retiring: boolean;
+  /** やめるまでの進み具合（やめたい印が付いているときだけ） */
+  graduation: Graduation | null;
 }
 
 export interface Service {
@@ -37,6 +42,10 @@ export interface Service {
   first_at: string | null;
   last_at: string | null;
   status: Status;
+  /** 仕分けを変えた時刻 */
+  status_at: string | null;
+  /** 「変更できた」にしたあとも、このアドレスに届いている重要なメール（なければ null）。まだ古いアドレスが使われている印 */
+  stillArriving: { count: number; lastAt: string } | null;
   login_url: string;
   note: string;
 }
