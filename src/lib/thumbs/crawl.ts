@@ -73,6 +73,13 @@ function zoneOf(candidate: string, home: CrawlHome): number {
   }
 }
 
+/** X の投稿から Gofile のリンクを探す検索（新しい順） */
+const X_GOFILE_SEARCHES =
+  // （試験のときだけ、手元のページに差し替える）
+  process.env.THUMBS_TEST_X_SEARCH && process.env.THUMBS_ALLOW_PRIVATE === "1"
+    ? [process.env.THUMBS_TEST_X_SEARCH]
+    : ["https://search.yahoo.co.jp/realtime/search?p=" + encodeURIComponent("gofile.io/d")];
+
 /** 同じページを別 URL で二重に読まないための正規化 */
 function normalizePageUrl(url: string): string {
   const u = new URL(url);
@@ -432,6 +439,15 @@ export async function* crawl(
   const seenPages = new Set<string>(resume?.seen ?? [normalizePageUrl(startUrl)]);
   const seenMedia = new SeenMedia();
   const queue: QueueItem[] = resume?.queue ?? [{ url: startUrl, depth: 0, rank: 0, root: true }];
+  // gofile-douga の新着を読むときは、X に投稿された Gofile のリンクも同時に探す（Yahoo! リアルタイム検索＝X の投稿の検索）。
+  // gofile-douga に載っているフォルダは、同じフォルダを 2 度は読まないので、載っていないものだけが増える。
+  // 検索の結果のページからは、Gofile のリンクだけを拾い、ほかのリンクは辿らない（階層の上限の位置に置く）
+  if (!resume && options.alsoX !== false && /^https?:\/\/(?:www\.)?gofile-douga\.com\/new\/?(?:[?#]|$)/.test(startUrl)) {
+    for (const x of X_GOFILE_SEARCHES) {
+      seenPages.add(normalizePageUrl(x));
+      queue.push({ url: x, depth: Math.max(options.depth, 1), rank: 1, prio: 3, zone: 0 });
+    }
+  }
   /** 範囲や階層の外だったので後回しにしたリンク */
   const reserve: QueueItem[] = resume?.reserve ?? [];
   const reservedByKey = new Map<string, QueueItem>(reserve.map((q) => [normalizePageUrl(q.url), q]));
