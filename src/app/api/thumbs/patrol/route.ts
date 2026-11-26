@@ -73,13 +73,8 @@ export async function POST(request: Request) {
         );
       }
       const exclude = Array.isArray(body.exclude) ? body.exclude.filter((r): r is string => typeof r === "string" && r.length < 300).slice(0, 200) : [];
-      const token = typeof body.gofileToken === "string" && /^[A-Za-z0-9]{10,128}$/.test(body.gofileToken.trim()) ? body.gofileToken.trim() : "";
-      for (const [key, value] of [
-        ["exclude", exclude],
-        ["gofileToken", token],
-      ] as const) {
-        await client.query("insert into thumbs_patrol_meta (key, value) values ($1, $2) on conflict (key) do update set value = excluded.value", [key, JSON.stringify(value)]);
-      }
+      // 巡回用の Gofile トークンは、ここでは上書きしない（利用者ごとに「🔑 Gofile の設定」から足す。/api/thumbs/gofile-tokens）
+      await client.query("insert into thumbs_patrol_meta (key, value) values ('exclude', $1) on conflict (key) do update set value = excluded.value", [JSON.stringify(exclude)]);
       await client.query("commit");
     } catch (err) {
       await client.query("rollback").catch(() => {});
