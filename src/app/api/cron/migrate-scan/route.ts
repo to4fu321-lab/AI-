@@ -1,5 +1,6 @@
 import { after } from "next/server";
-import { kick, runPending } from "@/lib/migrate/scan";
+import { safeEqual } from "@/lib/access/locks";
+import { kick, runPending, selfOrigin } from "@/lib/migrate/scan";
 
 /**
  * アカウント引っ越しの「調べる」の続き。
@@ -15,10 +16,10 @@ const BUDGET_MS = 240_000;
 
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
-  if (!secret || request.headers.get("authorization") !== `Bearer ${secret}`) {
+  if (!secret || !safeEqual(request.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  const origin = new URL(request.url).origin;
+  const origin = selfOrigin(request);
   const deadline = Date.now() + BUDGET_MS;
   after(async () => {
     try {

@@ -2,7 +2,7 @@ import "server-only";
 import { ImapFlow } from "imapflow";
 import { UserError } from "../db";
 import { accessToken } from "../gmail";
-import { GMAIL_QUERY, readRawHeaders } from "../parse";
+import { GMAIL_QUERY_ACCOUNT, readRawHeaders } from "../parse";
 import type { Batch, Cursor, Header, MailSource } from "./types";
 
 /**
@@ -17,7 +17,7 @@ import type { Batch, Cursor, Header, MailSource } from "./types";
 /** 1 回にヘッダを受け取る数 */
 const BATCH = 500;
 /** つなぐ先。MIGRATE_IMAP_HOST は、手元で偽の IMAP サーバーを使って確かめるときに使う */
-const IMAP = process.env.MIGRATE_IMAP_HOST
+const IMAP = process.env.MIGRATE_IMAP_HOST && process.env.NODE_ENV !== "production"
   ? { host: process.env.MIGRATE_IMAP_HOST, port: Number(process.env.MIGRATE_IMAP_PORT || 143), secure: false }
   : { host: "imap.gmail.com", port: 993, secure: true };
 
@@ -53,15 +53,15 @@ export const imap: MailSource = {
     return {
       async next(): Promise<Batch> {
         if (!uids) {
-          const found = await client.search({ gmraw: GMAIL_QUERY, uid: `${done + 1}:*` }, { uid: true });
+          const found = await client.search({ gmraw: GMAIL_QUERY_ACCOUNT, uid: `${done + 1}:*` }, { uid: true });
           uids = (found || []).filter((u) => u > done && u < uidNext).sort((a, b) => a - b);
         }
         const batch = uids.slice(at, at + BATCH);
         const headers: Header[] = [];
         if (batch.length) {
-          for await (const msg of client.fetch(batch.join(","), { uid: true, internalDate: true, headers: ["from", "subject"] }, { uid: true })) {
+          for await (const msg of client.fetch(batch.join(","), { uid: true, internalDate: true, headers: ["from", "subject", "delivered-to", "list-unsubscribe", "precedence"] }, { uid: true })) {
             if (!msg.headers) continue;
-            headers.push({ ...readRawHeaders(msg.headers.toString("utf8")), at: msg.internalDate ? new Date(msg.internalDate).getTime() : 0 });
+            headers.push({ id: `${uidValidity}:${msg.uid}`, ...readRawHeaders(msg.headers.toString("utf8")), at: msg.internalDate ? new Date(msg.internalDate).getTime() : 0 });
           }
           done = batch[batch.length - 1];
         }

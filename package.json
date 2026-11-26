@@ -25,6 +25,7 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "server-only": "^0.0.1",
+    "tldts": "^7.6.0",
     "web-push": "^4.0.0"
   },
   "devDependencies": {

@@ -6,11 +6,22 @@ import type { MailboxRow } from "../db";
  * 数える・保存する・時間で区切る・二重に動かさない、は scan.ts がまとめて受け持つ。
  */
 
+/** メール 1 通ぶんの材料（ヘッダだけ。本文は受け取らない） */
 export interface Header {
+  /** メール会社がそのメールに付けた番号（同じメールを二重に記録しないため） */
+  id: string;
   from: string;
+  /** 届け先（Delivered-To）。転送されてきた古いアドレスを見分ける材料。To は使わない（ほかの人のアドレスが並ぶことがあるため） */
+  to?: string;
   subject: string;
   /** 届いた時刻（ミリ秒） */
   at: number;
+  /** メール会社が付けた分類（Gmail の CATEGORY_PROMOTIONS など）。なければ空 */
+  labels?: string[];
+  /** List-Unsubscribe ヘッダがある（一斉配信の印） */
+  listUnsubscribe?: boolean;
+  /** Precedence ヘッダの値（bulk・list なら一斉配信） */
+  precedence?: string;
 }
 
 /** 続きの場所。中身は部品ごとに違う（データベースにそのまま保存する） */
