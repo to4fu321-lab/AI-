@@ -896,11 +896,11 @@ export function ThumbsApp() {
       void fetch("/api/thumbs/patrol", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sites, intervalMin: patrolMin, exclude: excludes, gofileToken }),
+        body: JSON.stringify({ sites, intervalMin: patrolMin, exclude: excludes }),
       }).catch(() => null);
     }, 800);
     return () => clearTimeout(t);
-  }, [serverPatrol, sites, patrolMin, excludes, gofileToken]);
+  }, [serverPatrol, sites, patrolMin, excludes]);
   const runServerPatrol = async () => {
     setServerBusy(true);
     try {

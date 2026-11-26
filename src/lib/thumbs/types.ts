@@ -118,6 +118,8 @@ export interface CrawlOptions {
   rootHtml?: string;
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
+  /** 自動巡回用：使ってよいトークン（上から順に。断られたら次へ） */
+  gofileTokens?: string[];
 }
 
 export interface QueueItem {

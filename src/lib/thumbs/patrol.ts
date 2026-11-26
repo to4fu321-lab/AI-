@@ -2,6 +2,7 @@ import "server-only";
 import { crawl } from "./crawl";
 import { db } from "./db";
 import { thumbsLog } from "./safeFetch";
+import { usableTokens } from "./gofileTokens";
 import { pushAll } from "./push";
 import { noticeFound, saveFound, watchedPrints, type Watched } from "./revive";
 import type { CrawlOptions, MediaItem } from "./types";
@@ -26,7 +27,7 @@ const clampInt = (v: unknown, lo: number, hi: number, d: number) => (typeof v ==
 
 function optionsOf(
   s: PatrolSettings,
-  extra: { exclude: string[]; gofileToken?: string; knownGofile: string[]; knownPages?: string[]; knownTweets?: string[] },
+  extra: { exclude: string[]; gofileTokens?: string[]; knownGofile: string[]; knownPages?: string[]; knownTweets?: string[] },
 ): CrawlOptions {
   return {
     depth: clampInt(s.depth, 0, 20, 1),
@@ -38,7 +39,7 @@ function optionsOf(
     kinds: s.kinds === "video" || s.kinds === "image" ? s.kinds : "all",
     exclude: extra.exclude,
     robots: s.robots !== false,
-    gofileToken: extra.gofileToken,
+    gofileTokens: extra.gofileTokens,
     knownGofile: extra.knownGofile,
     knownPages: extra.knownPages,
     knownTweets: extra.knownTweets,
@@ -60,9 +61,10 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
      order by last_run asc nulls first limit 10`,
     [force],
   );
-  const meta = await pool.query<{ key: string; value: unknown }>("select key, value from thumbs_patrol_meta where key in ('exclude', 'gofileToken')");
+  const meta = await pool.query<{ key: string; value: unknown }>("select key, value from thumbs_patrol_meta where key in ('exclude')");
   const exclude = (meta.rows.find((r) => r.key === "exclude")?.value as string[] | undefined) ?? [];
-  const gofileToken = (meta.rows.find((r) => r.key === "gofileToken")?.value as string | undefined) || undefined;
+  // 巡回用のトークン（利用者ごと。断られていないものを上から順に）
+  const gofileTokens = await usableTokens().catch(() => []);
   // 読んだ Gofile のフォルダ（3 日以内）は、もう聞かない
   await pool.query("delete from thumbs_patrol_gofile where at < now() - interval '3 days'");
   const known = (await pool.query<{ code: string }>("select code from thumbs_patrol_gofile order by at desc limit 5000")).rows.map((r) => r.code);
@@ -98,7 +100,7 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
         if (tweet) knownTweets.push(tweet);
         else if (r.page !== site.url) knownPages.push(r.page);
       }
-      const options = optionsOf(site.settings ?? {}, { exclude, gofileToken, knownGofile: known, knownPages, knownTweets });
+      const options = optionsOf(site.settings ?? {}, { exclude, gofileTokens, knownGofile: known, knownPages, knownTweets });
       for await (const e of crawl(site.url, options, abort.signal, deadline)) {
         if (e.type === "media") {
           if (watched.size) revived += await noticeFound(e.items, watched).catch(() => 0);
