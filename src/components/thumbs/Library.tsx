@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { gofileTokenBookmarklet } from "./gofileBookmarklet";
 
 /** 取得の設定（登録サイトと履歴に一緒に保存して、同じ条件で取り直せるようにする） */
@@ -74,6 +74,7 @@ export function Library({
   gofileToken,
   onGofileToken,
   appOrigin,
+  incomingToken,
   now,
   onRun,
   onSave,
@@ -93,6 +94,8 @@ export function Library({
   onGofileToken: (token: string) => void;
   /** このアプリのアドレス（ブックマークレットに入れる） */
   appOrigin: string;
+  /** ブックマークレットで受け取ったトークン（「＋ トークンを足す」の欄に入れる） */
+  incomingToken?: string | null;
   /** 「〇分前」の基準時刻（描画のたびに変わらないよう親から渡す） */
   now: number;
   onRun: (url: string, settings: CrawlSettings) => void;
@@ -146,7 +149,7 @@ export function Library({
       </section>
 
       <ExcludeList excludes={excludes} onAdd={onAddExclude} onRemove={onRemoveExclude} />
-      <GofileSetting token={gofileToken} onChange={onGofileToken} appOrigin={appOrigin} />
+      <GofileSetting token={gofileToken} onChange={onGofileToken} appOrigin={appOrigin} incomingToken={incomingToken} />
 
       {history.length > 0 && (
         <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
@@ -204,7 +207,17 @@ export function Library({
 }
 
 /** Gofile のアカウントトークンの設定（Gofile がゲスト登録を断るときに使う） */
-function GofileSetting({ token, onChange, appOrigin }: { token: string; onChange: (token: string) => void; appOrigin: string }) {
+function GofileSetting({
+  token,
+  onChange,
+  appOrigin,
+  incomingToken,
+}: {
+  token: string;
+  onChange: (token: string) => void;
+  appOrigin: string;
+  incomingToken?: string | null;
+}) {
   const [value, setValue] = useState(token);
   const [error, setError] = useState<string | null>(null);
   const [prev, setPrev] = useState(token);
@@ -224,7 +237,7 @@ function GofileSetting({ token, onChange, appOrigin }: { token: string; onChange
     onChange(v);
   };
   return (
-    <details className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
+    <details open={incomingToken ? true : undefined} className="group rounded-xl border border-neutral-200 bg-white text-xs dark:border-neutral-800 dark:bg-neutral-900">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 font-bold text-neutral-500">
         🔑 Gofile の設定 <span className="font-normal text-neutral-400">{token ? "トークン設定済み" : "未設定"}</span>
         <span className="ml-auto text-neutral-400 transition group-open:rotate-90">›</span>
@@ -256,7 +269,7 @@ function GofileSetting({ token, onChange, appOrigin }: { token: string; onChange
           </button>
         )}
         <TokenBookmarklet appOrigin={appOrigin} />
-        <PatrolTokens myToken={token} />
+        <PatrolTokens myToken={token} incomingToken={incomingToken} />
       </div>
     </details>
   );
@@ -309,7 +322,7 @@ type PatrolToken = { tag: string; label: string; tail: string; badAt: number | n
  * 自動巡回で使う Gofile のトークン（利用者ごとに 1 つずつ、最大 5 つ）。
  * 巡回は上から順に使い、トークンが断られたら（無効・期限切れ）次のトークンに自動で切り替える
  */
-function PatrolTokens({ myToken }: { myToken: string }) {
+function PatrolTokens({ myToken, incomingToken }: { myToken: string; incomingToken?: string | null }) {
   const [tokens, setTokens] = useState<PatrolToken[] | null>(null);
   const [max, setMax] = useState(5);
   const [label, setLabel] = useState("");
@@ -318,6 +331,19 @@ function PatrolTokens({ myToken }: { myToken: string }) {
   const [newToken, setNewToken] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const addRef = useRef<HTMLFormElement | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  // ブックマークレットで受け取ったトークンを「＋ トークンを足す」に入れて、そこまで画面を動かす
+  const [filledFrom, setFilledFrom] = useState<string | null>(null);
+  if (incomingToken && incomingToken !== filledFrom) {
+    setFilledFrom(incomingToken);
+    setNewToken(incomingToken);
+  }
+  useEffect(() => {
+    if (!incomingToken || !tokens) return;
+    addRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    nameRef.current?.focus({ preventScroll: true });
+  }, [incomingToken, tokens]);
   useEffect(() => {
     const load = () =>
       void fetch("/api/thumbs/gofile-tokens")
@@ -409,11 +435,13 @@ function PatrolTokens({ myToken }: { myToken: string }) {
               setNewLabel("");
             }
           }}
-          className="mt-2 space-y-1.5 rounded-lg bg-neutral-50 p-2 dark:bg-neutral-950"
+          ref={addRef}
+          className={`mt-2 space-y-1.5 rounded-lg p-2 ${newToken && newToken === incomingToken ? "bg-sky-50 ring-2 ring-sky-400 dark:bg-sky-950" : "bg-neutral-50 dark:bg-neutral-950"}`}
         >
           <p className="text-[11px] font-semibold text-neutral-500">＋ トークンを足す（ほかの人のぶんも、ここから続けて足せます）</p>
           <div className="flex gap-2">
             <input
+              ref={nameRef}
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
               placeholder="名前"
