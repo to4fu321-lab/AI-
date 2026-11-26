@@ -4,6 +4,7 @@ import { guardApi } from "@/lib/access/locks";
 import { currentUser, deleteAccount, destroySession, sessionCookie, type User } from "@/lib/migrate/auth";
 import { UserError, uuid } from "@/lib/migrate/db";
 import { disconnect, googleConfigured, tokenKeyConfigured } from "@/lib/migrate/gmail";
+import { createGrant, listGrants, revokeGrant } from "@/lib/migrate/grants";
 import { loadLedger, setRetiring, updateService } from "@/lib/migrate/ledger";
 import { hasLlm } from "@/lib/migrate/llm";
 import { kick, requestScan, resetScan, runScan, selfOrigin, stopScan } from "@/lib/migrate/scan";
@@ -59,6 +60,17 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
     return { ok: true };
   },
 
+  /** AI 秘書とつなぐ鍵を作る（鍵は、この返事でしか見られない） */
+  async grantCreate(user, b) {
+    return createGrant(user.id, b.name, b.mailboxIds === null || b.mailboxIds === undefined ? null : b.mailboxIds);
+  },
+
+  /** AI 秘書とつなぐ鍵を取り消す */
+  async grantRevoke(user, b) {
+    await revokeGrant(user.id, b.id);
+    return { ok: true };
+  },
+
   /** 仕分け・開くページ・メモを変える */
   async update(user, b) {
     await updateService(user.id, b.id, { status: b.status, login_url: b.login_url, note: b.note });
@@ -104,14 +116,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ act
       user = await currentUser(request);
     } catch (e) {
       // データベースの設定がまだのときも画面は開けるようにして、何が足りないかを見せる
-      if (action === "state" && e instanceof UserError) return json({ setup: { ...setup, db: false }, user: null, mailboxes: [], services: [] } satisfies AppState);
+      if (action === "state" && e instanceof UserError) return json({ setup: { ...setup, db: false }, user: null, mailboxes: [], services: [], grants: [] } satisfies AppState);
       throw e;
     }
 
     /** 画面に出すもの一式（ログインしていなければ、空で返す） */
     if (action === "state") {
-      if (!user) return json({ setup, user: null, mailboxes: [], services: [] } satisfies AppState);
-      return json({ setup: { ...setup, tokenKey: tokenKeyConfigured(), llm: hasLlm() }, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)) } satisfies AppState);
+      if (!user) return json({ setup, user: null, mailboxes: [], services: [], grants: [] } satisfies AppState);
+      return json({ setup: { ...setup, tokenKey: tokenKeyConfigured(), llm: hasLlm() }, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)), grants: await listGrants(user.id) } satisfies AppState);
     }
 
     if (action === "logout") {

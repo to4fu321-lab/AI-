@@ -1,6 +1,7 @@
 /** アカウント引っ越し：画面とサーバーの両方で使う型 */
 import type { Kind } from "./classify";
 import type { Graduation } from "./graduate";
+import type { Grant } from "./grants";
 import type { Judgment } from "./judge";
 
 export type Status = "new" | "move" | "skip" | "done";
@@ -57,4 +58,6 @@ export interface AppState {
   user: { email: string; name: string } | null;
   mailboxes: Mailbox[];
   services: Service[];
+  /** AI 秘書（MCP）とつなぐ鍵（鍵そのものは入らない） */
+  grants: Grant[];
 }

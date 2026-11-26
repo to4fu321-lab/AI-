@@ -50,6 +50,8 @@ export const APPS: AppEntry[] = [
     addedAt: "2026-11-25",
     color: "from-emerald-500 to-teal-400",
     access: "private",
+    // AI 秘書から呼ぶ MCP の入口（/api/mcp/migrate）は、わざとこの鍵の外に置く（AI 秘書は画面のパスワードを入れられない）。
+    // そのかわり、利用者が画面で作った鍵（Authorization: Bearer mgk_...）を入口で必ず確かめる
     paths: ["/migrate", "/api/migrate"],
     status: "beta",
   },
