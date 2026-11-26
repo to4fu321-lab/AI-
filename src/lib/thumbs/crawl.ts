@@ -1065,13 +1065,19 @@ export async function* crawl(
       }
       try {
         const list = await gofileDougaList(gd, signal);
+        // 新着順の一覧（/api/new）で、前に読んだフォルダが出てきたら、そこから先は前に読んだ古い分。次のページは読まない
+        const newest = /\/api\/new\b/.test(gd);
+        let reachedKnown = false;
         for (const it of list.items) {
+          const gid = gofileId(it.share);
+          if (newest && gid && knownGofile.has(gid)) reachedKnown = true;
           if (!enqueue(it.share, depth, rank + 1, 4, it.thumb, 0, false, it.page)) continue;
           const q = queuedByUrl.get(it.share);
           if (q && it.title) q.title = it.title;
         }
         events.push({ type: "page", url, depth, found: 0 });
-        if (list.next && !gofilePaused && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 2, 1)) paginationUsed++;
+        if (reachedKnown && list.next) thumbsLog(`gofile-douga 新着は前に読んだところまで来たので、次のページは読みません ${url.slice(0, 80)}`);
+        if (list.next && !reachedKnown && !gofilePaused && paginationUsed < options.maxPagination && enqueue(list.next, depth, rank + 2, 1)) paginationUsed++;
         if (!list.items.length && item.root) events.push({ type: "note", url, message: "gofile-douga の一覧に Gofile のリンクが見つかりませんでした" });
       } catch (err) {
         return fail(`gofile-douga の一覧を読めませんでした（${err instanceof Error ? err.message.slice(0, 60) : String(err)}）`);

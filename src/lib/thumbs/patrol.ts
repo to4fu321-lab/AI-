@@ -2,6 +2,7 @@ import "server-only";
 import { crawl } from "./crawl";
 import { db } from "./db";
 import { thumbsLog } from "./safeFetch";
+import { pushAll } from "./push";
 import { noticeFound, saveFound, watchedPrints, type Watched } from "./revive";
 import type { CrawlOptions, MediaItem } from "./types";
 
@@ -71,6 +72,8 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
   let revived = 0;
   let ran = 0;
   let total = 0;
+  /** サイトごとの、新しく見つかった数（通知に書く） */
+  const newBy: { site: string; found: number }[] = [];
   for (const site of due.rows) {
     const left = budgetMs - (Date.now() - started);
     if (left < 30000) break;
@@ -121,6 +124,23 @@ export async function runPatrol(budgetMs: number, force = false): Promise<{ ran:
     thumbsLog(`patrol ${site.url.slice(0, 80)} 新しく ${found} 件 ${Date.now() - started}ms ${note ? note.slice(0, 80) : ""}`);
     ran++;
     total += found;
+    if (found > 0) newBy.push({ site: site.url, found });
+  }
+  // 新しく見つかったものがあれば、登録した端末にプッシュ通知
+  if (newBy.length) {
+    const host = (u: string) => {
+      try {
+        return new URL(u).hostname.replace(/^www\./, "");
+      } catch {
+        return u;
+      }
+    };
+    const sent = await pushAll({
+      title: `🆕 新着 ${total} 件`,
+      body: newBy.map((n) => `${host(n.site)}：${n.found} 件`).join("・").slice(0, 180),
+      tag: "thumbs-new",
+    }).catch(() => 0);
+    if (sent) thumbsLog(`push 新着 ${total} 件を ${sent} 台に通知`);
   }
   // 見張っていた動画が見つかっていれば、残りの時間で保存する（今回見つけたもの・前に見つけて保存しきれなかったもの）
   const left = budgetMs - (Date.now() - started);
