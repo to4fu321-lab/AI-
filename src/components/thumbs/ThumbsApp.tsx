@@ -1537,6 +1537,7 @@ export function ThumbsApp() {
                 {serverBusy ? "巡回中…" : "今すぐ巡回"}
               </button>
             )}
+            {serverPatrol && <PushToggle />}
             {knownCount > 0 && (
               <span className="flex items-center gap-2 text-[11px] text-neutral-400">
                 読んだ Gofile フォルダ {knownCount} 件を覚えています（次からは聞きません・3 日で忘れます）
@@ -2434,6 +2435,109 @@ function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => 
 }
 
 /** 「復活したら保存」の保存先（Google ドライブ・Vercel Blob）の表示と、Google ドライブをつなぐ・切る */
+/** 公開鍵（base64url）を、ブラウザの購読に渡す形にする */
+function keyBytes(base64url: string): Uint8Array<ArrayBuffer> {
+  const b64 = (base64url + "=".repeat((4 - (base64url.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64);
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * 自動巡回で新しい動画が見つかったら、この端末にプッシュ通知する（オン・オフ）。
+ * iPhone・iPad は、Safari の「ホーム画面に追加」で入れたアプリから開いたときだけ使える
+ */
+function PushToggle() {
+  const [state, setState] = useState<"loading" | "unsupported" | "ios-browser" | "denied" | "off" | "on" | "busy">("loading");
+  const [note, setNote] = useState<string | null>(null);
+  const regRef = useRef<ServiceWorkerRegistration | null>(null);
+  useEffect(() => {
+    void (async () => {
+      const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      const standalone = window.matchMedia("(display-mode: standalone)").matches || (navigator as unknown as { standalone?: boolean }).standalone === true;
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+        return setState(ios && !standalone ? "ios-browser" : "unsupported");
+      }
+      if (Notification.permission === "denied") return setState("denied");
+      try {
+        const reg = await navigator.serviceWorker.register("/thumbs-sw.js", { scope: "/thumbs-push/" });
+        regRef.current = reg;
+        const sub = await reg.pushManager.getSubscription();
+        if (!sub) return setState("off");
+        const res = await fetch(`/api/thumbs/push?endpoint=${encodeURIComponent(sub.endpoint)}`).catch(() => null);
+        const data = (res?.ok ? await res.json().catch(() => null) : null) as { subscribed?: boolean } | null;
+        setState(data?.subscribed ? "on" : "off");
+      } catch {
+        setState("unsupported");
+      }
+    })();
+  }, []);
+  const turnOn = async () => {
+    setState("busy");
+    setNote(null);
+    try {
+      // 許可を聞くのは、ボタンを押したときだけ（ブラウザの決まり）
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") return setState(perm === "denied" ? "denied" : "off");
+      const reg = regRef.current ?? (await navigator.serviceWorker.register("/thumbs-sw.js", { scope: "/thumbs-push/" }));
+      await navigator.serviceWorker.ready.catch(() => null);
+      const info = (await (await fetch("/api/thumbs/push")).json()) as { publicKey?: string };
+      if (!info.publicKey) throw new Error("サーバーの準備ができていません（データベースが必要です）");
+      const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(info.publicKey) }));
+      const label = /iphone|ipad/i.test(navigator.userAgent) ? "iPhone・iPad" : /android/i.test(navigator.userAgent) ? "Android" : "パソコン";
+      const res = await fetch("/api/thumbs/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "subscribe", sub: sub.toJSON(), label }) });
+      if (!res.ok) throw new Error(`登録できませんでした（HTTP ${res.status}）`);
+      setState("on");
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : String(err));
+      setState("off");
+    }
+  };
+  const turnOff = async () => {
+    setState("busy");
+    const sub = await regRef.current?.pushManager.getSubscription().catch(() => null);
+    if (sub) {
+      await fetch("/api/thumbs/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "unsubscribe", endpoint: sub.endpoint }) }).catch(() => null);
+      await sub.unsubscribe().catch(() => false);
+    }
+    setState("off");
+  };
+  const test = async () => {
+    setNote("送っています…");
+    const res = await fetch("/api/thumbs/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "test" }) }).catch(() => null);
+    const data = (res?.ok ? await res.json().catch(() => null) : null) as { sent?: number } | null;
+    setNote(data?.sent ? `テストの通知を送りました（${data.sent} 台）` : "送れませんでした");
+  };
+  if (state === "loading") return null;
+  return (
+    <span className="flex flex-wrap items-center gap-2 text-[11px]">
+      {state === "unsupported" && <span className="text-neutral-400">🔕 このブラウザはプッシュ通知に対応していません</span>}
+      {state === "ios-browser" && (
+        <span className="text-neutral-400">🔔 新着のプッシュ通知：iPhone は、共有ボタン →「ホーム画面に追加」で入れたアプリから開くと使えます</span>
+      )}
+      {state === "denied" && <span className="text-neutral-400">🔕 通知が許可されていません（端末の設定で、このアプリの通知を許可してください）</span>}
+      {(state === "off" || state === "busy") && (
+        <button type="button" disabled={state === "busy"} onClick={() => void turnOn()} className="rounded-full bg-sky-600 px-3 py-1 font-bold text-white disabled:opacity-60">
+          🔔 新着をプッシュ通知
+        </button>
+      )}
+      {state === "on" && (
+        <>
+          <span className="font-semibold text-emerald-600 dark:text-emerald-400">🔔 新着を通知します</span>
+          <button type="button" onClick={() => void test()} className="rounded-full bg-neutral-200/70 px-2.5 py-0.5 font-bold dark:bg-neutral-800">
+            テスト
+          </button>
+          <button type="button" onClick={() => void turnOff()} className="rounded-full bg-neutral-200/70 px-2.5 py-0.5 font-bold dark:bg-neutral-800">
+            やめる
+          </button>
+        </>
+      )}
+      {note && <span className="text-neutral-400">{note}</span>}
+    </span>
+  );
+}
+
 function DrivePanel({ drive, note, onChanged }: { drive: DriveInfo | null; note: string | null; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [test, setTest] = useState<{ ok: boolean; steps: { name: string; ok: boolean; ms: number; detail?: string }[] } | "running" | null>(null);
