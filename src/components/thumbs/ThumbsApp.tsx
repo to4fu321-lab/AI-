@@ -1364,7 +1364,8 @@ export function ThumbsApp() {
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-16 text-neutral-900 [color-scheme:light] dark:bg-neutral-950 dark:text-neutral-100 dark:[color-scheme:dark]">
-      <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-950/90">
+      {/* メニューを開いている間は上に貼り付けない（スマホでは設定が画面の大半を占めて、下の設定が隠れてしまうため） */}
+      <header className={`${menuOpen ? "relative" : "sticky top-0"} z-30 border-b border-neutral-200 bg-white/90 backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-950/90`}>
         <div className="mx-auto max-w-6xl px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
           <div className="mb-2 flex items-center justify-between">
             <h1 className="flex items-center gap-2 text-lg font-black tracking-tight">
