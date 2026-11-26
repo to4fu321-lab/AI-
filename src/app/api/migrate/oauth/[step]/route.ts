@@ -74,11 +74,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ step
   } catch (err) {
     // 利用者に見せてよい理由（UserError）は、記号に直して渡す。それ以外は中身を見せない
     console.error(`[migrate] oauth ${step}`, err);
-    if (err instanceof UserError) {
-      if (/件までです/.test(err.message)) return back("too-many");
-      if (/読み取りのみ/.test(err.message)) return back("scope");
-      if (/確認が済んでいない/.test(err.message)) return back("unverified");
-    }
-    return back("failed");
+    const known = ["too-many", "scope", "unverified", "no-token-key"];
+    return back(err instanceof UserError && known.includes(err.code) ? err.code : "failed");
   }
 }

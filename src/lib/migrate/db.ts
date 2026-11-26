@@ -12,7 +12,12 @@ import type { Mailbox, Service, Status } from "./types";
  */
 
 /** 画面にそのまま見せてよいエラー（設定もれ・入力まちがいなど） */
-export class UserError extends Error {}
+export class UserError extends Error {
+  /** 理由の記号（文を読まずに、種類を見分けたいとき用） */
+  constructor(message: string, readonly code: string = "") {
+    super(message);
+  }
+}
 
 let pool: Pool | null | undefined;
 let ready: Promise<void> | null = null;
@@ -219,7 +224,7 @@ export function toService(row: ServiceRow): Service {
     signals: row.signals ?? {},
     signal_last: row.signal_last ?? {},
     subjects: (row.subjects ?? []).map((x) => (typeof x === "string" ? x : x.s)),
-    judgment: judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {} }),
+    judgment: judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {}, count: row.count, firstAt: iso(row.first_at), lastAt: iso(row.last_at) }),
     first_at: iso(row.first_at),
     last_at: iso(row.last_at),
     status: row.status,

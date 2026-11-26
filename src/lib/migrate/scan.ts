@@ -1,9 +1,9 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
-import { classify, RULES_VERSION } from "./classify";
+import { classify, LOGIN_KINDS, RULES_VERSION, type Kind } from "./classify";
 import { db, getMailbox, transaction, UserError, type MailboxRow } from "./db";
-import { isPersonalDomain, maskDigits, parseFrom, serviceDomain } from "./parse";
+import { clean, isPersonalDomain, maskSecrets, parseFrom, serviceDomain } from "./parse";
 import { gmailApi } from "./sources/gmailApi";
 import { imap } from "./sources/imap";
 import { RetryLater, type Header, type MailSession, type MailSource } from "./sources/types";
@@ -26,6 +26,13 @@ const LOCK = "6 minutes";
 const PARALLEL = 4;
 /** 件名の見本として残す数 */
 const SUBJECT_KEEP = 5;
+/** 1 つのメールボックスで記録する通数の上限（1 人が、際限なく記録を増やせないように） */
+export const MAX_MESSAGES = 50_000;
+/**
+ * ログイン・本人確認にかかわるメールは、件名そのものを保存しない（認証コードや、ログインに使えるリンクが入ることがあるため）。
+ * 代わりに、種類を表す決まった言葉を保存する
+ */
+const LOGIN_SUBJECT: Partial<Record<Kind, string>> = { auth: "（認証コードのメール）", security: "（ログイン・セキュリティの通知）", password: "（パスワード再設定のメール）" };
 
 interface MessageRow {
   id: string;
@@ -46,22 +53,25 @@ export function toRows(headers: Header[], ownEmail: string): MessageRow[] {
   const out: MessageRow[] = [];
   for (const h of headers) {
     const from = parseFrom(h.from);
-    if (!h.id || !from || from.address === ownEmail || isPersonalDomain(from.address)) continue;
+    // 届いた日が分からないメールは記録しない（判定の材料は「いつ届いたか」なので、1970 年として扱うと誤る）
+    if (!h.id || !h.at || !from || from.address === ownEmail || isPersonalDomain(from.address)) continue;
     const domain = serviceDomain(from.address);
     if (!domain) continue;
+    // 分類は、伏せる前の件名で決める
+    const kind = classify({ subject: h.subject, labels: h.labels, listUnsubscribe: h.listUnsubscribe, precedence: h.precedence });
     out.push({
-      id: h.id,
-      at: new Date(h.at || 0).toISOString(),
+      id: clean(h.id, 200),
+      at: new Date(h.at).toISOString(),
       domain,
-      from_address: from.address.slice(0, 200),
-      from_name: from.name,
-      to_address: (parseFrom(h.to ?? "")?.address ?? "").slice(0, 200),
-      // 分類は、伏せる前の件名で決める。保存するのは、数字の並びを伏せた件名
-      kind: classify({ subject: h.subject, labels: h.labels, listUnsubscribe: h.listUnsubscribe, precedence: h.precedence }),
-      subject: maskDigits(h.subject),
-      labels: h.labels ?? [],
+      from_address: clean(from.address, 200),
+      // 名乗りの中にアドレスらしいものが書かれていたら、名乗りごと捨てる（本物の差出人に見せかける手口）
+      from_name: from.name.includes("@") ? "" : from.name,
+      to_address: clean(parseFrom(h.to ?? "")?.address ?? "", 200),
+      kind,
+      subject: (LOGIN_KINDS.includes(kind) ? LOGIN_SUBJECT[kind] : undefined) ?? clean(maskSecrets(h.subject), 120),
+      labels: (h.labels ?? []).filter((l) => /^CATEGORY_[A-Z]+$/.test(l)).slice(0, 8),
       has_unsubscribe: !!h.listUnsubscribe,
-      precedence: (h.precedence ?? "").slice(0, 20),
+      precedence: clean(h.precedence ?? "", 20),
     });
   }
   return out;
@@ -74,6 +84,38 @@ export function toRows(headers: Header[], ownEmail: string): MessageRow[] {
 async function ingest(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id" | "email">, headers: Header[]): Promise<void> {
   const rows = toRows(headers, box.email);
   if (!rows.length) return;
+  await insertRows(client, box, rows);
+  await rebuild(client, box, [...new Set(rows.map((r) => r.domain))]);
+}
+
+/**
+ * 記録を書きこむ。まとめて書けなかったら、1 通ずつ書いて、書けない 1 通だけを飛ばす
+ * （外から届いた 1 通のせいで、そのメールボックスの調べが止まり続けないように）
+ */
+async function insertRows(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id">, rows: MessageRow[]): Promise<void> {
+  await client.query("savepoint ingest");
+  try {
+    await insertBatch(client, box, rows);
+    await client.query("release savepoint ingest");
+    return;
+  } catch (err) {
+    await client.query("rollback to savepoint ingest");
+    console.error("[migrate] ingest batch failed; retrying row by row", (err as { code?: string })?.code ?? "");
+  }
+  for (const row of rows) {
+    await client.query("savepoint ingest_row");
+    try {
+      await insertBatch(client, box, [row]);
+      await client.query("release savepoint ingest_row");
+    } catch (err) {
+      await client.query("rollback to savepoint ingest_row");
+      // 中身は記録に出さない（件名や差出人が入っているため）。種類だけ残す
+      console.error("[migrate] ingest skipped one message", (err as { code?: string })?.code ?? "");
+    }
+  }
+}
+
+async function insertBatch(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id">, rows: MessageRow[]): Promise<void> {
   await client.query(
     `insert into migrate_messages (user_id, mailbox_id, provider_msg_id, at, domain, from_address, from_name, to_address, subject, labels, has_unsubscribe, precedence, kind, rules_version)
      select $1, $2, x.id, x.at, x.domain, x.from_address, x.from_name, x.to_address, x.subject,
@@ -82,7 +124,6 @@ async function ingest(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id"
      on conflict (mailbox_id, provider_msg_id) do nothing`,
     [box.user_id, box.id, JSON.stringify(rows), RULES_VERSION],
   );
-  await rebuild(client, box, [...new Set(rows.map((r) => r.domain))]);
 }
 
 /** サービスごとの集計を、記録から作り直す（仕分けの状態・開くページ・メモは変えない） */
@@ -196,13 +237,17 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
         if (batch.reset) await clearCounts(client, box.id);
         await ingest(client, box, batch.headers);
         await client.query(
-          `update migrate_mailboxes set scan = $2::jsonb, scanned = scanned + $3, remaining = $4, error = '', progress_at = now(),
-             requested = requested and not $5, last_scan = case when $5 then now() else last_scan end
+          // 「これまで ○ 通」は、実際に記録した通数にする（読んだだけで記録しなかったもの・前に記録済みのものは数えない）
+          `update migrate_mailboxes set scan = $2::jsonb, remaining = $3, error = '', progress_at = now(),
+             scanned = (select count(*) from migrate_messages where mailbox_id = $1),
+             requested = requested and not $4, last_scan = case when $4 then now() else last_scan end
            where id = $1`,
-          [box.id, JSON.stringify(batch.cursor), batch.read, batch.remaining ?? 0, batch.done],
+          [box.id, JSON.stringify(batch.cursor), batch.remaining ?? 0, batch.done],
         );
       });
       if (batch.done) return "done";
+      const total = await pool.query<{ scanned: number }>("select scanned from migrate_mailboxes where id = $1", [box.id]);
+      if ((total.rows[0]?.scanned ?? 0) >= MAX_MESSAGES) throw new UserError(`記録できる通数の上限（${MAX_MESSAGES.toLocaleString()} 通）に達したので、ここで止めました`, "too-many-messages");
     }
   } catch (err) {
     if (err instanceof RetryLater) {
@@ -210,7 +255,9 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
       await pool.query("update migrate_mailboxes set error = $2 where id = $1", [box.id, "メールの読み取りが混み合っているので、少し休んでいます。15 分以内に自動で続きを進めます"]).catch(() => {});
       return "later";
     }
-    console.error("[migrate] scan", box.id, err);
+    // 調べている途中で、利用者がつながりを切った（行が消えた）。失敗ではない
+    if ((err as { code?: string })?.code === "23503") return "done";
+    if (!(err instanceof UserError)) console.error("[migrate] scan", box.id, err);
     await pool.query("update migrate_mailboxes set requested = false, error = $2 where id = $1", [box.id, reason(err)]).catch(() => {});
     return "done";
   } finally {

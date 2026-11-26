@@ -16,6 +16,8 @@ import { oauthClient, redirectUri, revoke } from "./gmail";
 // 同じ親ドメインのほかのサイトから、にせのログインの印を差し込まれない
 export const SESSION_COOKIE = "__Host-mg_session";
 const SESSION_DAYS = 30;
+/** 1 人が同時に持てるログインの印の数（端末の数の目安） */
+const MAX_SESSIONS = 10;
 
 export interface User {
   id: string;
@@ -75,7 +77,7 @@ export async function finishLogin(code: string, origin: string, nonce: string): 
   if (!okIssuer || claims.aud !== client.id || !claims.sub || !claims.exp || claims.exp * 1000 < Date.now() || claims.nonce !== nonce) {
     throw new UserError("Google から届いた身分証を確かめられませんでした。もう一度ログインしてください");
   }
-  if (!claims.email || claims.email_verified !== true) throw new UserError("メールアドレスの確認が済んでいない Google アカウントでは、ログインできません");
+  if (!claims.email || claims.email_verified !== true) throw new UserError("メールアドレスの確認が済んでいない Google アカウントでは、ログインできません", "unverified");
 
   return transaction(async (c) => {
     const r = await c.query<User>(
@@ -89,7 +91,8 @@ export async function finishLogin(code: string, origin: string, nonce: string): 
     // 引き継げるのは、そのメールボックスのアドレス本人としてログインした人だけ
     // （Google が「このアドレスの持ち主だ」と確かめた人。ほかの人が先にログインしても、渡らない）
     const claimed = await c.query(
-      `update migrate_mailboxes m set user_id = $1
+      // 合言葉は引き継がない（空にする）。昔の形の合言葉は持ち主と結び付いていないので、本人につなぎ直してもらう
+      `update migrate_mailboxes m set user_id = $1, token_enc = '', requested = false, error = 'もう一度「＋ Gmail をつなぐ」からつないでください（安全のため、つなぎ直しが必要です）'
        where m.user_id is null and m.email = $2
          and not exists (select 1 from migrate_mailboxes x where x.user_id = $1 and x.email = m.email)`,
       [user.id, user.email],
@@ -106,8 +109,11 @@ export async function createSession(userId: string): Promise<string> {
   const token = randomBytes(32).toString("base64url");
   const pool = await db();
   await pool.query(`insert into migrate_sessions (token_hash, user_id, expires_at) values ($1, $2, now() + interval '${SESSION_DAYS} days')`, [hash(token), userId]);
-  // 期限の切れた印を片づける（たまるだけなので、ついでに）
+  // 期限の切れた印と、この利用者の古すぎる印を片づける（1 人が持てるのは、新しい方から MAX_SESSIONS 個まで）
   await pool.query("delete from migrate_sessions where expires_at < now()").catch(() => {});
+  await pool
+    .query("delete from migrate_sessions where user_id = $1 and token_hash not in (select token_hash from migrate_sessions where user_id = $1 order by created_at desc limit $2)", [userId, MAX_SESSIONS])
+    .catch(() => {});
   return token;
 }
 

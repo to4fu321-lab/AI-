@@ -37,12 +37,14 @@ const RESULT_ERROR: Record<string, string> = {
   "bad-state": "手続きの確認ができませんでした。もう一度やり直してください。",
   denied: "Google で許可されませんでした。",
   "too-many": "つなげるメールボックスの数の上限に達しています。",
+  "no-token-key": "合言葉を守る鍵（MIGRATE_TOKEN_KEY）の設定がまだなので、つなげません。",
   scope: "メールを読む許可（読み取りのみ）を受け取れませんでした。もう一度つないで、チェックを入れて許可してください。",
   unverified: "メールアドレスの確認が済んでいない Google アカウントでは、ログインできません。",
   failed: "うまくいきませんでした。もう一度やり直してください。",
 };
 const STATUSES: Status[] = ["new", "move", "skip", "done"];
-const day = (iso: string | null) => (iso ? iso.slice(0, 10).replace(/-/g, "/") : "");
+/** 日本の時刻での日付（YYYY/MM/DD） */
+const day = (iso: string | null) => (iso ? new Date(Date.parse(iso) + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, "/") : "");
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function MigrateApp() {
@@ -187,9 +189,20 @@ export function MigrateApp() {
             <section className={card}>
               <div className="flex items-center justify-between gap-3">
                 <h2 className="text-base font-black">メールボックス</h2>
-                {ready && <button type="button" className={primary} onClick={() => window.location.assign("/api/migrate/oauth/connect")}>＋ Gmail をつなぐ</button>}
+                {ready && (
+                  <button type="button" className={primary} disabled={!state.setup.tokenKey} onClick={() => window.location.assign("/api/migrate/oauth/connect")}>
+                    ＋ Gmail をつなぐ
+                  </button>
+                )}
               </div>
-              <p className="mt-1 text-xs text-neutral-500">読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。件名の中の数字（認証コードや注文番号）は、伏せてから記録します。</p>
+              <p className="mt-1 text-xs text-neutral-500">
+                読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。認証コードやログイン通知のメールは、件名を保存しません。それ以外の件名も、番号や URL は伏せてから記録します。
+              </p>
+              {!state.setup.tokenKey && (
+                <p className="mt-2 rounded-xl bg-amber-100 p-3 text-xs font-semibold text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                  メールボックスをつなぐ前に、合言葉を守る鍵の設定が必要です。Vercel の環境変数 <code>MIGRATE_TOKEN_KEY</code> に、32 文字以上のでたらめな文字列を入れて、デプロイし直してください。
+                </p>
+              )}
               {state.mailboxes.filter((m) => !m.scanning).length > 1 && (
                 <button type="button" className={`${ghost} mt-2`} onClick={() => void startAll()}>すべて同時に調べる</button>
               )}
@@ -201,9 +214,9 @@ export function MigrateApp() {
                       <p className="break-all text-sm font-bold">{m.email}</p>
                       <p className="mt-0.5 text-xs text-neutral-500">
                         {m.scanning
-                          ? `調べています…${m.remaining ? ` 残り ${m.remaining.toLocaleString()} 通` : ""}（これまで ${m.scanned.toLocaleString()} 通）。画面を閉じても続きます`
+                          ? `調べています…${m.remaining ? ` 残り ${m.remaining.toLocaleString()} 通` : ""}（記録 ${m.scanned.toLocaleString()} 通）。画面を閉じても続きます`
                           : m.last_scan
-                            ? `${day(m.last_scan)} に調べました（これまで ${m.scanned.toLocaleString()} 通）`
+                            ? `${day(m.last_scan)} に調べました（記録 ${m.scanned.toLocaleString()} 通）`
                             : m.scanned
                               ? `途中まで調べました（${m.scanned.toLocaleString()} 通）`
                               : "まだ調べていません"}
@@ -307,7 +320,8 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <div className="min-w-0">
           {/* 見出しはドメイン。差出人の表示名は送る側が自由に書けるので（なりすまし）、「名乗り」として小さく添える */}
           <p className="truncate text-sm font-black">{s.domain}</p>
-          <p className="truncate text-xs text-neutral-500">{s.name ? `差出人の名乗り：${s.name}` : ""}{s.name && email ? " ・ " : ""}{email ?? ""}</p>
+          {s.name && <p className="truncate text-xs text-neutral-500">差出人の名乗り：{s.name}</p>}
+          {email && <p className="truncate text-xs text-neutral-500">届いたアドレス：{email}</p>}
         </div>
         <p className="shrink-0 text-right text-xs text-neutral-500">
           {s.count.toLocaleString()} 通
@@ -337,7 +351,8 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         </details>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {s.status !== "skip" && (
+        {/* 届いた通数が少ない差出人には、その差出人のサイトへの案内を出さない（なりすましメールの差出人へ誘導しないため）。自分で URL を入れれば出る */}
+        {s.status !== "skip" && (s.login_url || !s.judgment.unproven) && (
           <a href={url} target="_blank" rel="noopener noreferrer" className={s.status === "move" ? primary : ghost}>ページを開く ↗</a>
         )}
         {next.map(([status, label]) => (
@@ -349,19 +364,20 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
   );
 }
 
-/** メールボックスごとの内訳：必要なメール（ログイン・登録・支払いなど）と、広告 */
+/** メールボックスごとの内訳：必要なメール（ログイン・登録・支払い）と、広告 */
 function KindSummary({ kinds }: { kinds: Partial<Record<Kind, number>> }) {
-  const total = KINDS.reduce((a, k) => a + (kinds[k] ?? 0), 0);
-  if (!total) return null;
-  const promo = kinds.promo ?? 0;
-  const login = (kinds.auth ?? 0) + (kinds.security ?? 0) + (kinds.password ?? 0);
+  const n = (k: Kind) => kinds[k] ?? 0;
+  const login = n("auth") + n("security") + n("password");
+  const needed = login + n("signup") + n("billing");
+  if (!needed && !n("promo") && !n("notice")) return null;
   return (
     <div className="mt-2 text-xs text-neutral-600 dark:text-neutral-300">
       <p>
-        必要なメール <b>{(total - promo).toLocaleString()}</b> 通（うちログイン・本人確認 <b>{login.toLocaleString()}</b> 通）／ 広告 <b>{promo.toLocaleString()}</b> 通
+        必要なメール <b>{needed.toLocaleString()}</b> 通（うちログイン・本人確認 <b>{login.toLocaleString()}</b> 通）／ 広告 <b>{n("promo").toLocaleString()}</b> 通
+        {n("notice") > 0 && <>／ そのほかのお知らせ {n("notice").toLocaleString()} 通</>}
       </p>
       <p className="mt-0.5 text-neutral-500">
-        {KINDS.filter((k) => k !== "promo" && kinds[k]).map((k) => `${KIND_LABEL[k]} ${kinds[k]!.toLocaleString()}`).join("・")}
+        {KINDS.filter((k) => k !== "promo" && k !== "notice" && kinds[k]).map((k) => `${KIND_LABEL[k]} ${n(k).toLocaleString()}`).join("・")}
       </p>
     </div>
   );

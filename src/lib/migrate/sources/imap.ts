@@ -59,7 +59,7 @@ export const imap: MailSource = {
         const batch = uids.slice(at, at + BATCH);
         const headers: Header[] = [];
         if (batch.length) {
-          for await (const msg of client.fetch(batch.join(","), { uid: true, internalDate: true, headers: ["from", "subject", "delivered-to", "to", "list-unsubscribe", "precedence"] }, { uid: true })) {
+          for await (const msg of client.fetch(batch.join(","), { uid: true, internalDate: true, headers: ["from", "subject", "delivered-to", "list-unsubscribe", "precedence"] }, { uid: true })) {
             if (!msg.headers) continue;
             headers.push({ id: `${uidValidity}:${msg.uid}`, ...readRawHeaders(msg.headers.toString("utf8")), at: msg.internalDate ? new Date(msg.internalDate).getTime() : 0 });
           }

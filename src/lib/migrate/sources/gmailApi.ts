@@ -1,7 +1,7 @@
 import "server-only";
 import { UserError } from "../db";
 import { accessToken, RECONNECT } from "../gmail";
-import { decodeHeader, GMAIL_QUERY_ACCOUNT, GMAIL_QUERY_PROMO, PROMO_SAMPLE, PROMO_SAMPLE_WINDOW } from "../parse";
+import { clean, decodeHeader, GMAIL_QUERY_ACCOUNT, GMAIL_QUERY_PROMO, PROMO_SAMPLE, PROMO_SAMPLE_WINDOW } from "../parse";
 import { RetryLater, type Batch, type Cursor, type Header, type MailSource } from "./types";
 
 /**
@@ -19,6 +19,9 @@ const PAGE = 50;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** 相手のサーバー側の失敗（5xx）。少し待てば直ることも、その 1 通だけがずっと読めないこともある */
+class ServerError extends Error {}
+
 async function call(token: string, path: string): Promise<unknown> {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`${API}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
@@ -29,7 +32,8 @@ async function call(token: string, path: string): Promise<unknown> {
       await sleep((limited ? 4000 : 800) * 2 ** attempt);
       continue;
     }
-    if (limited || res.status >= 500) throw new RetryLater(`Gmail が混み合っています（HTTP ${res.status}）`);
+    if (limited) throw new RetryLater(`Gmail が混み合っています（HTTP ${res.status}）`);
+    if (res.status >= 500) throw new ServerError(`HTTP ${res.status}`);
     if (res.status === 401) throw new UserError(RECONNECT);
     if (res.status === 403) throw new UserError("Gmail を読む許可がありません。Google Cloud で Gmail API を有効にしたか、つなぐときに「メールの閲覧」を許可したか確かめてください");
     if (res.status === 400 && path.includes("pageToken=")) throw new UserError("続きの場所が古くなりました。「数え直す」を押してから、もう一度調べてください");
@@ -38,17 +42,18 @@ async function call(token: string, path: string): Promise<unknown> {
 }
 
 async function readHeader(token: string, id: string): Promise<Header | null> {
-  const m = (await call(token, `/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Delivered-To&metadataHeaders=To&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence&fields=internalDate,labelIds,payload/headers`).catch((e) => {
+  const m = (await call(token, `/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Delivered-To&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence&fields=internalDate,labelIds,payload/headers`).catch((e) => {
     if (e instanceof UserError || e instanceof RetryLater) throw e;
-    return null; // 1 通だけ読めなくても、全体は止めない
+    // その 1 通だけ読めない（消された・相手の側で失敗し続ける）ときは、飛ばして先へ進む。全体は止めない
+    return null;
   })) as { internalDate?: string; labelIds?: string[]; payload?: { headers?: { name: string; value: string }[] } } | null;
   if (!m) return null;
   const h = (name: string) => m.payload?.headers?.find((x) => x.name.toLowerCase() === name)?.value ?? "";
   return {
     id,
     from: h("from"),
-    to: h("delivered-to") || h("to"),
-    subject: decodeHeader(h("subject")).trim().slice(0, 120),
+    to: h("delivered-to"),
+    subject: clean(decodeHeader(h("subject")), 120),
     at: Number(m.internalDate) || 0,
     // 分類に使うのは Gmail の分類ラベルだけ（利用者が付けたラベルの名前は受け取らない）
     labels: (m.labelIds ?? []).filter((l) => l.startsWith("CATEGORY_")),
@@ -81,7 +86,10 @@ export const gmailApi: MailSource = {
         const promo = state.phase === "promo";
         // 2 回目以降は、前回より後に届いた分だけ。初めての 2 段目は、直近の分だけ
         const q = (promo ? GMAIL_QUERY_PROMO : GMAIL_QUERY_ACCOUNT) + (state.after ? ` after:${state.after}` : promo ? ` ${PROMO_SAMPLE_WINDOW}` : "");
-        const list = (await call(token, `/messages?${new URLSearchParams({ q, maxResults: String(PAGE), fields: "messages/id,nextPageToken", ...(state.pageToken ? { pageToken: state.pageToken } : {}) })}`)) as {
+        // 一覧が取れないときは、先へ進めない。しばらく置いて、同じ所からやり直す
+        const list = (await call(token, `/messages?${new URLSearchParams({ q, maxResults: String(PAGE), fields: "messages/id,nextPageToken", ...(state.pageToken ? { pageToken: state.pageToken } : {}) })}`).catch((e) => {
+          throw e instanceof ServerError ? new RetryLater(e.message) : e;
+        })) as {
           messages?: { id: string }[];
           nextPageToken?: string;
         };

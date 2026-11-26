@@ -11,7 +11,7 @@ export interface Header {
   /** メール会社がそのメールに付けた番号（同じメールを二重に記録しないため） */
   id: string;
   from: string;
-  /** 宛先（Delivered-To、なければ To）。転送されてきた古いアドレスを見分ける材料 */
+  /** 届け先（Delivered-To）。転送されてきた古いアドレスを見分ける材料。To は使わない（ほかの人のアドレスが並ぶことがあるため） */
   to?: string;
   subject: string;
   /** 届いた時刻（ミリ秒） */

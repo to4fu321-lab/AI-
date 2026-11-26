@@ -90,7 +90,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ act
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return json({ error: "このサイトの画面から操作してください" }, 415);
 
   try {
-    const setup = { db: true, google: googleConfigured(), tokenKey: tokenKeyConfigured() };
+    // 鍵が設定されているかどうかは、ログインした人にだけ教える（知らない人には、設定の様子を見せない）
+    const setup = { db: true, google: googleConfigured(), tokenKey: true };
     let user: User | null;
     try {
       user = await currentUser(request);
@@ -103,7 +104,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ act
     /** 画面に出すもの一式（ログインしていなければ、空で返す） */
     if (action === "state") {
       if (!user) return json({ setup, user: null, mailboxes: [], services: [] } satisfies AppState);
-      return json({ setup, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)) } satisfies AppState);
+      return json({ setup: { ...setup, tokenKey: tokenKeyConfigured() }, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)) } satisfies AppState);
     }
 
     if (action === "logout") {

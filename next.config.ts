@@ -21,6 +21,7 @@ const nextConfig: NextConfig = {
     ];
     return [
       { source: "/migrate", headers: secure },
+      { source: "/migrate/:path*", headers: secure },
       { source: "/api/migrate/:path*", headers: secure },
     ];
   },
