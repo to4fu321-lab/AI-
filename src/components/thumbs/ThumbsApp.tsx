@@ -2937,6 +2937,22 @@ function Viewer({
             </a>
           )}
         </p>
+        {/* リンク切れの判定（慎重に何度か確かめる）を待たずに、開いたらすぐ 🔔 を付けられる。再生できている動画にも先に付けておける */}
+        {reviveOn && item.kind === "video" && !item.dead && !saved && key && (
+          <button
+            type="button"
+            onClick={() => onWatch(item, !row)}
+            className={`w-full rounded-full py-2 text-xs font-bold ${row ? "bg-amber-500 text-black" : playError ? "bg-amber-500/80 text-black" : "bg-white/10"}`}
+          >
+            {row?.status === "found" || row?.status === "saving"
+              ? "⏳ 同じ動画が見つかりました。保存しています…"
+              : row
+                ? "🔔 消えても復活したら保存：オン（タップで外す）"
+                : playError
+                  ? "🔔 見られないときは：復活したら保存する"
+                  : "🔔 消えても、復活したら保存する"}
+          </button>
+        )}
         {(saved || item.dead) && (
           <div className="flex gap-2">
             {saved && (
