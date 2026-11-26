@@ -30,7 +30,8 @@ interface ImapCursor {
 }
 
 export const imap: MailSource = {
-  async open(box, cursor) {
+  async open(box, cursor, _ctx) {
+    void _ctx;
     const client = new ImapFlow({ ...IMAP, auth: { user: box.email, accessToken: await accessToken(box) }, logger: false });
     await client.connect();
     const all = (await client.list()).find((m) => m.specialUse === "\\All");

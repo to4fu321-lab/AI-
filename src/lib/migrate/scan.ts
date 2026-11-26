@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { classify, LOGIN_KINDS, RULES_VERSION, type Kind } from "./classify";
 import { db, getMailbox, transaction, UserError, type MailboxRow } from "./db";
+import { askKinds, hasLlm, LLM_MODEL, patternKey, type Pattern } from "./llm";
 import { clean, isPersonalDomain, maskSecrets, parseFrom, serviceDomain } from "./parse";
 import { gmailApi } from "./sources/gmailApi";
 import { imap } from "./sources/imap";
@@ -26,6 +27,9 @@ const LOCK = "6 minutes";
 const PARALLEL = 4;
 /** 「やめたい」印の付いたアドレスを、自動で調べる間隔 */
 const WATCH_INTERVAL = "24 hours";
+/** LLM の層：1 回の調べで聞く「件名の形」の数の上限と、1 回の呼び出しで聞く数 */
+const LLM_MAX_PATTERNS = 300;
+const LLM_BATCH = 50;
 /** 件名の見本として残す数 */
 const SUBJECT_KEEP = 5;
 /** 1 つのメールボックスで記録する通数の上限（1 人が、際限なく記録を増やせないように） */
@@ -174,19 +178,21 @@ async function rebuild(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id
 async function reclassify(box: Pick<MailboxRow, "id" | "user_id">): Promise<void> {
   for (;;) {
     const more = await transaction(async (client) => {
-      const old = await client.query<{ id: string; domain: string; kind: Kind; subject: string; labels: string[]; has_unsubscribe: boolean; precedence: string }>(
-        "select id, domain, kind, subject, labels, has_unsubscribe, precedence from migrate_messages where mailbox_id = $1 and rules_version < $2 order by id limit 2000 for update",
+      const old = await client.query<{ id: string; domain: string; kind: Kind; kind_source: string; subject: string; labels: string[]; has_unsubscribe: boolean; precedence: string }>(
+        "select id, domain, kind, kind_source, subject, labels, has_unsubscribe, precedence from migrate_messages where mailbox_id = $1 and rules_version < $2 order by id limit 2000 for update",
         [box.id, RULES_VERSION],
       );
       if (!old.rows.length) return false;
       const changed = old.rows.flatMap((r) => {
         if (LOGIN_KINDS.includes(r.kind)) return [];
         const kind = classify({ subject: r.subject, labels: r.labels, listUnsubscribe: r.has_unsubscribe, precedence: r.precedence });
-        return kind === r.kind ? [] : [{ id: r.id, kind, subject: LOGIN_SUBJECT[kind] ?? r.subject }];
+        // LLM が決めたものは、新しい決まりでも「分からない（お知らせ）」のままなら、LLM の答えを残す
+        if (r.kind_source === "llm" && kind === "notice") return [];
+        return kind === r.kind && r.kind_source === "rule" ? [] : [{ id: r.id, kind, subject: LOGIN_SUBJECT[kind] ?? r.subject }];
       });
       if (changed.length) {
         await client.query(
-          `update migrate_messages m set kind = x.kind, subject = x.subject
+          `update migrate_messages m set kind = x.kind, subject = x.subject, kind_source = 'rule'
            from jsonb_to_recordset($1::jsonb) as x(id bigint, kind text, subject text) where m.id = x.id and m.mailbox_id = $2`,
           [JSON.stringify(changed), box.id],
         );
@@ -197,6 +203,65 @@ async function reclassify(box: Pick<MailboxRow, "id" | "user_id">): Promise<void
     });
     if (!more) return;
   }
+}
+
+/**
+ * ふるいの最後の層：決まりで分類しきれなかった（「お知らせ」のままの）メールを、件名の形にまとめて LLM に分類させる。
+ * 一度聞いた形の答えは覚えておき（migrate_llm_cache）、同じ形は二度と聞かない。
+ * 鍵が無い・時間が無い・呼び出しに失敗した、のどれでも、何もせずに戻る（決まりでの分類のまま）
+ */
+async function refine(box: Pick<MailboxRow, "id" | "user_id">, deadline: number): Promise<void> {
+  if (!hasLlm()) return;
+  const pool = await db();
+  const found = await pool.query<{ domain: string; subject: string; n: number; name: string; unsub: boolean }>(
+    `select domain, subject, count(*)::int as n, coalesce(max(from_name), '') as name, bool_or(has_unsubscribe) as unsub
+     from migrate_messages where mailbox_id = $1 and kind = 'notice' and kind_source = 'rule' and subject <> ''
+     group by domain, subject order by count(*) desc limit $2`,
+    [box.id, LLM_MAX_PATTERNS * 4],
+  );
+  if (!found.rows.length) return;
+  // 件名の形ごとにまとめる（日付や番号だけが違う件名を 1 つにする）
+  const groups = new Map<string, { pattern: Pattern; subjects: string[] }>();
+  for (const r of found.rows) {
+    const key = patternKey(r.domain, r.subject);
+    const g = groups.get(key);
+    if (g) {
+      g.pattern.count += r.n;
+      g.subjects.push(r.subject);
+    } else groups.set(key, { pattern: { domain: r.domain, name: r.name, subject: r.subject, count: r.n, unsubscribe: r.unsub }, subjects: [r.subject] });
+  }
+  const keys = [...groups.keys()];
+  const cached = await pool.query<{ key: string; kind: Kind }>("select key, kind from migrate_llm_cache where key = any($1)", [keys]);
+  const answers = new Map(cached.rows.map((r) => [r.key, r.kind]));
+  const ask = keys.filter((k) => !answers.has(k)).slice(0, LLM_MAX_PATTERNS);
+  for (let i = 0; i < ask.length && Date.now() < deadline; i += LLM_BATCH) {
+    const part = ask.slice(i, i + LLM_BATCH);
+    const kinds = await askKinds(part.map((k) => groups.get(k)!.pattern));
+    const got = part.flatMap((k, j) => (kinds[j] ? [{ key: k, kind: kinds[j]! }] : []));
+    if (!got.length) break; // 呼び出しに失敗した。続けて聞いても同じなので、やめる
+    await pool.query(
+      "insert into migrate_llm_cache (key, kind, model) select x.key, x.kind, $2 from jsonb_to_recordset($1::jsonb) as x(key text, kind text) on conflict (key) do nothing",
+      [JSON.stringify(got), LLM_MODEL],
+    );
+    for (const g of got) answers.set(g.key, g.kind);
+  }
+  // 答えを、記録に反映する
+  const updates = keys.flatMap((k) => {
+    const kind = answers.get(k);
+    if (!kind) return [];
+    const g = groups.get(k)!;
+    return g.subjects.map((subject) => ({ domain: g.pattern.domain, subject, kind, label: LOGIN_SUBJECT[kind] ?? subject }));
+  });
+  if (!updates.length) return;
+  await transaction(async (client) => {
+    await client.query(
+      `update migrate_messages m set kind = x.kind, subject = x.label, kind_source = 'llm'
+       from jsonb_to_recordset($2::jsonb) as x(domain text, subject text, kind text, label text)
+       where m.mailbox_id = $1 and m.kind = 'notice' and m.kind_source = 'rule' and m.domain = x.domain and m.subject = x.subject`,
+      [box.id, JSON.stringify(updates)],
+    );
+    await rebuild(client, box, [...new Set(updates.map((u) => u.domain))]);
+  });
 }
 
 /** 記録と集計を空にする（仕分けの状態・開くページ・メモは残す） */
@@ -264,7 +329,13 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
     const source = SOURCES[box.source];
     if (!source) throw new UserError("このメールボックスの読み方は、まだ用意されていません");
     await reclassify(box);
-    session = await source.open(box, box.scan ?? {});
+    session = await source.open(box, box.scan ?? {}, {
+      async known(ids) {
+        if (!ids.length) return new Set();
+        const r = await pool.query<{ provider_msg_id: string }>("select provider_msg_id from migrate_messages where mailbox_id = $1 and provider_msg_id = any($2)", [box.id, ids]);
+        return new Set(r.rows.map((x) => x.provider_msg_id));
+      },
+    });
     for (;;) {
       if (Date.now() > deadline) return "more";
       const still = await pool.query<{ requested: boolean }>("select requested from migrate_mailboxes where id = $1 and lock_token = $2", [box.id, lockToken]);
@@ -282,7 +353,11 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
           [box.id, JSON.stringify(batch.cursor), batch.remaining ?? 0, batch.done],
         );
       });
-      if (batch.done) return "done";
+      if (batch.done) {
+        // 読み終えたら、決まりで分類しきれなかった分を LLM にかける（失敗しても、調べは終わりにする）
+        await refine(box, deadline + 30_000).catch((err) => console.error("[migrate] refine", (err as { code?: string })?.code ?? "failed"));
+        return "done";
+      }
       const total = await pool.query<{ scanned: number }>("select scanned from migrate_mailboxes where id = $1", [box.id]);
       if ((total.rows[0]?.scanned ?? 0) >= MAX_MESSAGES) throw new UserError(`記録できる通数の上限（${MAX_MESSAGES.toLocaleString()} 通）に達したので、ここで止めました`, "too-many-messages");
     }

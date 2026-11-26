@@ -46,8 +46,17 @@ export interface MailSession {
   close(): Promise<void>;
 }
 
+/** 進行役から部品へ渡す手がかり */
+export interface SourceContext {
+  /**
+   * 渡した番号のうち、もう記録してあるもの。部品は、これに入っているメールを読みに行かなくてよい
+   * （同じメールが別の検索にも当たったとき・調べ直したときに、通信を節約する）
+   */
+  known(ids: string[]): Promise<Set<string>>;
+}
+
 export interface MailSource {
-  open(box: MailboxRow, cursor: Cursor): Promise<MailSession>;
+  open(box: MailboxRow, cursor: Cursor, ctx: SourceContext): Promise<MailSession>;
 }
 
 /** 相手が混み合っている・上限に当たった。しばらくしてから続きをやり直せばよい */
