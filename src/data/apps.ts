@@ -41,6 +41,19 @@ export interface AppEntry {
 
 export const APPS: AppEntry[] = [
   {
+    slug: "migrate",
+    href: "/migrate",
+    name: "アカウント引っ越し",
+    emoji: "📬",
+    description: "Gmail から登録済みのサービスを洗い出し、ログインページを開いて、新しいメールアドレスへの変更を 1 件ずつ進めます。",
+    tags: ["メール", "ツール"],
+    addedAt: "2026-11-25",
+    color: "from-emerald-500 to-teal-400",
+    access: "private",
+    paths: ["/migrate", "/api/migrate"],
+    status: "beta",
+  },
+  {
     slug: "autopost",
     href: "/autopost",
     name: "動画オート投稿",
