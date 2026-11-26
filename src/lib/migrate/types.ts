@@ -60,4 +60,6 @@ export interface AppState {
   services: Service[];
   /** AI 秘書（MCP）とつなぐ鍵（鍵そのものは入らない） */
   grants: Grant[];
+  /** AI 秘書に教える MCP サーバーの URL（決まった住所。分からなければ null） */
+  mcpUrl: string | null;
 }

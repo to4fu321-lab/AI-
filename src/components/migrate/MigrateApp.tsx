@@ -392,7 +392,8 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
   const [scope, setScope] = useState<string[] | null>(null);
   const [issued, setIssued] = useState<{ token: string; grant: Grant } | null>(null);
   const [busy, setBusy] = useState(false);
-  const url = `${origin}/api/mcp/migrate`;
+  // AI 秘書に教える URL は、サーバーが決めた住所を使う（許可の手続きは、この住所と 1 文字も違わないときだけ通る）
+  const url = state.mcpUrl ?? `${origin}/api/mcp/migrate`;
 
   const create = async () => {
     setBusy(true);
@@ -406,7 +407,7 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
     setBusy(false);
   };
   const revoke = async (g: Grant) => {
-    if (!confirm(`「${g.name}」の鍵を取り消します。この鍵を使っている AI 秘書は、すぐに使えなくなります。`)) return;
+    if (!confirm(g.kind === "oauth" ? `「${g.name}」とのつながりを取り消します。この AI 秘書は、すぐに読めなくなります。` : `「${g.name}」の鍵を取り消します。この鍵を使っている AI 秘書は、すぐに使えなくなります。`)) return;
     try {
       await api("grantRevoke", { id: g.id });
       if (issued?.grant.id === g.id) setIssued(null);
@@ -425,8 +426,19 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
     <section className={card}>
       <h2 className="text-base font-black">AI 秘書とつなぐ（MCP）</h2>
       <p className="mt-1 text-xs text-neutral-500">
-        Claude Desktop や Claude Code などの AI 秘書から、つないだアドレスの台帳と、メールの記録（ヘッダだけ）を読めるようにします。鍵ごとに、見せるアドレスを選べます。鍵はいつでも取り消せます。
+        Claude などの AI 秘書から、つないだアドレスの台帳と、メールの記録（ヘッダだけ）を読めるようにします。つながりごとに、見せるアドレスを選べます。いつでも取り消せます。
       </p>
+
+      <div className="mt-3 rounded-xl bg-emerald-50 p-3 text-xs dark:bg-emerald-950/40">
+        <p className="font-black">かんたんなつなぎ方（Claude のアプリ・claude.ai）</p>
+        <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+          <li>Claude の設定の「コネクタ」で「カスタムコネクタを追加」を選ぶ</li>
+          <li>下の URL を貼って追加し、「接続」を押す</li>
+          <li>この画面と同じログインで、見せるアドレスを選んで「許可する」</li>
+        </ol>
+        <code className="mt-2 block break-all rounded bg-white/70 p-2 dark:bg-black/30">{url}</code>
+        <p className="mt-2 text-neutral-500">鍵を貼る必要はありません。Claude Code では <code>claude mcp add --transport http account-migrate {url}</code> のあと、<code>/mcp</code> から許可します。</p>
+      </div>
 
       {issued && (
         <div className="mt-3 rounded-xl bg-amber-100 p-3 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
@@ -451,7 +463,10 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
           {state.grants.map((g) => (
             <li key={g.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-neutral-100 p-3 text-xs dark:bg-neutral-800/60">
               <div className="min-w-0">
-                <p className="font-bold">{g.name}<span className="ml-2 font-normal text-neutral-500">{g.hint}…</span></p>
+                <p className="font-bold break-all">
+                  {g.name}
+                  <span className="ml-2 font-normal text-neutral-500">{g.kind === "oauth" ? `ログインして許可${g.verifiedHost ? `（${g.verifiedHost}）` : "（身元は未確認）"}` : `${g.hint}…`}</span>
+                </p>
                 <p className="mt-0.5 text-neutral-500">
                   見せるアドレス：{g.mailboxes ? g.mailboxes.join("、") || "（なし）" : "すべて"} ／ 最後に使った日：{g.last_used_at ? day(g.last_used_at) : "まだ"} ／ 直近 24 時間 {g.calls24h} 回
                 </p>
@@ -463,6 +478,7 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
       )}
 
       <div className="mt-3 space-y-2 text-xs">
+        <p className="font-black">鍵でつなぐ（許可の画面を出せない AI 秘書や、自分で設定を書くとき）</p>
         <label className="block font-semibold">
           鍵の名前（どの AI 秘書に渡すか）
           <input className={`${input} mt-1`} value={name} maxLength={40} onChange={(e) => setName(e.target.value)} />
