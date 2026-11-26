@@ -1,18 +1,20 @@
 import "server-only";
+import { randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
-import { db, getMailbox, transaction, UserError, type MailboxRow, type ServiceRow } from "./db";
-import { isPersonalDomain, parseFrom, serviceDomain, signalsOf } from "./parse";
+import { classify, RULES_VERSION } from "./classify";
+import { db, getMailbox, transaction, UserError, type MailboxRow } from "./db";
+import { isPersonalDomain, maskDigits, parseFrom, serviceDomain } from "./parse";
 import { gmailApi } from "./sources/gmailApi";
 import { imap } from "./sources/imap";
 import { RetryLater, type Header, type MailSession, type MailSource } from "./sources/types";
-import type { Signal } from "./types";
 
 /**
  * メールの調べの進行役。
  *
- * - メールを読むのは sources/ の部品（メール会社ごとに差し替える）。ここは、数える・保存する・時間で区切る・二重に動かさない、を受け持つ
+ * - メールを読むのは sources/ の部品（メール会社ごとに差し替える）。ここは、記録する・集計する・時間で区切る・二重に動かさない、を受け持つ
+ * - 読んだメールは 1 通ずつ記録する（ヘッダから取った材料だけ。本文は受け取らない）。同じメールは二度記録しない
+ * - サービスごとの集計は、いつも記録から作り直す。だから、読み直しや重なりがあっても数はずれない
  * - 進めるのはサーバー。画面を閉じても続く。時間で区切れたら次の回へ引き継ぎ、止まっても定期実行（/api/cron/migrate-scan）が続きから進める
- * - 数えた結果と「続きの場所」は、ひとまとめに保存する（片方だけ進んで二重に数えることがない）
  */
 
 /** 読み方の部品。メールボックスの source 欄の名前で選ぶ */
@@ -20,112 +22,147 @@ const SOURCES: Record<string, MailSource> = { "gmail-api": gmailApi, imap };
 
 /** 「今どこかが進めている」印の長さ。関数の時間の上限（5 分）より長くして、二重に動かさない */
 const LOCK = "6 minutes";
+/** 定期実行の 1 回で、同時に進めるメールボックスの数 */
+const PARALLEL = 4;
+/** 件名の見本として残す数 */
+const SUBJECT_KEEP = 5;
 
-interface Tally {
-  count: number;
-  names: Record<string, number>;
-  signals: Partial<Record<Signal, number>>;
-  subjects: { s: string; t: number }[];
-  first: number;
-  last: number;
+interface MessageRow {
+  id: string;
+  at: string;
+  domain: string;
+  from_address: string;
+  from_name: string;
+  to_address: string;
+  subject: string;
+  labels: string[];
+  has_unsubscribe: boolean;
+  precedence: string;
+  kind: string;
 }
 
-/** 読んだヘッダを、差出人のドメインごとにまとめる */
-export function tally(headers: Header[], ownEmail: string): Map<string, Tally> {
-  const out = new Map<string, Tally>();
+/** 読んだヘッダを、記録する形にする（自分自身からのメールと、個人どうしのやり取りは記録しない） */
+export function toRows(headers: Header[], ownEmail: string): MessageRow[] {
+  const out: MessageRow[] = [];
   for (const h of headers) {
     const from = parseFrom(h.from);
-    if (!from || from.address === ownEmail || isPersonalDomain(from.address)) continue;
+    if (!h.id || !from || from.address === ownEmail || isPersonalDomain(from.address)) continue;
     const domain = serviceDomain(from.address);
     if (!domain) continue;
-    const t = out.get(domain) ?? { count: 0, names: {}, signals: {}, subjects: [], first: h.at, last: h.at };
-    t.count++;
-    if (from.name) t.names[from.name] = (t.names[from.name] ?? 0) + 1;
-    for (const s of signalsOf(h.subject)) t.signals[s] = (t.signals[s] ?? 0) + 1;
-    if (h.subject) t.subjects.push({ s: h.subject, t: h.at });
-    t.first = Math.min(t.first, h.at);
-    t.last = Math.max(t.last, h.at);
-    out.set(domain, t);
+    out.push({
+      id: h.id,
+      at: new Date(h.at || 0).toISOString(),
+      domain,
+      from_address: from.address.slice(0, 200),
+      from_name: from.name,
+      to_address: (parseFrom(h.to ?? "")?.address ?? "").slice(0, 200),
+      // 分類は、伏せる前の件名で決める。保存するのは、数字の並びを伏せた件名
+      kind: classify({ subject: h.subject, labels: h.labels, listUnsubscribe: h.listUnsubscribe, precedence: h.precedence }),
+      subject: maskDigits(h.subject),
+      labels: h.labels ?? [],
+      has_unsubscribe: !!h.listUnsubscribe,
+      precedence: (h.precedence ?? "").slice(0, 20),
+    });
   }
   return out;
 }
 
-const SUBJECT_KEEP = 5;
-const NAME_KEEP = 8;
+/**
+ * メールを記録して、かかわるサービスの集計を作り直す。メールを取りこむ道は、ここ 1 つだけ。
+ * 同じメール（同じメールボックスの、同じ番号）は二度記録しない
+ */
+async function ingest(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id" | "email">, headers: Header[]): Promise<void> {
+  const rows = toRows(headers, box.email);
+  if (!rows.length) return;
+  await client.query(
+    `insert into migrate_messages (user_id, mailbox_id, provider_msg_id, at, domain, from_address, from_name, to_address, subject, labels, has_unsubscribe, precedence, kind, rules_version)
+     select $1, $2, x.id, x.at, x.domain, x.from_address, x.from_name, x.to_address, x.subject,
+            array(select jsonb_array_elements_text(x.labels)), x.has_unsubscribe, x.precedence, x.kind, $4
+     from jsonb_to_recordset($3::jsonb) as x(id text, at timestamptz, domain text, from_address text, from_name text, to_address text, subject text, labels jsonb, has_unsubscribe boolean, precedence text, kind text)
+     on conflict (mailbox_id, provider_msg_id) do nothing`,
+    [box.user_id, box.id, JSON.stringify(rows), RULES_VERSION],
+  );
+  await rebuild(client, box, [...new Set(rows.map((r) => r.domain))]);
+}
 
-/** まとめた分を、データベースの今の数に足しこむ（仕分けの状態やメモは変えない） */
-async function merge(pool: PoolClient, box: Pick<MailboxRow, "id" | "user_id">, found: Map<string, Tally>): Promise<void> {
-  const mailboxId = box.id;
-  if (!found.size) return;
-  const existing = (await pool.query<ServiceRow>("select * from migrate_services where mailbox_id = $1 and domain = any($2)", [mailboxId, [...found.keys()]])).rows;
-  const byDomain = new Map(existing.map((r) => [r.domain, r]));
-  const rows = [...found].map(([domain, t]) => {
-    const old = byDomain.get(domain);
-    const names: Record<string, number> = { ...(old?.names ?? {}) };
-    for (const [n, k] of Object.entries(t.names)) names[n] = (names[n] ?? 0) + k;
-    const top = Object.entries(names).sort((a, b) => b[1] - a[1]).slice(0, NAME_KEEP);
-    const signals: Partial<Record<Signal, number>> = { ...(old?.signals ?? {}) };
-    for (const [s, k] of Object.entries(t.signals) as [Signal, number][]) signals[s] = (signals[s] ?? 0) + k;
-    const seen = new Set<string>();
-    const subjects = [...(old?.subjects ?? []), ...t.subjects]
-      .sort((a, b) => b.t - a.t)
-      .filter((x) => !seen.has(x.s) && seen.add(x.s))
-      .slice(0, SUBJECT_KEEP);
-    const first = Math.min(t.first, old?.first_at?.getTime() ?? Infinity);
-    const last = Math.max(t.last, old?.last_at?.getTime() ?? 0);
-    return {
-      domain,
-      name: top[0]?.[0] ?? "",
-      names: Object.fromEntries(top),
-      count: (old?.count ?? 0) + t.count,
-      signals,
-      subjects,
-      first_at: first && Number.isFinite(first) ? new Date(first).toISOString() : null,
-      last_at: last ? new Date(last).toISOString() : null,
-    };
-  });
-  await pool.query(
-    `insert into migrate_services (mailbox_id, user_id, domain, name, names, count, signals, subjects, first_at, last_at)
-     select $1, $3, x.domain, x.name, x.names, x.count, x.signals, x.subjects, x.first_at, x.last_at
-     from jsonb_to_recordset($2::jsonb) as x(domain text, name text, names jsonb, count integer, signals jsonb, subjects jsonb, first_at timestamptz, last_at timestamptz)
+/** サービスごとの集計を、記録から作り直す（仕分けの状態・開くページ・メモは変えない） */
+async function rebuild(client: PoolClient, box: Pick<MailboxRow, "id" | "user_id">, domains: string[]): Promise<void> {
+  if (!domains.length) return;
+  await client.query(
+    `with m as (
+       select domain, kind, at, from_name, subject from migrate_messages where mailbox_id = $1 and domain = any($3)
+     ), by_kind as (
+       select domain, kind, count(*) as c, max(at) as last from m group by domain, kind
+     ), sig as (
+       select domain, sum(c)::int as n, jsonb_object_agg(kind, c) as signals,
+              jsonb_object_agg(kind, to_char(last at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) as signal_last
+       from by_kind group by domain
+     ), span as (
+       select domain, min(at) as first_at, max(at) as last_at from m group by domain
+     ), names as (
+       select distinct on (domain) domain, from_name
+       from (select domain, from_name, count(*) as c from m where from_name <> '' group by domain, from_name) x
+       order by domain, c desc, from_name
+     ), latest as (
+       -- 見本は、広告でないものを先に、新しい順で、同じ件名は 1 つにまとめる
+       select distinct on (domain, subject) domain, subject, at, (kind = 'promo') as promo
+       from m where subject <> '' order by domain, subject, at desc
+     ), ranked as (
+       select domain, subject, at, promo, row_number() over (partition by domain order by promo, at desc) as r from latest
+     ), samples as (
+       select domain, jsonb_agg(subject order by promo, at desc) as subjects from ranked where r <= ${SUBJECT_KEEP} group by domain
+     )
+     insert into migrate_services (mailbox_id, user_id, domain, name, count, signals, signal_last, subjects, first_at, last_at)
+     select $1, $2, sig.domain, coalesce(names.from_name, ''), sig.n, sig.signals, sig.signal_last, coalesce(samples.subjects, '[]'::jsonb), span.first_at, span.last_at
+     from sig join span using (domain) left join names using (domain) left join samples using (domain)
      on conflict (mailbox_id, domain) do update set
-       name = excluded.name, names = excluded.names, count = excluded.count, signals = excluded.signals,
+       name = excluded.name, count = excluded.count, signals = excluded.signals, signal_last = excluded.signal_last,
        subjects = excluded.subjects, first_at = excluded.first_at, last_at = excluded.last_at, updated_at = now()`,
-    [mailboxId, JSON.stringify(rows), box.user_id],
+    [box.id, box.user_id, domains],
   );
 }
 
-/** 数えた結果を空にする（仕分けの状態・開くページ・メモは残す） */
+/** 記録と集計を空にする（仕分けの状態・開くページ・メモは残す） */
 async function clearCounts(client: PoolClient, mailboxId: string): Promise<void> {
-  await client.query("update migrate_services set count = 0, names = '{}', signals = '{}', subjects = '[]', first_at = null, last_at = null where mailbox_id = $1", [mailboxId]);
+  await client.query("delete from migrate_messages where mailbox_id = $1", [mailboxId]);
+  await client.query(
+    "update migrate_services set count = 0, names = '{}', signals = '{}', signal_last = '{}', subjects = '[]', first_at = null, last_at = null where mailbox_id = $1",
+    [mailboxId],
+  );
   await client.query("update migrate_mailboxes set scan = '{}', scanned = 0, remaining = 0, last_scan = null where id = $1", [mailboxId]);
 }
 
 /** 調べ始める（印を付けるだけ。進めるのは runScan） */
 export async function requestScan(userId: string, mailboxId: string): Promise<void> {
   const box = await getMailbox(userId, mailboxId);
-  await (await db()).query("update migrate_mailboxes set requested = true, error = '' where id = $1", [box.id]);
+  await (await db()).query("update migrate_mailboxes set requested = true, error = '' where id = $1 and user_id = $2", [box.id, userId]);
 }
 
 /** 止める（進めている所は、読んでいるひとかたまりを終えたところで止まる） */
 export async function stopScan(userId: string, mailboxId: string): Promise<void> {
   const box = await getMailbox(userId, mailboxId);
-  await (await db()).query("update migrate_mailboxes set requested = false where id = $1", [box.id]);
+  await (await db()).query("update migrate_mailboxes set requested = false where id = $1 and user_id = $2", [box.id, userId]);
 }
 
 /** 数え直すために空にする */
 export async function resetScan(userId: string, mailboxId: string): Promise<void> {
   const box = await getMailbox(userId, mailboxId);
-  if (box.requested || (box.lock_until && box.lock_until > new Date())) throw new UserError("調べている途中は数え直せません。「止める」を押して、少し待ってからにしてください");
-  await transaction((client) => clearCounts(client, box.id));
+  await transaction(async (client) => {
+    // 「調べていない」ことの確かめと、空にするのを、同じトランザクションの中で行う（確かめたあとに調べが始まらないように、行を押さえる）
+    const free = await client.query(
+      "select 1 from migrate_mailboxes where id = $1 and user_id = $2 and not requested and (lock_until is null or lock_until < now()) for update",
+      [box.id, userId],
+    );
+    if (!free.rowCount) throw new UserError("調べている途中は数え直せません。「止める」を押して、少し待ってからにしてください");
+    await clearCounts(client, box.id);
+  });
 }
 
-/** 止まった理由を、画面に出せる言葉にする */
+/** 止まった理由を、画面に出せる言葉にする（内部のエラーの文は、利用者には見せない。記録にだけ残す） */
 function reason(err: unknown): string {
   if (err instanceof UserError) return err.message;
-  const e = err as { authenticationFailed?: boolean; message?: string; responseText?: string };
-  if (e?.authenticationFailed) return "メールに入れませんでした。もう一度つなぎ直してください";
-  return `読み取りが途中で止まりました（${(e?.responseText || e?.message || String(err)).slice(0, 120)}）。「調べる」でもう一度続きから進めます`;
+  if ((err as { authenticationFailed?: boolean })?.authenticationFailed) return "メールに入れませんでした。もう一度つなぎ直してください";
+  return "読み取りが途中で止まりました。「調べる」でもう一度、続きから進めます";
 }
 
 /**
@@ -136,28 +173,30 @@ function reason(err: unknown): string {
  */
 export async function runScan(mailboxId: string, deadline: number): Promise<"done" | "more" | "later" | "busy"> {
   const pool = await db();
+  // この回の印。ロックを外すときは、自分の印のものだけ外す（時間切れのあと別の回が取ったロックを、外さない）
+  const lockToken = randomBytes(12).toString("base64url");
   const claimed = await pool.query<MailboxRow>(
-    `update migrate_mailboxes set lock_until = now() + interval '${LOCK}'
+    `update migrate_mailboxes set lock_until = now() + interval '${LOCK}', lock_token = $2, progress_at = now()
      where id = $1 and requested and user_id is not null and (lock_until is null or lock_until < now()) returning *`,
-    [mailboxId],
+    [mailboxId, lockToken],
   );
   const box = claimed.rows[0];
   if (!box) return "busy";
   let session: MailSession | null = null;
   try {
     const source = SOURCES[box.source];
-    if (!source) throw new UserError(`このメールボックスの読み方（${box.source}）は、まだ用意されていません`);
+    if (!source) throw new UserError("このメールボックスの読み方は、まだ用意されていません");
     session = await source.open(box, box.scan ?? {});
     for (;;) {
       if (Date.now() > deadline) return "more";
-      const still = await pool.query<{ requested: boolean }>("select requested from migrate_mailboxes where id = $1", [box.id]);
+      const still = await pool.query<{ requested: boolean }>("select requested from migrate_mailboxes where id = $1 and lock_token = $2", [box.id, lockToken]);
       if (!still.rows[0]?.requested) return "done";
       const batch = await session.next();
       await transaction(async (client) => {
         if (batch.reset) await clearCounts(client, box.id);
-        await merge(client, box, tally(batch.headers, box.email));
+        await ingest(client, box, batch.headers);
         await client.query(
-          `update migrate_mailboxes set scan = $2::jsonb, scanned = scanned + $3, remaining = $4, error = '',
+          `update migrate_mailboxes set scan = $2::jsonb, scanned = scanned + $3, remaining = $4, error = '', progress_at = now(),
              requested = requested and not $5, last_scan = case when $5 then now() else last_scan end
            where id = $1`,
           [box.id, JSON.stringify(batch.cursor), batch.read, batch.remaining ?? 0, batch.done],
@@ -168,31 +207,58 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
   } catch (err) {
     if (err instanceof RetryLater) {
       // 調べる印は残す。定期実行が、しばらくしてから続きを進める
-      await pool.query("update migrate_mailboxes set error = $2 where id = $1", [box.id, "Gmail が混み合っているので、少し休んでいます。15 分以内に自動で続きを進めます"]).catch(() => {});
+      await pool.query("update migrate_mailboxes set error = $2 where id = $1", [box.id, "メールの読み取りが混み合っているので、少し休んでいます。15 分以内に自動で続きを進めます"]).catch(() => {});
       return "later";
     }
-    console.error("[migrate] scan", err);
+    console.error("[migrate] scan", box.id, err);
     await pool.query("update migrate_mailboxes set requested = false, error = $2 where id = $1", [box.id, reason(err)]).catch(() => {});
     return "done";
   } finally {
     await session?.close().catch(() => {});
-    await pool.query("update migrate_mailboxes set lock_until = null where id = $1", [box.id]).catch(() => {});
+    await pool.query("update migrate_mailboxes set lock_until = null, lock_token = null where id = $1 and lock_token = $2", [box.id, lockToken]).catch(() => {});
   }
 }
 
-/** 定期実行から呼ぶ：途中のままのメールボックスを、時間のかぎり進める。時間で区切れたものがあれば true */
+/**
+ * 定期実行から呼ぶ：途中のままのメールボックスを、時間のかぎり進める。時間で区切れたものがあれば more。
+ * 長く待っているもの（最後に進んだのが古いもの）から、いくつかを同時に進める。
+ * 1 人の大きなメールボックスが、ほかの人の順番をふさがないようにするため
+ */
 export async function runPending(deadline: number): Promise<{ pending: number; more: boolean }> {
   const pool = await db();
-  const rows = (await pool.query<{ id: string }>("select id from migrate_mailboxes where requested and user_id is not null and (lock_until is null or lock_until < now()) order by created_at")).rows;
-  let more = false;
-  for (const r of rows) {
-    if (Date.now() > deadline) {
-      more = true;
-      break;
+  const rows = (
+    await pool.query<{ id: string }>(
+      `select id from migrate_mailboxes where requested and user_id is not null and (lock_until is null or lock_until < now())
+       order by progress_at asc nulls first, created_at limit ${PARALLEL * 5}`,
+    )
+  ).rows;
+  let more = rows.length >= PARALLEL * 5;
+  const queue = [...rows];
+  const worker = async () => {
+    for (let r = queue.shift(); r; r = queue.shift()) {
+      if (Date.now() > deadline) {
+        more = true;
+        return;
+      }
+      if ((await runScan(r.id, deadline)) === "more") more = true;
     }
-    if ((await runScan(r.id, deadline)) === "more") more = true;
-  }
+  };
+  await Promise.all(Array.from({ length: PARALLEL }, worker));
   return { pending: rows.length, more };
+}
+
+/**
+ * このサーバー自身の、外から見た住所。続きを起こす呼び出し（kick）には合言葉を付けるので、宛先は必ずここで決める。
+ * リクエストに書かれた宛先（Host）は使わない（書き換えられた宛先へ、合言葉を送らないため）。
+ * 本番では、環境変数 MIGRATE_ORIGIN か、Vercel が入れる本番のドメインを使う。手元で動かすときだけ、リクエストの宛先を使う
+ */
+export function selfOrigin(request: Request): string | null {
+  const fixed = process.env.MIGRATE_ORIGIN?.trim();
+  if (fixed && /^https:\/\/[a-z0-9.-]+$/i.test(fixed)) return fixed;
+  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  if (vercel && /^[a-z0-9.-]+$/i.test(vercel)) return `https://${vercel}`;
+  if (process.env.NODE_ENV !== "production") return new URL(request.url).origin;
+  return null;
 }
 
 /**
@@ -200,8 +266,10 @@ export async function runPending(deadline: number): Promise<{ pending: number; m
  * 自分の定期実行の入口を呼ぶ。入口はすぐ返事を返して裏で進めるので、ここでは返事を受け取るまで待つ。
  * 届かなくても、15 分ごとの定期実行が拾う
  */
-export async function kick(origin: string): Promise<void> {
+export async function kick(origin: string | null): Promise<void> {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return;
-  await fetch(`${origin}/api/cron/migrate-scan`, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15000) }).catch((err) => console.error("[migrate] kick", err));
+  if (!secret || !origin) return;
+  await fetch(`${origin}/api/cron/migrate-scan`, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15000) }).catch((err) =>
+    console.error("[migrate] kick", err instanceof Error ? err.message : err),
+  );
 }

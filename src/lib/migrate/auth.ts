@@ -12,7 +12,9 @@ import { oauthClient, redirectUri, revoke } from "./gmail";
  * - 利用者を見分ける鍵は、メールアドレスではなく Google の sub（変わらない番号）。アドレスは変わることがあるため
  */
 
-export const SESSION_COOKIE = "mg_session";
+// 名前の先頭の __Host- は、ブラウザに「このホストが、Secure・Path=/ で出した Cookie だけ受け付ける」と約束させる印。
+// 同じ親ドメインのほかのサイトから、にせのログインの印を差し込まれない
+export const SESSION_COOKIE = "__Host-mg_session";
 const SESSION_DAYS = 30;
 
 export interface User {
@@ -62,7 +64,7 @@ export async function finishLogin(code: string, origin: string, nonce: string): 
     signal: AbortSignal.timeout(15000),
   });
   const json = (await res.json().catch(() => ({}))) as { id_token?: string; error?: string; error_description?: string };
-  if (!res.ok || !json.id_token) throw new UserError(`Google でログインできませんでした（${json.error_description ?? json.error ?? res.status}）`);
+  if (!res.ok || !json.id_token) throw new UserError(`Google でログインできませんでした（${String(json.error ?? res.status).slice(0, 40)}）`);
   let claims: IdToken;
   try {
     claims = JSON.parse(Buffer.from(json.id_token.split(".")[1] ?? "", "base64url").toString("utf8")) as IdToken;
@@ -83,12 +85,17 @@ export async function finishLogin(code: string, origin: string, nonce: string): 
       [claims.sub, claims.email!.toLowerCase(), (claims.name ?? "").slice(0, 100)],
     );
     const user = r.rows[0];
-    // 利用者の分離を入れる前（1 人専用だったとき）のデータは、持ち主がない。最初の利用者が引き継ぐ。
-    // 利用者が 2 人以上いるときは何もしない（新しく作る行には必ず持ち主が付くので、持ち主なしの行は増えない）
-    const count = await c.query<{ n: string }>("select count(*) as n from migrate_users");
-    if (Number(count.rows[0].n) === 1) {
-      await c.query("update migrate_mailboxes set user_id = $1 where user_id is null", [user.id]);
-      await c.query("update migrate_services set user_id = $1 where user_id is null", [user.id]);
+    // 利用者の分離を入れる前（1 人専用だったとき）につないだメールボックスには、持ち主がない。
+    // 引き継げるのは、そのメールボックスのアドレス本人としてログインした人だけ
+    // （Google が「このアドレスの持ち主だ」と確かめた人。ほかの人が先にログインしても、渡らない）
+    const claimed = await c.query(
+      `update migrate_mailboxes m set user_id = $1
+       where m.user_id is null and m.email = $2
+         and not exists (select 1 from migrate_mailboxes x where x.user_id = $1 and x.email = m.email)`,
+      [user.id, user.email],
+    );
+    if (claimed.rowCount) {
+      await c.query("update migrate_services s set user_id = $1 from migrate_mailboxes m where s.mailbox_id = m.id and m.user_id = $1 and s.user_id is null", [user.id]);
     }
     return user;
   });
@@ -135,7 +142,7 @@ export async function destroySession(request: Request): Promise<void> {
  */
 export async function deleteAccount(userId: string): Promise<void> {
   const pool = await db();
-  const boxes = await pool.query<Pick<MailboxRow, "token_enc">>("select token_enc from migrate_mailboxes where user_id = $1", [userId]);
+  const boxes = await pool.query<Pick<MailboxRow, "token_enc" | "user_id" | "email">>("select token_enc, user_id, email from migrate_mailboxes where user_id = $1", [userId]);
   await Promise.all(boxes.rows.map((b) => revoke(b)));
   await pool.query("delete from migrate_users where id = $1", [userId]);
 }

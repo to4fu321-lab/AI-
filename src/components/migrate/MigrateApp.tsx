@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { SIGNAL_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Signal, type Status } from "@/lib/migrate/types";
+import { KINDS, type Kind } from "@/lib/migrate/classify";
+import { LEVEL_LABEL, type Level } from "@/lib/migrate/judge";
+import { KIND_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Status } from "@/lib/migrate/types";
 
 /** アカウント引っ越しの API を呼ぶ（失敗したら、画面に出せる日本語の理由つきで投げる） */
 async function api<T>(action: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -17,7 +19,28 @@ const card = "rounded-2xl border border-neutral-200 bg-white p-4 dark:border-neu
 const primary = "rounded-full bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-40";
 const ghost = "rounded-full bg-neutral-200/80 px-3 py-2 text-xs font-semibold text-neutral-700 disabled:opacity-40 dark:bg-neutral-800 dark:text-neutral-200";
 
-const ACCOUNT_SIGNALS: Signal[] = ["signup", "password", "security"];
+const LEVELS: Level[] = ["depends", "maybe", "ads"];
+const LEVEL_STYLE: Record<Level, string> = {
+  depends: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200",
+  maybe: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
+  ads: "bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300",
+};
+/** Google の手続きから戻ってきたときの結果（URL で受け取るのは記号だけ。文はここで決める） */
+const RESULT_NOTICE: Record<string, string> = {
+  login: "ログインしました。",
+  connected: "メールボックスをつなぎました。「調べる」を押すと、登録済みのサービスを洗い出します。",
+};
+const RESULT_ERROR: Record<string, string> = {
+  "not-configured": "Google Cloud の設定がまだです。",
+  "login-required": "先にログインしてください。",
+  "login-changed": "手続きの途中でログインが切れたか、別のアカウントに替わりました。ログインしてから、もう一度つないでください。",
+  "bad-state": "手続きの確認ができませんでした。もう一度やり直してください。",
+  denied: "Google で許可されませんでした。",
+  "too-many": "つなげるメールボックスの数の上限に達しています。",
+  scope: "メールを読む許可（読み取りのみ）を受け取れませんでした。もう一度つないで、チェックを入れて許可してください。",
+  unverified: "メールアドレスの確認が済んでいない Google アカウントでは、ログインできません。",
+  failed: "うまくいきませんでした。もう一度やり直してください。",
+};
 const STATUSES: Status[] = ["new", "move", "skip", "done"];
 const day = (iso: string | null) => (iso ? iso.slice(0, 10).replace(/-/g, "/") : "");
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -30,7 +53,7 @@ export function MigrateApp() {
   const [tab, setTab] = useState<Status>("new");
   const [query, setQuery] = useState("");
   const [box, setBox] = useState("");
-  const [likelyOnly, setLikelyOnly] = useState(true);
+  const [level, setLevel] = useState<Level | "">("");
   const [origin, setOrigin] = useState("");
 
   const reload = useCallback(async () => {
@@ -47,8 +70,8 @@ export function MigrateApp() {
       setOrigin(window.location.origin);
       const p = new URLSearchParams(window.location.search);
       const result = p.get("result");
-      if (result === "connected") setNotice(`${p.get("message") ?? "Gmail"} をつなぎました。「調べる」を押すと、登録済みのサービスを洗い出します。`);
-      if (result === "error") setError(p.get("message") ?? "うまくいきませんでした");
+      if (result && RESULT_NOTICE[result]) setNotice(RESULT_NOTICE[result]);
+      else if (result) setError(RESULT_ERROR[result] ?? RESULT_ERROR.failed);
       if (result) window.history.replaceState(null, "", window.location.pathname);
       await reload();
     };
@@ -62,6 +85,17 @@ export function MigrateApp() {
     const timer = setInterval(() => void reload(), 3000);
     return () => clearInterval(timer);
   }, [anyScanning, reload]);
+
+  /** つないである全部を、同時に調べ始める */
+  const startAll = async () => {
+    const idle = (state?.mailboxes ?? []).filter((m) => !m.scanning);
+    setError("");
+    const results = await Promise.allSettled(idle.map((m) => api("scan", { mailboxId: m.id })));
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed) setError(message(failed.reason));
+    else setNotice(`${idle.length} 件のメールボックスを、同時に調べ始めました。画面を閉じても、サーバーで最後まで進みます。`);
+    await reload();
+  };
 
   const startScan = async (m: Mailbox) => {
     await act("scan", { mailboxId: m.id });
@@ -101,12 +135,13 @@ export function MigrateApp() {
         (!box || s.mailbox_id === box) &&
         // 数え直した後に 1 通も見つからなかったものは、仕分け済みでなければ出さない
         (s.count > 0 || s.status !== "new") &&
-        (!likelyOnly || s.status !== "new" || ACCOUNT_SIGNALS.some((k) => s.signals[k])) &&
+        (!level || s.judgment.level === level) &&
         (!q || `${s.name} ${s.domain} ${s.note}`.toLowerCase().includes(q)),
     );
-  }, [state, query, box, likelyOnly]);
+  }, [state, query, box, level]);
   const counts = useMemo(() => Object.fromEntries(STATUSES.map((k) => [k, pool.filter((s) => s.status === k).length])) as Record<Status, number>, [pool]);
-  const visible = pool.filter((s) => s.status === tab);
+  // 頼っているものを先に、その中では通数の多い順に並べる
+  const visible = pool.filter((s) => s.status === tab).sort((a, b) => LEVELS.indexOf(a.judgment.level) - LEVELS.indexOf(b.judgment.level) || b.count - a.count);
   const emailOf = useMemo(() => new Map((state?.mailboxes ?? []).map((m) => [m.id, m.email])), [state]);
 
   if (fatal) return <main className="mx-auto max-w-2xl p-6 text-sm font-semibold text-red-600">{fatal}</main>;
@@ -154,7 +189,10 @@ export function MigrateApp() {
                 <h2 className="text-base font-black">メールボックス</h2>
                 {ready && <button type="button" className={primary} onClick={() => window.location.assign("/api/migrate/oauth/connect")}>＋ Gmail をつなぐ</button>}
               </div>
-              <p className="mt-1 text-xs text-neutral-500">読むだけの許可でつなぎます。読むのは差出人・件名・日付だけで、本文は読みません。</p>
+              <p className="mt-1 text-xs text-neutral-500">読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。件名の中の数字（認証コードや注文番号）は、伏せてから記録します。</p>
+              {state.mailboxes.filter((m) => !m.scanning).length > 1 && (
+                <button type="button" className={`${ghost} mt-2`} onClick={() => void startAll()}>すべて同時に調べる</button>
+              )}
               {state.mailboxes.length === 0 && <p className="mt-3 text-sm text-neutral-500">まだつないでいません。</p>}
               <ul className="mt-3 space-y-3">
                 {state.mailboxes.map((m) => {
@@ -171,6 +209,7 @@ export function MigrateApp() {
                               : "まだ調べていません"}
                       </p>
                       {m.error && <p className="mt-1 text-xs font-semibold text-red-600 dark:text-red-400">{m.error}</p>}
+                      <KindSummary kinds={m.kinds} />
                       <div className="mt-2 flex flex-wrap gap-2">
                         {m.scanning ? (
                           <button type="button" className={ghost} onClick={() => void act("stop", { mailboxId: m.id })}>止める</button>
@@ -213,10 +252,12 @@ export function MigrateApp() {
                 </nav>
                 <input className={input} placeholder="サービス名・ドメインで探す" value={query} onChange={(e) => setQuery(e.target.value)} />
                 <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-600 dark:text-neutral-300">
-                  <label className="flex items-center gap-1.5">
-                    <input type="checkbox" checked={likelyOnly} onChange={(e) => setLikelyOnly(e.target.checked)} />
-                    未仕分けは、アカウントがありそうなものだけ
-                  </label>
+                  <select className="rounded-lg border border-neutral-300 bg-white px-2 py-1 dark:border-neutral-700 dark:bg-neutral-900" value={level} onChange={(e) => setLevel(e.target.value as Level | "")}>
+                    <option value="">頼り具合：すべて</option>
+                    {LEVELS.map((l) => (
+                      <option key={l} value={l}>{LEVEL_LABEL[l]}</option>
+                    ))}
+                  </select>
                   {state.mailboxes.length > 1 && (
                     <select className="rounded-lg border border-neutral-300 bg-white px-2 py-1 dark:border-neutral-700 dark:bg-neutral-900" value={box} onChange={(e) => setBox(e.target.value)}>
                       <option value="">すべてのメールボックス</option>
@@ -264,8 +305,9 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
     <li className={card}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-black">{s.name || s.domain}</p>
-          <p className="truncate text-xs text-neutral-500">{s.domain}{email ? ` ・ ${email}` : ""}</p>
+          {/* 見出しはドメイン。差出人の表示名は送る側が自由に書けるので（なりすまし）、「名乗り」として小さく添える */}
+          <p className="truncate text-sm font-black">{s.domain}</p>
+          <p className="truncate text-xs text-neutral-500">{s.name ? `差出人の名乗り：${s.name}` : ""}{s.name && email ? " ・ " : ""}{email ?? ""}</p>
         </div>
         <p className="shrink-0 text-right text-xs text-neutral-500">
           {s.count.toLocaleString()} 通
@@ -273,10 +315,14 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
           {day(s.first_at)}{s.last_at && day(s.last_at) !== day(s.first_at) ? ` 〜 ${day(s.last_at)}` : ""}
         </p>
       </div>
+      <p className="mt-2 text-xs">
+        <span className={`mr-2 rounded-full px-2 py-0.5 text-[11px] font-bold ${LEVEL_STYLE[s.judgment.level]}`}>{LEVEL_LABEL[s.judgment.level]}</span>
+        <span className="text-neutral-600 dark:text-neutral-300">{s.judgment.reasons.join("／")}</span>
+      </p>
       <div className="mt-2 flex flex-wrap gap-1.5">
-        {(Object.keys(SIGNAL_LABEL) as Signal[]).filter((k) => s.signals[k]).map((k) => (
-          <span key={k} className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
-            {SIGNAL_LABEL[k]} {s.signals[k]}
+        {KINDS.filter((k) => s.signals[k]).map((k) => (
+          <span key={k} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${k === "promo" ? "bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300" : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"}`}>
+            {KIND_LABEL[k]} {s.signals[k]}
           </span>
         ))}
       </div>
@@ -300,6 +346,24 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <button type="button" className="text-xs font-semibold text-neutral-500 underline" onClick={onEditUrl}>開くページを直す</button>
       </div>
     </li>
+  );
+}
+
+/** メールボックスごとの内訳：必要なメール（ログイン・登録・支払いなど）と、広告 */
+function KindSummary({ kinds }: { kinds: Partial<Record<Kind, number>> }) {
+  const total = KINDS.reduce((a, k) => a + (kinds[k] ?? 0), 0);
+  if (!total) return null;
+  const promo = kinds.promo ?? 0;
+  const login = (kinds.auth ?? 0) + (kinds.security ?? 0) + (kinds.password ?? 0);
+  return (
+    <div className="mt-2 text-xs text-neutral-600 dark:text-neutral-300">
+      <p>
+        必要なメール <b>{(total - promo).toLocaleString()}</b> 通（うちログイン・本人確認 <b>{login.toLocaleString()}</b> 通）／ 広告 <b>{promo.toLocaleString()}</b> 通
+      </p>
+      <p className="mt-0.5 text-neutral-500">
+        {KINDS.filter((k) => k !== "promo" && kinds[k]).map((k) => `${KIND_LABEL[k]} ${kinds[k]!.toLocaleString()}`).join("・")}
+      </p>
+    </div>
   );
 }
 
