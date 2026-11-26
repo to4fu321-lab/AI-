@@ -62,6 +62,29 @@ export async function db(): Promise<Pool> {
       alter table migrate_mailboxes add column if not exists lock_until timestamptz;                    -- 今どこかが進めている（二重に動かさない）
       alter table migrate_mailboxes add column if not exists remaining integer not null default 0;     -- 今回の残り（分からない読み方では 0）
       alter table migrate_mailboxes add column if not exists error text not null default '';
+
+      -- 利用者ごとの分離。どの表にも持ち主（user_id）を持たせ、読み書きは必ず持ち主で絞る
+      create table if not exists migrate_users (
+        id uuid primary key default gen_random_uuid(),
+        google_sub text not null unique,        -- Google が利用者ごとに決める、変わらない番号
+        email text not null,
+        name text not null default '',
+        created_at timestamptz not null default now(),
+        last_login timestamptz
+      );
+      create table if not exists migrate_sessions (
+        token_hash text primary key,            -- ログインの印（Cookie の値）のハッシュ。値そのものは保存しない
+        user_id uuid not null references migrate_users(id) on delete cascade,
+        expires_at timestamptz not null,
+        created_at timestamptz not null default now()
+      );
+      alter table migrate_mailboxes add column if not exists user_id uuid references migrate_users(id) on delete cascade;
+      alter table migrate_services add column if not exists user_id uuid references migrate_users(id) on delete cascade;
+      -- 同じアドレスを、別の利用者がそれぞれつなぐことはあり得る。重なりを禁じるのは「同じ利用者の中」だけ
+      alter table migrate_mailboxes drop constraint if exists migrate_mailboxes_email_key;
+      create unique index if not exists migrate_mailboxes_user_email on migrate_mailboxes (user_id, email);
+      create index if not exists migrate_services_user on migrate_services (user_id);
+      create index if not exists migrate_sessions_user on migrate_sessions (user_id);
     `,
     )
     .then(() => undefined)
@@ -75,6 +98,8 @@ export async function db(): Promise<Pool> {
 
 export interface MailboxRow {
   id: string;
+  /** 持ち主。利用者の分離を入れる前に作られた行だけ null（最初の利用者が引き継ぐ） */
+  user_id: string | null;
   email: string;
   token_enc: string;
   source: string;
@@ -135,8 +160,9 @@ export function toService(row: ServiceRow): Service {
   };
 }
 
-export async function getMailbox(id: string): Promise<MailboxRow> {
-  const r = await (await db()).query<MailboxRow>("select * from migrate_mailboxes where id = $1", [uuid(id)]);
+/** 持ち主のメールボックスを 1 件読む。他人のものは「見つかりません」になる（あるかどうかも教えない） */
+export async function getMailbox(userId: string, id: string): Promise<MailboxRow> {
+  const r = await (await db()).query<MailboxRow>("select * from migrate_mailboxes where id = $1 and user_id = $2", [uuid(id), userId]);
   if (!r.rows[0]) throw new UserError("メールボックスが見つかりません");
   return r.rows[0];
 }

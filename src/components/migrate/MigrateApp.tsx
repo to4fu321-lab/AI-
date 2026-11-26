@@ -46,9 +46,9 @@ export function MigrateApp() {
     const start = async () => {
       setOrigin(window.location.origin);
       const p = new URLSearchParams(window.location.search);
-      const result = p.get("gmail");
+      const result = p.get("result");
       if (result === "connected") setNotice(`${p.get("message") ?? "Gmail"} をつなぎました。「調べる」を押すと、登録済みのサービスを洗い出します。`);
-      if (result === "error") setError(p.get("message") ?? "Gmail をつなげませんでした");
+      if (result === "error") setError(p.get("message") ?? "うまくいきませんでした");
       if (result) window.history.replaceState(null, "", window.location.pathname);
       await reload();
     };
@@ -129,6 +129,25 @@ export function MigrateApp() {
         ) : (
           <>
             {!ready && <Setup setup={state.setup} origin={origin} />}
+
+            {!state.user ? (
+              <section className={card}>
+                <h2 className="text-base font-black">ログイン</h2>
+                <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-300">
+                  Google アカウントでログインします。ここで受け取るのは、名前とメールアドレスだけです。メールを読む許可は、ログインのあとで、つなぎたいアドレスごとに別にお願いします。
+                </p>
+                {ready && (
+                  <button type="button" className={`${primary} mt-3`} onClick={() => window.location.assign("/api/migrate/oauth/login")}>
+                    Google でログイン
+                  </button>
+                )}
+              </section>
+            ) : (
+              <>
+            <p className="flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-500">
+              <span className="break-all">{state.user.email} でログイン中</span>
+              <button type="button" className="font-semibold underline" onClick={() => void act("logout", {})}>ログアウト</button>
+            </p>
 
             <section className={card}>
               <div className="flex items-center justify-between gap-3">
@@ -215,6 +234,20 @@ export function MigrateApp() {
                 </ul>
                 {visible.length > 300 && <p className="text-xs text-neutral-500">多いので先頭の 300 件だけ出しています。上の欄で絞りこんでください。</p>}
               </section>
+            )}
+
+            <p className="pt-4 text-center text-xs text-neutral-400">
+              <button
+                type="button"
+                className="underline"
+                onClick={() =>
+                  confirm("アカウントを削除します。つないだメールの許可を Google 側でも取り消し、一覧・仕分け・メモをすべて消します。元には戻せません。") && void act("deleteAccount", {})
+                }
+              >
+                アカウントを削除する
+              </button>
+            </p>
+              </>
             )}
           </>
         )}

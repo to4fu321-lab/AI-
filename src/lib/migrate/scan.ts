@@ -54,7 +54,8 @@ const SUBJECT_KEEP = 5;
 const NAME_KEEP = 8;
 
 /** まとめた分を、データベースの今の数に足しこむ（仕分けの状態やメモは変えない） */
-async function merge(pool: PoolClient, mailboxId: string, found: Map<string, Tally>): Promise<void> {
+async function merge(pool: PoolClient, box: Pick<MailboxRow, "id" | "user_id">, found: Map<string, Tally>): Promise<void> {
+  const mailboxId = box.id;
   if (!found.size) return;
   const existing = (await pool.query<ServiceRow>("select * from migrate_services where mailbox_id = $1 and domain = any($2)", [mailboxId, [...found.keys()]])).rows;
   const byDomain = new Map(existing.map((r) => [r.domain, r]));
@@ -84,13 +85,13 @@ async function merge(pool: PoolClient, mailboxId: string, found: Map<string, Tal
     };
   });
   await pool.query(
-    `insert into migrate_services (mailbox_id, domain, name, names, count, signals, subjects, first_at, last_at)
-     select $1, x.domain, x.name, x.names, x.count, x.signals, x.subjects, x.first_at, x.last_at
+    `insert into migrate_services (mailbox_id, user_id, domain, name, names, count, signals, subjects, first_at, last_at)
+     select $1, $3, x.domain, x.name, x.names, x.count, x.signals, x.subjects, x.first_at, x.last_at
      from jsonb_to_recordset($2::jsonb) as x(domain text, name text, names jsonb, count integer, signals jsonb, subjects jsonb, first_at timestamptz, last_at timestamptz)
      on conflict (mailbox_id, domain) do update set
        name = excluded.name, names = excluded.names, count = excluded.count, signals = excluded.signals,
        subjects = excluded.subjects, first_at = excluded.first_at, last_at = excluded.last_at, updated_at = now()`,
-    [mailboxId, JSON.stringify(rows)],
+    [mailboxId, JSON.stringify(rows), box.user_id],
   );
 }
 
@@ -101,20 +102,20 @@ async function clearCounts(client: PoolClient, mailboxId: string): Promise<void>
 }
 
 /** 調べ始める（印を付けるだけ。進めるのは runScan） */
-export async function requestScan(mailboxId: string): Promise<void> {
-  const box = await getMailbox(mailboxId);
+export async function requestScan(userId: string, mailboxId: string): Promise<void> {
+  const box = await getMailbox(userId, mailboxId);
   await (await db()).query("update migrate_mailboxes set requested = true, error = '' where id = $1", [box.id]);
 }
 
 /** 止める（進めている所は、読んでいるひとかたまりを終えたところで止まる） */
-export async function stopScan(mailboxId: string): Promise<void> {
-  const box = await getMailbox(mailboxId);
+export async function stopScan(userId: string, mailboxId: string): Promise<void> {
+  const box = await getMailbox(userId, mailboxId);
   await (await db()).query("update migrate_mailboxes set requested = false where id = $1", [box.id]);
 }
 
 /** 数え直すために空にする */
-export async function resetScan(mailboxId: string): Promise<void> {
-  const box = await getMailbox(mailboxId);
+export async function resetScan(userId: string, mailboxId: string): Promise<void> {
+  const box = await getMailbox(userId, mailboxId);
   if (box.requested || (box.lock_until && box.lock_until > new Date())) throw new UserError("調べている途中は数え直せません。「止める」を押して、少し待ってからにしてください");
   await transaction((client) => clearCounts(client, box.id));
 }
@@ -128,7 +129,8 @@ function reason(err: unknown): string {
 }
 
 /**
- * 調べを進める。deadline（ミリ秒の時刻）を過ぎたら、そこでやめる（続きの場所は、ひとかたまりごとに保存してある）。
+ * 調べを進める（サーバーの中だけから呼ぶ。持ち主の確かめは、調べる印を付ける requestScan で済んでいる）。
+ * deadline（ミリ秒の時刻）を過ぎたら、そこでやめる（続きの場所は、ひとかたまりごとに保存してある）。
  * 返す値：done＝終わった／止めた、more＝時間で区切れた（すぐ続きを進めてよい）、later＝相手が混み合っている（しばらく置く）、
  * busy＝ほかで進めている最中か、調べる印がない
  */
@@ -136,7 +138,7 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
   const pool = await db();
   const claimed = await pool.query<MailboxRow>(
     `update migrate_mailboxes set lock_until = now() + interval '${LOCK}'
-     where id = $1 and requested and (lock_until is null or lock_until < now()) returning *`,
+     where id = $1 and requested and user_id is not null and (lock_until is null or lock_until < now()) returning *`,
     [mailboxId],
   );
   const box = claimed.rows[0];
@@ -153,7 +155,7 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
       const batch = await session.next();
       await transaction(async (client) => {
         if (batch.reset) await clearCounts(client, box.id);
-        await merge(client, box.id, tally(batch.headers, box.email));
+        await merge(client, box, tally(batch.headers, box.email));
         await client.query(
           `update migrate_mailboxes set scan = $2::jsonb, scanned = scanned + $3, remaining = $4, error = '',
              requested = requested and not $5, last_scan = case when $5 then now() else last_scan end
@@ -181,7 +183,7 @@ export async function runScan(mailboxId: string, deadline: number): Promise<"don
 /** 定期実行から呼ぶ：途中のままのメールボックスを、時間のかぎり進める。時間で区切れたものがあれば true */
 export async function runPending(deadline: number): Promise<{ pending: number; more: boolean }> {
   const pool = await db();
-  const rows = (await pool.query<{ id: string }>("select id from migrate_mailboxes where requested and (lock_until is null or lock_until < now()) order by created_at")).rows;
+  const rows = (await pool.query<{ id: string }>("select id from migrate_mailboxes where requested and user_id is not null and (lock_until is null or lock_until < now()) order by created_at")).rows;
   let more = false;
   for (const r of rows) {
     if (Date.now() > deadline) {

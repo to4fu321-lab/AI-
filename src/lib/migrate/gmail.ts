@@ -25,6 +25,11 @@ export function redirectUri(origin: string): string {
   return `${origin}/api/migrate/oauth/callback`;
 }
 
+/** いま設定されている OAuth クライアント（ログインにも同じものを使う） */
+export function oauthClient(): { id: string; secret: string } {
+  return { id: clientId(), secret: clientSecret() };
+}
+
 export function authUrl(origin: string, state: string): string {
   const p = new URLSearchParams({
     client_id: clientId(),
@@ -80,7 +85,7 @@ export async function accessToken(box: MailboxRow): Promise<string> {
 }
 
 /** Google から戻ってきた code を合言葉に換え、どのアドレスかを確かめて保存する */
-export async function finishConnect(code: string, origin: string): Promise<{ email: string }> {
+export async function finishConnect(userId: string, code: string, origin: string): Promise<{ email: string }> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -97,16 +102,21 @@ export async function finishConnect(code: string, origin: string): Promise<{ ema
   if (!email) throw new Error("つないだアドレスを確かめられませんでした");
   // つなぎ直したときは、前の止まった理由を消す（数えた結果と続きの場所は残す）
   await (await db()).query(
-    "insert into migrate_mailboxes (email, token_enc) values ($1, $2) on conflict (email) do update set token_enc = excluded.token_enc, error = ''",
-    [email, seal(json.refresh_token)],
+    "insert into migrate_mailboxes (user_id, email, token_enc) values ($1, $2, $3) on conflict (user_id, email) do update set token_enc = excluded.token_enc, error = ''",
+    [userId, email, seal(json.refresh_token)],
   );
   return { email };
 }
 
 /** つながりを切る（Google 側の許可も取り消し、このメールボックスの調べた結果も消す） */
-export async function disconnect(id: string): Promise<void> {
-  const box = await getMailbox(id);
+export async function disconnect(userId: string, id: string): Promise<void> {
+  const box = await getMailbox(userId, id);
+  await revoke(box);
+  await (await db()).query("delete from migrate_mailboxes where id = $1 and user_id = $2", [box.id, userId]);
+}
+
+/** Google 側の許可を取り消す（失敗しても先へ進む。こちらの保存分は呼び出し側で消す） */
+export async function revoke(box: Pick<MailboxRow, "token_enc">): Promise<void> {
   const refresh = open(box.token_enc);
-  if (refresh) await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(refresh)}`, { method: "POST" }).catch(() => {});
-  await (await db()).query("delete from migrate_mailboxes where id = $1", [box.id]);
+  if (refresh) await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(refresh)}`, { method: "POST", signal: AbortSignal.timeout(10000) }).catch(() => {});
 }

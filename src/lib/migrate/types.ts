@@ -36,6 +36,8 @@ export interface Service {
 
 export interface AppState {
   setup: { db: boolean; google: boolean };
+  /** ログインしている利用者（していなければ null。そのときは一覧も空） */
+  user: { email: string; name: string } | null;
   mailboxes: Mailbox[];
   services: Service[];
 }
