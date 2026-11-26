@@ -751,6 +751,17 @@ export function ThumbsApp() {
   useEffect(() => {
     startJobRef.current = startJob;
   });
+  // --- Gofile のトークンを、ブックマークレットから受け取る（#gofile-token=…。「#」より後ろはサーバーに送られない） ---
+  const [tokenArrived, setTokenArrived] = useState<string | null>(null);
+  useEffect(() => {
+    const m = /^#gofile-token=([A-Za-z0-9]{10,128})$/.exec(location.hash);
+    if (!m) return;
+    // アドレスからはすぐ消す（履歴・共有にトークンを残さない）
+    window.history.replaceState(null, "", location.pathname + location.search);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 一度だけ、受け取ったトークンを入れる
+    setGofileToken(m[1]);
+    setTokenArrived(m[1]);
+  }, []);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 画面に出してから、このアプリのアドレスを入れる
     setAppOrigin(location.origin);
@@ -1615,6 +1626,7 @@ export function ThumbsApp() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4">
+        {tokenArrived && <TokenArrived token={tokenArrived} onClose={() => setTokenArrived(null)} />}
         {menuOpen && (
         <Library
           sites={sites}
@@ -1624,6 +1636,7 @@ export function ThumbsApp() {
           onRemoveExclude={removeExclude}
           gofileToken={gofileToken}
           onGofileToken={setGofileToken}
+          appOrigin={appOrigin}
           now={now}
           onRun={(url, settings) => void startJob(url, settings)}
           onSave={saveSite}
@@ -2435,6 +2448,54 @@ function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => 
 }
 
 /** 「復活したら保存」の保存先（Google ドライブ・Vercel Blob）の表示と、Google ドライブをつなぐ・切る */
+/** ブックマークレットから Gofile のトークンが届いたときのお知らせ（巡回にも使うかをその場で選べる） */
+function TokenArrived({ token, onClose }: { token: string; onClose: () => void }) {
+  const [label, setLabel] = useState("");
+  const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const add = async () => {
+    setState("busy");
+    const res = await fetch("/api/thumbs/gofile-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "add", label, token }) }).catch(() => null);
+    const d = (res ? await res.json().catch(() => null) : null) as { error?: string } | null;
+    if (res?.ok) setState("done");
+    else {
+      setState("error");
+      setMessage(d?.error ?? "巡回に足せませんでした");
+    }
+  };
+  return (
+    <div className="mt-3 space-y-2 rounded-xl border border-sky-300 bg-sky-50 px-3 py-2.5 text-xs text-sky-900 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-100">
+      <p className="font-bold">🔑 Gofile のトークンを受け取りました（…{token.slice(-4)}）。この端末の取得で使います</p>
+      {state === "done" ? (
+        <p className="font-semibold text-emerald-700 dark:text-emerald-300">✅ 自動巡回にも足しました</p>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void add();
+          }}
+          className="flex flex-wrap gap-2"
+        >
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="名前（例：自分・Aさん）"
+            maxLength={30}
+            className="min-w-0 flex-1 rounded-full border border-sky-200 bg-white px-3 py-1.5 text-[16px] text-neutral-900 outline-none dark:border-sky-800 dark:bg-neutral-950 dark:text-neutral-100"
+          />
+          <button type="submit" disabled={state === "busy"} className="rounded-full bg-sky-600 px-3 py-1.5 font-bold text-white disabled:opacity-60">
+            自動巡回にも使う
+          </button>
+        </form>
+      )}
+      {state === "error" && <p className="text-red-600">{message}</p>}
+      <button type="button" onClick={onClose} className="text-[11px] underline opacity-70">
+        閉じる
+      </button>
+    </div>
+  );
+}
+
 /** 公開鍵（base64url）を、ブラウザの購読に渡す形にする */
 function keyBytes(base64url: string): Uint8Array<ArrayBuffer> {
   const b64 = (base64url + "=".repeat((4 - (base64url.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
