@@ -68,7 +68,7 @@ export async function usableTokens(): Promise<string[]> {
   return list.filter((e) => !(bad[e.tag] && Date.now() - bad[e.tag] < BAD_TOKEN_MS)).map((e) => e.token);
 }
 
-/** 足す（同じトークンなら名前を変えるだけ。入れ直したトークンは「断られた」印を外す） */
+/** 足す（同じトークンはもう一度は足さない。入れ直したトークンは「断られた」印を外す） */
 export async function addToken(label: string, token: string): Promise<void> {
   const t = token.trim();
   if (!isGofileToken(t)) throw new Error("英数字だけのトークンを貼り付けてください");
@@ -76,8 +76,20 @@ export async function addToken(label: string, token: string): Promise<void> {
   const tag = tokenTag(t);
   const i = list.findIndex((e) => e.tag === tag);
   const name = label.trim().slice(0, 30) || "名前なし";
-  if (i >= 0) list[i] = { ...list[i], label: name };
-  else {
+  if (i >= 0) {
+    // 「⚠ 無効」の印が付いたトークンを入れ直したなら、印を外して試し直す（エラーにはしない）
+    const bad = await badTokens();
+    if (bad[tag]) {
+      delete bad[tag];
+      await write("gofileBadTokens", bad);
+      return;
+    }
+    // 同じトークン（＝同じ Gofile アカウント）。黙って名前を変えると「上書きされた」ように見えるので、はっきり知らせる
+    throw new Error(
+      `このトークンは、もう「${list[i].label}」として入っています（同じ Gofile アカウントのトークンです）。` +
+        "同じブラウザの gofile.io からは、いつも同じトークンになります。別のトークンは、ほかの人のスマホや、別の Gofile アカウントで取ってください",
+    );
+  } else {
     if (list.length >= MAX_TOKENS) throw new Error(`巡回用のトークンは ${MAX_TOKENS} つまでです。使わないものを消してから足してください`);
     list.push({ tag, label: name, token: t, addedAt: Date.now() });
   }

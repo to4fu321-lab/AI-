@@ -439,6 +439,9 @@ function PatrolTokens({ myToken, incomingToken }: { myToken: string; incomingTok
           className={`mt-2 space-y-1.5 rounded-lg p-2 ${newToken && newToken === incomingToken ? "bg-sky-50 ring-2 ring-sky-400 dark:bg-sky-950" : "bg-neutral-50 dark:bg-neutral-950"}`}
         >
           <p className="text-[11px] font-semibold text-neutral-500">＋ トークンを足す（ほかの人のぶんも、ここから続けて足せます）</p>
+          <p className="text-[10px] leading-relaxed text-neutral-400">
+            トークンは Gofile のアカウントごとに 1 つです。同じブラウザの gofile.io からは、いつも同じトークンになります（もう入っているものは足せません）
+          </p>
           <div className="flex gap-2">
             <input
               ref={nameRef}
