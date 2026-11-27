@@ -154,6 +154,8 @@ export interface QueueItem {
   feed?: boolean;
   /** 一覧の続きが断られて読めず、後でもう一度試すことにした回数 */
   retry?: number;
+  /** このページからは Gofile のリンクだけを拾う（ほかの動画・画像は出さない） */
+  gofileOnly?: boolean;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
   root?: boolean;
 }
