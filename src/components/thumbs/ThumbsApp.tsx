@@ -9,6 +9,7 @@ import { dedupeMedia, mediaKey, SeenMedia } from "@/lib/thumbs/dedupe";
 import { isItemExcluded, MAX_EXCLUDES, normalizeRule } from "@/lib/thumbs/exclude";
 import { videoApiUrls } from "@/lib/thumbs/videoApis";
 import { reviveKeyOf } from "@/lib/thumbs/reviveKey";
+import { xGofileBookmarklet, xGofileSearchUrl } from "./gofileBookmarklet";
 import { Library, MAX_HISTORY, MAX_SITES, type CrawlSettings, type HistoryEntry, type SavedSite } from "./Library";
 
 /** 一覧の 1 件。どの入力 URL（ジョブ）から見つかったかを覚えておく */
@@ -765,6 +766,33 @@ export function ThumbsApp() {
     // 「＋ トークンを足す」の欄に入れて見せる（メニューを開く）
     setMenuOpen(true);
   }, []);
+  // --- X の検索結果から集めた Gofile のフォルダを受け取る（#gofile-ids=番号,番号&from=…）。そのフォルダを読む ---
+  useEffect(() => {
+    const m = /^#gofile-ids=([\w,-]{4,9000})(?:&from=([^&]*))?$/.exec(location.hash);
+    if (!m) return;
+    window.history.replaceState(null, "", location.pathname + location.search);
+    const ids = m[1].split(",").filter((x) => /^[\w-]{4,40}$/.test(x)).slice(0, 200);
+    let from = "https://x.com/search";
+    try {
+      const f = decodeURIComponent(m[2] ?? "");
+      if (/^https:\/\/(?:x|twitter)\.com\//.test(f)) from = f;
+    } catch {
+      /* そのまま */
+    }
+    if (!ids.length) return;
+    // 集めたリンクを並べたページとして渡す（サーバーは X を読みに行かず、このページから Gofile のフォルダだけを読む）
+    const html = `<html><body>${ids.map((id) => `<a href="https://gofile.io/d/${id}">https://gofile.io/d/${id}</a>`).join("\n")}</body></html>`;
+    // 保存してあった一覧・設定を読み終えてから始める
+    const t = setTimeout(() => {
+      void startJobRef.current(
+        from,
+        { depth: 0, maxPages: 150, maxPagination: 0, crossSite: true, render: "auto", kinds: "video", robots: true, gofileOnly: true },
+        undefined,
+        html,
+      );
+    }, 1500);
+    return () => clearTimeout(t);
+  }, []);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 画面に出してから、このアプリのアドレスを入れる
     setAppOrigin(location.origin);
@@ -1443,6 +1471,7 @@ export function ThumbsApp() {
             >
               🔎 動画を探す
             </button>
+            <XHunt appOrigin={appOrigin} />
             <label className="flex items-center gap-1.5 text-xs text-neutral-500" title="ひととおり探し終わった後、さらに深く探すのを自動で何回続けるか（1 回ごとに、取っておいたリンクを 80 ページずつ読み進めます）">
               深く探す回数
               <select
@@ -2462,6 +2491,67 @@ function VideoPlayer({ item, onGiveUp, onStage }: { item: Item; onGiveUp: () => 
 }
 
 /** 「復活したら保存」の保存先（Google ドライブ・Vercel Blob）の表示と、Google ドライブをつなぐ・切る */
+/**
+ * 𝕏 で探す：ログインしている本人のブラウザで X の検索（Gofile のリンクを含む投稿・新しい順）を開き、
+ * 専用のブックマークレットで画面を動かしながらリンクを集めて、このアプリに渡す（X は、サーバーからは検索できない）
+ */
+function XHunt({ appOrigin }: { appOrigin: string }) {
+  const [hours, setHours] = useState(5);
+  const [copied, setCopied] = useState(false);
+  const code = appOrigin ? xGofileBookmarklet(appOrigin) : "";
+  return (
+    <div className="basis-full space-y-1.5 rounded-xl border border-neutral-200 px-3 py-2 text-xs dark:border-neutral-800">
+      <div className="flex flex-wrap items-center gap-2">
+        <a
+          href={xGofileSearchUrl(hours)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-full bg-black px-4 py-2 font-bold text-white shadow-sm active:scale-95 dark:bg-white dark:text-black"
+        >
+          𝕏 で最新の Gofile を探す
+        </a>
+        <select
+          value={hours}
+          onChange={(e) => setHours(Number(e.target.value))}
+          aria-label="何時間以内の投稿か"
+          className="rounded-md border border-neutral-200 bg-white px-1.5 py-1 text-neutral-900 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+        >
+          {[1, 3, 5, 12, 24, 72].map((h) => (
+            <option key={h} value={h}>
+              {h < 24 ? `${h}時間以内` : `${h / 24}日以内`}
+            </option>
+          ))}
+        </select>
+      </div>
+      <details>
+        <summary className="cursor-pointer text-[11px] text-neutral-500">使い方（X は、あなたのブラウザでログインして検索します）</summary>
+        <ol className="mt-1 list-decimal space-y-0.5 pl-5 text-[11px] leading-relaxed text-neutral-400">
+          <li>最初の 1 回だけ：下の「コードをコピー」→ ブックマークを作り、名前を「X から Gofile を集める」、URL をコピーしたコードにする</li>
+          <li>「𝕏 で最新の Gofile を探す」を押す → X の検索結果が開く（X にログインしておく）</li>
+          <li>結果が出たら、ブックマーク「X から Gofile を集める」を押す → 画面が自動で下へ動いて、Gofile のリンクを集める（30 秒ほど）</li>
+          <li>このアプリが開いて、集めたフォルダを読みます（前に読んだフォルダは読みません）</li>
+        </ol>
+        <div className="mt-1.5 flex gap-2">
+          <button
+            type="button"
+            disabled={!code}
+            onClick={() =>
+              void navigator.clipboard?.writeText(code).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2500);
+              })
+            }
+            className="rounded-full bg-neutral-900 px-3 py-1 font-bold text-white disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+          >
+            {copied ? "コピーしました ✓" : "コードをコピー"}
+          </button>
+        </div>
+        <textarea readOnly value={code} rows={2} aria-label="X 用のブックマークに入れるコード" className="mt-1.5 w-full rounded-md border border-neutral-200 bg-neutral-50 p-1.5 font-mono text-[10px] text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900" />
+      </details>
+    </div>
+  );
+}
+
 /** 公開鍵（base64url）を、ブラウザの購読に渡す形にする */
 function keyBytes(base64url: string): Uint8Array<ArrayBuffer> {
   const b64 = (base64url + "=".repeat((4 - (base64url.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
@@ -2937,6 +3027,22 @@ function Viewer({
             </a>
           )}
         </p>
+        {/* リンク切れの判定（慎重に何度か確かめる）を待たずに、開いたらすぐ 🔔 を付けられる。再生できている動画にも先に付けておける */}
+        {reviveOn && item.kind === "video" && !item.dead && !saved && key && (
+          <button
+            type="button"
+            onClick={() => onWatch(item, !row)}
+            className={`w-full rounded-full py-2 text-xs font-bold ${row ? "bg-amber-500 text-black" : playError ? "bg-amber-500/80 text-black" : "bg-white/10"}`}
+          >
+            {row?.status === "found" || row?.status === "saving"
+              ? "⏳ 同じ動画が見つかりました。保存しています…"
+              : row
+                ? "🔔 消えても復活したら保存：オン（タップで外す）"
+                : playError
+                  ? "🔔 見られないときは：復活したら保存する"
+                  : "🔔 消えても、復活したら保存する"}
+          </button>
+        )}
         {(saved || item.dead) && (
           <div className="flex gap-2">
             {saved && (

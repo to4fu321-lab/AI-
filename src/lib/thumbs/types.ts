@@ -118,6 +118,8 @@ export interface CrawlOptions {
   rootHtml?: string;
   /** Gofile のアカウントトークン（画面で設定したもの。なければゲスト登録する） */
   gofileToken?: string;
+  /** gofile-douga の新着を読むとき、X に投稿された Gofile のリンクも探すか（省略時は探す） */
+  alsoX?: boolean;
   /** 自動巡回用：使ってよいトークン（上から順に。断られたら次へ） */
   gofileTokens?: string[];
 }
@@ -152,6 +154,8 @@ export interface QueueItem {
   feed?: boolean;
   /** 一覧の続きが断られて読めず、後でもう一度試すことにした回数 */
   retry?: number;
+  /** このページからは Gofile のリンクだけを拾う（ほかの動画・画像は出さない） */
+  gofileOnly?: boolean;
   /** 入力したページ（とそこからの自動転送先）。ここを基準に「同じサイト・同じ階層」を決める */
   root?: boolean;
 }
