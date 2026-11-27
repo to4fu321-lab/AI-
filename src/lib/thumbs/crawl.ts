@@ -1653,6 +1653,13 @@ export async function* crawl(
         }
       }
 
+      // Gofile だけを拾うページ（gofile-douga と一緒に読む X の投稿の検索など）からは、ふつうのリンクは辿らない。
+      // 取っておく（範囲を広げるときに使う）こともしない。Gofile のリンクは上で読む列に入れてある
+      if (onlyGofile) {
+        links.length = 0;
+        pagination.clear();
+        extracted.redirect = undefined;
+      }
       // 自動で別のページへ飛ばすだけのページ（<meta refresh>・location.href = …）は、行き先を同じ階層として読む。
       // ブラウザで開いたときは、ブラウザがもう移動している
       if (extracted.redirect && !r && poor) {
