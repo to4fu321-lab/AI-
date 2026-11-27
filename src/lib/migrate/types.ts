@@ -12,6 +12,8 @@ export const KIND_LABEL: Record<Kind, string> = { auth: "認証コード", secur
 export interface Mailbox {
   id: string;
   email: string;
+  /** メール会社の見分け（gmail、または providers.ts の id） */
+  provider: string;
   scanned: number;
   /** 調べている途中（サーバーが進めている。画面を閉じても続く） */
   scanning: boolean;

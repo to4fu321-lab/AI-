@@ -5,6 +5,7 @@ import { currentUser, deleteAccount, destroySession, sessionCookie, type User } 
 import { UserError, uuid } from "@/lib/migrate/db";
 import { disconnect, googleConfigured, tokenKeyConfigured } from "@/lib/migrate/gmail";
 import { createGrant, listGrants, revokeGrant } from "@/lib/migrate/grants";
+import { connectImapAccount } from "@/lib/migrate/imapAccount";
 import { loadLedger, setRetiring, updateService } from "@/lib/migrate/ledger";
 import { authorizationInfo, decideAuthorization, resourceUrl } from "@/lib/migrate/oauth";
 import { hasLlm } from "@/lib/migrate/llm";
@@ -53,6 +54,11 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
   async disconnect(user, b) {
     await disconnect(user.id, uuid(b.mailboxId));
     return { ok: true };
+  },
+
+  /** Gmail 以外のメール（Yahoo!メール・OCN など）を、アドレスとパスワードでつなぐ */
+  async imapConnect(user, b) {
+    return connectImapAccount(user.id, { email: b.email, password: b.password, host: b.host, login: b.login });
   },
 
   /** 「このアドレスをやめたい」の印を付ける・外す */

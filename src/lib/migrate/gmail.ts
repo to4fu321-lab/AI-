@@ -69,7 +69,7 @@ const derive = (secret: string) => createHash("sha256").update(`migrate-token:v2
 const keyId = (secret: string) => createHash("sha256").update(`migrate-token:id:${secret}`).digest("base64url").slice(0, 8);
 const aadOf = (owner: { user_id: string | null; email: string }) => Buffer.from(`${owner.user_id ?? ""}|${owner.email}`, "utf8");
 
-function seal(owner: { user_id: string | null; email: string }, text: string): string {
+export function seal(owner: { user_id: string | null; email: string }, text: string): string {
   if (!tokenKeyConfigured()) throw new UserError("合言葉を守る鍵（MIGRATE_TOKEN_KEY）が設定されていません", "no-token-key");
   const iv = randomBytes(12);
   const c = createCipheriv("aes-256-gcm", derive(tokenKey()), iv);
@@ -79,7 +79,7 @@ function seal(owner: { user_id: string | null; email: string }, text: string): s
 }
 
 /** 復号する。stale は、古い鍵で包まれていた（新しい鍵で包み直すべき）という印 */
-function open(owner: { user_id: string | null; email: string }, sealed: string): { text: string; stale: boolean } | null {
+export function open(owner: { user_id: string | null; email: string }, sealed: string): { text: string; stale: boolean } | null {
   const [version, id, iv, tag, body] = sealed.split(".");
   if (version !== "v2" || !body) return null;
   for (const [secret, stale] of [[tokenKey(), false], [oldTokenKey(), true]] as const) {
@@ -180,7 +180,9 @@ export async function disconnect(userId: string, id: string): Promise<void> {
 }
 
 /** Google 側の許可を取り消す（失敗しても先へ進む。こちらの保存分は呼び出し側で消す） */
-export async function revoke(box: Pick<MailboxRow, "token_enc" | "user_id" | "email">): Promise<void> {
+export async function revoke(box: Pick<MailboxRow, "token_enc" | "user_id" | "email" | "source">): Promise<void> {
+  // Google に送ってよいのは、Google の合言葉だけ。ほかのメール会社のパスワード（IMAP）は、こちらの保存分を消すだけでよい
+  if (box.source !== "gmail-api") return;
   const opened = open(box, box.token_enc);
   if (opened) await revokeToken(opened.text);
   else if (box.token_enc) console.error("[migrate] revoke skipped: token could not be opened (the Google grant may still be active)");

@@ -6,6 +6,7 @@ import { KINDS, type Kind } from "@/lib/migrate/classify";
 import { QUIET_DAYS, type Graduation } from "@/lib/migrate/graduate";
 import { LEVEL_LABEL, type Level } from "@/lib/migrate/judge";
 import type { Grant } from "@/lib/migrate/grants";
+import { providerFor } from "@/lib/migrate/providers";
 import { KIND_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Status } from "@/lib/migrate/types";
 
 /** アカウント引っ越しの API を呼ぶ（失敗したら、画面に出せる日本語の理由つきで投げる） */
@@ -200,6 +201,15 @@ export function MigrateApp() {
               <p className="mt-1 text-xs text-neutral-500">
                 読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。認証コードやログイン通知のメールは、件名を保存しません。それ以外の件名も、番号や URL は伏せてから記録します。
               </p>
+              {ready && state.setup.tokenKey && (
+                <ImapConnect
+                  onDone={async (email) => {
+                    setError("");
+                    setNotice(`${email} をつなぎました。「調べる」を押すと、登録済みのサービスを洗い出します。`);
+                    await reload();
+                  }}
+                />
+              )}
               {!state.setup.llm && (
                 <p className="mt-2 text-xs text-neutral-500">
                   AI による仕上げの分類は、まだ使えません（Vercel の環境変数 <code>ANTHROPIC_API_KEY</code> が未設定）。決まりで分類できなかったメールは「そのほかのお知らせ」のままになります。
@@ -380,6 +390,107 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <button type="button" className="text-xs font-semibold text-neutral-500 underline" onClick={onEditUrl}>開くページを直す</button>
       </div>
     </li>
+  );
+}
+
+/**
+ * Gmail 以外のメール（Yahoo!メール・OCN など）を、アドレスとパスワードでつなぐ入力欄。
+ * パスワードは、つなぐときにサーバーへ 1 回送るだけ（画面には残さない。サーバーでは暗号化して置く）
+ */
+function ImapConnect({ onDone }: { onDone: (email: string) => Promise<void> }) {
+  const [shown, setShown] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [host, setHost] = useState("");
+  const [login, setLogin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const provider = useMemo(() => providerFor(email), [email]);
+  const hasDomain = /@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const isGmail = /@(gmail|googlemail)\.com$/i.test(email.trim());
+
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await api<{ email: string }>("imapConnect", { email, password, host, login });
+      setPassword("");
+      setEmail("");
+      setHost("");
+      setLogin("");
+      setShown(false);
+      await onDone(r.email);
+    } catch (e) {
+      setPassword("");
+      setError(message(e));
+    }
+    setBusy(false);
+  };
+
+  if (!shown) {
+    return (
+      <button type="button" className={`${ghost} mt-3`} onClick={() => setShown(true)}>
+        ＋ ほかのメールをつなぐ（Yahoo!メール・プロバイダのメールなど）
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 space-y-2 rounded-xl bg-neutral-100 p-3 text-xs dark:bg-neutral-800/60">
+      <p className="font-black">ほかのメールをつなぐ</p>
+      <p className="text-neutral-500">
+        メールソフトと同じ方法（IMAP）で、読むだけの開き方でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。パスワードは暗号化して預かり、「つながりを切る」で消えます。
+      </p>
+      <label className="block font-semibold">
+        メールアドレス
+        <input className={`${input} mt-1`} type="email" autoComplete="off" value={email} maxLength={200} onChange={(e) => setEmail(e.target.value)} />
+      </label>
+      {isGmail && <p className="font-semibold text-amber-700 dark:text-amber-300">Gmail は、上の「＋ Gmail をつなぐ」からつないでください（パスワードを預からずに済みます）。</p>}
+      {provider?.blocked && <p className="font-semibold text-amber-700 dark:text-amber-300">{provider.blocked}</p>}
+      {provider && !provider.blocked && (
+        <div className="rounded-lg bg-white/70 p-2 dark:bg-black/30">
+          <p className="font-semibold">{provider.name} をつなぐ前に</p>
+          {provider.steps && (
+            <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+              {provider.steps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+          )}
+          {provider.helpUrl && (
+            <a className="mt-1 inline-block underline" href={provider.helpUrl} target="_blank" rel="noreferrer noopener">
+              {provider.name} の公式の案内
+            </a>
+          )}
+          {provider.caution && <p className="mt-2 rounded-lg bg-amber-100 p-2 text-amber-900 dark:bg-amber-950 dark:text-amber-100">{provider.caution}</p>}
+        </div>
+      )}
+      {hasDomain && !isGmail && !provider?.blocked && !provider?.host && (
+        <label className="block font-semibold">
+          IMAP サーバー（受信メールサーバー）の名前
+          <input className={`${input} mt-1`} autoComplete="off" placeholder="例：imap.example.jp" value={host} maxLength={253} onChange={(e) => setHost(e.target.value)} />
+          <span className="mt-1 block font-normal text-neutral-500">メール会社の「メールソフトの設定」の案内に書いてあります。暗号化された接続（ポート 993）だけに対応しています。</span>
+        </label>
+      )}
+      {provider?.user === "ask" && (
+        <label className="block font-semibold">
+          {provider.userLabel ?? "ログインに使う ID"}
+          <input className={`${input} mt-1`} autoComplete="off" value={login} maxLength={200} onChange={(e) => setLogin(e.target.value)} />
+        </label>
+      )}
+      <label className="block font-semibold">
+        {provider?.passwordLabel ?? "パスワード（メール用のパスワードがある会社では、そちら）"}
+        <input className={`${input} mt-1`} type="password" autoComplete="off" value={password} maxLength={256} onChange={(e) => setPassword(e.target.value)} />
+      </label>
+      {error && <p className="font-semibold text-rose-700 dark:text-rose-300">{error}</p>}
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={primary} disabled={busy || !hasDomain || !password || isGmail || !!provider?.blocked} onClick={() => void submit()}>
+          {busy ? "確かめています…" : "つなぐ"}
+        </button>
+        <button type="button" className={ghost} disabled={busy} onClick={() => setShown(false)}>
+          やめる
+        </button>
+      </div>
+    </div>
   );
 }
 

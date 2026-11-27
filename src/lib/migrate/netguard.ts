@@ -57,6 +57,24 @@ export function isFetchableUrl(value: string): boolean {
   return true;
 }
 
+/** つなぎに行ってよいホスト名か（名前の形・内側向けの名前でない・IP アドレスの直書きでない） */
+export function isPublicHostname(host: string): boolean {
+  if (host.length > 253 || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host) || !host.includes(".") || host.includes("..")) return false;
+  if (net.isIP(host) || /^[0-9.]+$/.test(host)) return false;
+  return !/(?:^|\.)(?:localhost|local|internal|test|invalid|example|lan|home|corp)$/.test(host);
+}
+
+/**
+ * 名前を引いて、外の住所を 1 つ返す（1 つでも内側の住所が混じっていたら null）。
+ * 返した住所にそのままつなげば、確かめたあとで行き先をすり替えられない
+ */
+export async function resolvePublic(host: string): Promise<string | null> {
+  if (!isPublicHostname(host)) return null;
+  const list = await dns.promises.lookup(host, { all: true }).catch(() => []);
+  if (!list.length || !list.every((a) => isPublicAddress(a.address))) return null;
+  return (list.find((a) => a.family === 4) ?? list[0]).address;
+}
+
 type LookupAll = (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void;
 type LookupOne = (err: NodeJS.ErrnoException | null, address: string, family: number) => void;
 

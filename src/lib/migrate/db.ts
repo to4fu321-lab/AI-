@@ -218,6 +218,12 @@ const MIGRATIONS: string[] = [
       );
       create index if not exists migrate_rate_bucket_at on migrate_rate (bucket, at desc);
   `,
+  // 7：Gmail 以外のメール（Yahoo!メール・OCN など）を IMAP でつなぐ。パスワードは token_enc に、Gmail の合言葉と同じ方式で暗号化して置く
+  `
+      alter table migrate_mailboxes add column if not exists imap_host text;                      -- つなぐ先のサーバー名
+      alter table migrate_mailboxes add column if not exists imap_user text;                      -- ログインに使う名前（アドレスそのもの、または @ より前）
+      alter table migrate_mailboxes add column if not exists provider text not null default '';   -- メール会社の見分け（providers.ts の id。Gmail は空）
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {
@@ -268,6 +274,11 @@ export interface MailboxRow {
   email: string;
   token_enc: string;
   source: string;
+  /** IMAP でつなぐ先と、ログインに使う名前（Gmail では null） */
+  imap_host: string | null;
+  imap_user: string | null;
+  /** メール会社の見分け（providers.ts の id。Gmail は空） */
+  provider: string;
   /** 続きの場所（中身は読み方ごとに違う） */
   scan: Record<string, unknown>;
   scanned: number;
@@ -310,7 +321,7 @@ export function uuid(value: unknown): string {
 
 /** ブラウザに返す形（合言葉は入れない） */
 export function toMailbox(row: MailboxRow, kinds: Partial<Record<Kind, number>> = {}): Mailbox {
-  return { id: row.id, email: row.email, scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds, retiring: row.retiring, graduation: null };
+  return { id: row.id, email: row.email, provider: row.source === "gmail-api" ? "gmail" : row.provider || "other", scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds, retiring: row.retiring, graduation: null };
 }
 
 export function toService(row: ServiceRow, stillArriving: Service["stillArriving"] = null): Service {
