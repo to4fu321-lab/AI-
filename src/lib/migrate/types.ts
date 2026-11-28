@@ -1,6 +1,7 @@
 /** アカウント引っ越し：画面とサーバーの両方で使う型 */
 import type { Kind } from "./classify";
 import type { Graduation } from "./graduate";
+import type { Lane } from "./lane";
 import type { Grant } from "./grants";
 import type { Judgment } from "./judge";
 
@@ -41,6 +42,10 @@ export interface Service {
   signal_last: Partial<Record<Kind, string>>;
   /** このアドレスにどれくらい頼っているかの判定 */
   judgment: Judgment;
+  /** おすすめの扱い（移す・配信を止める・使っていない・そのままでよい） */
+  lane: Lane;
+  /** 配信停止を試した結果（まだなら null）。done＝こちらで止めた／manual＝自分で止める（url があれば、そのページを開く） */
+  unsub: { at: string; state: "done" | "manual"; url: string } | null;
   subjects: string[];
   first_at: string | null;
   last_at: string | null;

@@ -11,6 +11,7 @@ import { authorizationInfo, decideAuthorization, resourceUrl } from "@/lib/migra
 import { hasLlm } from "@/lib/migrate/llm";
 import { kick, requestScan, resetScan, runScan, selfOrigin, stopScan } from "@/lib/migrate/scan";
 import type { AppState } from "@/lib/migrate/types";
+import { skipUnused, stopAds } from "@/lib/migrate/unsubscribe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -88,6 +89,16 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
     const origin = selfOrigin(request);
     if (!origin) throw new UserError("サーバーの設定が済んでいません");
     return { redirect: await decideAuthorization(user.id, b.req, b.approve, b.mailboxIds, origin) };
+  },
+
+  /** 広告だけのサービスの配信を、まとめて止める */
+  async stopAds(user, b) {
+    return stopAds(user.id, b.except);
+  },
+
+  /** 使っていないサービスを、まとめて「移さない」にする */
+  async skipUnused(user, b) {
+    return skipUnused(user.id, b.except);
   },
 
   /** 仕分け・開くページ・メモを変える */

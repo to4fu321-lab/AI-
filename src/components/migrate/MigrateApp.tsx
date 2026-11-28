@@ -60,6 +60,8 @@ export function MigrateApp() {
   const [box, setBox] = useState("");
   const [level, setLevel] = useState<Level | "">("");
   const [origin, setOrigin] = useState("");
+  // 細かい一覧は、最初はしまっておく（見たい人だけ開く）
+  const [showList, setShowList] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -277,7 +279,30 @@ export function MigrateApp() {
             </section>
 
             {state.services.length > 0 && (
-              <section className="space-y-3">
+              <TodoPanel
+                services={state.services}
+                reload={reload}
+                setError={setError}
+                setNotice={setNotice}
+                onShowMove={() => {
+                  setTab("new");
+                  setLevel("depends");
+                  setShowList(true);
+                  // 一覧が出てから、そこまで動かす
+                  setTimeout(() => document.getElementById("mg-list")?.scrollIntoView({ behavior: "smooth" }), 50);
+                }}
+              />
+            )}
+
+            {state.services.length > 0 && !showList && (
+              <button type="button" className={`${ghost} w-full`} onClick={() => setShowList(true)}>
+                すべてのサービスを 1 件ずつ見る（{state.services.filter((s) => s.count > 0 || s.status !== "new").length} 件）
+              </button>
+            )}
+
+            {state.services.length > 0 && showList && (
+              <section id="mg-list" className="space-y-3">
+                <h2 className="pt-2 text-base font-black">1 件ずつ見る</h2>
                 <nav className="flex gap-1 rounded-full bg-neutral-200/70 p-1 text-xs font-bold dark:bg-neutral-800">
                   {STATUSES.map((k) => (
                     <button key={k} type="button" onClick={() => setTab(k)} className={`flex-1 rounded-full px-2 py-2 ${tab === k ? "bg-white shadow dark:bg-neutral-950" : "text-neutral-500"}`}>
@@ -390,6 +415,133 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
         <button type="button" className="text-xs font-semibold text-neutral-500 underline" onClick={onEditUrl}>開くページを直す</button>
       </div>
     </li>
+  );
+}
+
+/**
+ * 「やること」。サービスを先に 4 つに仕分けておき、利用者は大きなボタンを 1 つずつ押すだけで進められるようにする。
+ * 細かく見たい人だけ、「中身を見る」や、下の「1 件ずつ見る」を使う
+ */
+function TodoPanel({ services, reload, setError, setNotice, onShowMove }: { services: Service[]; reload: () => Promise<void>; setError: (m: string) => void; setNotice: (m: string) => void; onShowMove: () => void }) {
+  const [busy, setBusy] = useState("");
+  const [except, setExcept] = useState<Set<string>>(new Set());
+  const live = services.filter((s) => s.count > 0);
+  const fresh = live.filter((s) => s.status === "new");
+  const ads = fresh.filter((s) => s.lane === "stop" && !s.unsub);
+  const manual = live.filter((s) => s.unsub?.state === "manual" && s.status === "new");
+  const stopped = live.filter((s) => s.unsub?.state === "done").length;
+  const unused = fresh.filter((s) => s.lane === "quit");
+  const move = live.filter((s) => s.lane === "move" && (s.status === "new" || s.status === "move"));
+  const picked = (list: Service[]) => list.filter((s) => !except.has(s.id)).length;
+  const toggle = (id: string) =>
+    setExcept((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  const run = async (action: "stopAds" | "skipUnused", list: Service[]) => {
+    setBusy(action);
+    setError("");
+    try {
+      const r = await api<{ stopped?: number; manual?: number; remaining?: number; skipped?: number }>(action, { except: list.filter((s) => except.has(s.id)).map((s) => s.id) });
+      if (action === "stopAds") {
+        setNotice(
+          `${r.stopped ?? 0} 件の配信を止めました。` +
+            (r.manual ? `${r.manual} 件は、こちらからは止められませんでした（下の「自分で止める」に出ています）。` : "") +
+            (r.remaining ? `あと ${r.remaining} 件あります。もう一度押してください。` : "") +
+            "止まるまで、数日かかることがあります。",
+        );
+      } else setNotice(`${r.skipped ?? 0} 件を「移さない」にしました。`);
+    } catch (e) {
+      setError(message(e));
+    }
+    setBusy("");
+    await reload();
+  };
+
+  const rows = (list: Service[]) => (
+    <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto text-xs">
+      {list.map((s) => (
+        <li key={s.id}>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={!except.has(s.id)} onChange={() => toggle(s.id)} />
+            <span className="min-w-0 break-all">
+              <b>{s.domain}</b>
+              <span className="ml-1 text-neutral-500">{s.count} 通 ／ {s.judgment.reasons[0]}</span>
+            </span>
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
+
+  if (!ads.length && !manual.length && !unused.length && !move.length && !stopped) return null;
+  return (
+    <section className="space-y-3">
+      <h2 className="text-base font-black">やること</h2>
+
+      {ads.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">① 広告メールを止める（{ads.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">広告だけを送ってくる差出人です。ボタンを押すと、こちらから配信停止を申し込みます。必要なメール（ログインや請求）が届いている所は、ここには入っていません。</p>
+          <button type="button" className={`${primary} mt-3`} disabled={!!busy || picked(ads) === 0} onClick={() => void run("stopAds", ads)}>
+            {busy === "stopAds" ? "止めています…" : `まとめて止める（${picked(ads)} 件）`}
+          </button>
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer font-semibold text-neutral-600 dark:text-neutral-300">中身を見る（残したいものは、チェックを外す）</summary>
+            {rows(ads)}
+          </details>
+        </div>
+      )}
+
+      {manual.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">自分で止める（{manual.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">こちらからは止められなかった差出人です。ページを開いて止めるか、届いたメールのいちばん下にある「配信停止」から止めてください。</p>
+          <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto text-xs">
+            {manual.map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center justify-between gap-2">
+                <b className="break-all">{s.domain}</b>
+                {s.unsub?.url ? (
+                  <a className="underline" href={s.unsub.url} target="_blank" rel="noreferrer noopener">
+                    配信停止のページを開く
+                  </a>
+                ) : (
+                  <span className="text-neutral-500">メールの下の「配信停止」から</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {unused.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">② 使っていないサービスを外す（{unused.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">登録した跡はありますが、最近は使った様子がありません。「移さない」にすると、新しいアドレスへ移す対象から外れます（退会はしません。あとで戻せます）。</p>
+          <button type="button" className={`${primary} mt-3`} disabled={!!busy || picked(unused) === 0} onClick={() => void run("skipUnused", unused)}>
+            {busy === "skipUnused" ? "外しています…" : `まとめて「移さない」にする（${picked(unused)} 件）`}
+          </button>
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer font-semibold text-neutral-600 dark:text-neutral-300">中身を見る（まだ使っているものは、チェックを外す）</summary>
+            {rows(unused)}
+          </details>
+        </div>
+      )}
+
+      {move.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">③ 新しいアドレスに移す（{move.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">今も使っていて、このアドレスに頼っているサービスです。1 件ずつ、登録のメールアドレスを新しいものに変えていきます。</p>
+          <button type="button" className={`${primary} mt-3`} onClick={onShowMove}>
+            1 件ずつ進める
+          </button>
+        </div>
+      )}
+
+      {stopped > 0 && <p className="text-xs text-neutral-500">これまでに {stopped} 件の配信を止めました。</p>}
+    </section>
   );
 }
 

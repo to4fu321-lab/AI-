@@ -2,6 +2,7 @@ import "server-only";
 import { Pool, type PoolClient } from "pg";
 import type { Kind } from "./classify";
 import { judge } from "./judge";
+import { laneOf } from "./lane";
 import type { Mailbox, Service, Status } from "./types";
 
 /**
@@ -224,6 +225,12 @@ const MIGRATIONS: string[] = [
       alter table migrate_mailboxes add column if not exists imap_user text;                      -- ログインに使う名前（アドレスそのもの、または @ より前）
       alter table migrate_mailboxes add column if not exists provider text not null default '';   -- メール会社の見分け（providers.ts の id。Gmail は空）
   `,
+  // 8：広告の配信停止の記録
+  `
+      alter table migrate_services add column if not exists unsub_at timestamptz;                 -- 配信停止を試した時刻
+      alter table migrate_services add column if not exists unsub_state text not null default ''; -- done＝こちらで止めた／manual＝利用者が自分で止める
+      alter table migrate_services add column if not exists unsub_url text not null default '';   -- 自分で止めるときに開くページ（メールに書かれていたもの）
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {
@@ -308,6 +315,9 @@ export interface ServiceRow {
   login_url: string;
   note: string;
   status_at: Date | null;
+  unsub_at: Date | null;
+  unsub_state: string;
+  unsub_url: string;
 }
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
@@ -325,7 +335,10 @@ export function toMailbox(row: MailboxRow, kinds: Partial<Record<Kind, number>> 
 }
 
 export function toService(row: ServiceRow, stillArriving: Service["stillArriving"] = null): Service {
+  const judgment = judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {}, count: row.count, firstAt: iso(row.first_at), lastAt: iso(row.last_at) });
   return {
+    lane: laneOf(judgment, row.signals ?? {}),
+    unsub: row.unsub_at ? { at: row.unsub_at.toISOString(), state: row.unsub_state === "done" ? "done" : "manual", url: row.unsub_url } : null,
     status_at: iso(row.status_at),
     stillArriving,
     id: row.id,
@@ -336,7 +349,7 @@ export function toService(row: ServiceRow, stillArriving: Service["stillArriving
     signals: row.signals ?? {},
     signal_last: row.signal_last ?? {},
     subjects: (row.subjects ?? []).map((x) => (typeof x === "string" ? x : x.s)),
-    judgment: judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {}, count: row.count, firstAt: iso(row.first_at), lastAt: iso(row.last_at) }),
+    judgment,
     first_at: iso(row.first_at),
     last_at: iso(row.last_at),
     status: row.status,

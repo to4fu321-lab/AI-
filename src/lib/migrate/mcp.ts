@@ -137,6 +137,7 @@ export function buildServer(principal: Principal, origin: string | null): McpSer
           sender_name: s.name || undefined,
           account: emailOf.get(s.mailbox_id),
           level: s.judgment.level,
+          suggestion: s.lane,
           reasons: s.judgment.reasons,
           last_login_mail_at: s.judgment.lastLoginAt,
           counts: s.signals,

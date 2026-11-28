@@ -91,6 +91,45 @@ export function guardedLookup(resolve: typeof dns.lookup = dns.lookup) {
   };
 }
 
+/**
+ * 外の https の URL へ、フォームの形の本文を 1 回だけ送る（配信停止のワンクリックの決まり：RFC 8058 用）。
+ * 送り先はメールに書かれていた URL なので、内側の住所へは送らない。転送は追わない。返事の中身は読まない。
+ * 返すのは、相手が受け付けたか（2xx）だけ
+ */
+export function postPublicForm(url: string, body: string): Promise<boolean> {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return Promise.resolve(false);
+  }
+  if (url.length > 2000 || u.protocol !== "https:" || u.port || u.username || u.password || !isPublicHostname(u.hostname)) return Promise.resolve(false);
+  return new Promise((done) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(ok);
+    };
+    const req = https.request(
+      u,
+      { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": Buffer.byteLength(body), "user-agent": "account-migrate" }, lookup: guardedLookup() as never, agent: false },
+      (res) => {
+        const ok = (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300;
+        res.destroy();
+        finish(ok);
+      },
+    );
+    const timer = setTimeout(() => {
+      req.destroy();
+      finish(false);
+    }, 8000);
+    req.on("error", () => finish(false));
+    req.end(body);
+  });
+}
+
 const MAX_BYTES = 32 * 1024;
 const TIMEOUT_MS = 5000;
 
