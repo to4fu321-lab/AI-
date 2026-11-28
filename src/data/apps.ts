@@ -51,7 +51,8 @@ export const APPS: AppEntry[] = [
     color: "from-emerald-500 to-teal-400",
     access: "private",
     // AI 秘書から呼ぶ MCP の入口（/api/mcp/migrate）は、わざとこの鍵の外に置く（AI 秘書は画面のパスワードを入れられない）。
-    // そのかわり、利用者が画面で作った鍵（Authorization: Bearer mgk_...）を入口で必ず確かめる
+    // そのかわり、利用者が画面で作った鍵（Authorization: Bearer mgk_...）か、OAuth の合言葉を入口で必ず確かめる。
+    // OAuth の入口（/api/mcp/migrate/oauth/...）と案内（/.well-known/oauth-...）も鍵の外。利用者が許可する画面（/migrate/authorize）は鍵の内側
     paths: ["/migrate", "/api/migrate"],
     status: "beta",
   },

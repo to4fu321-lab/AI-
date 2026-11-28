@@ -1,6 +1,7 @@
 /** アカウント引っ越し：画面とサーバーの両方で使う型 */
 import type { Kind } from "./classify";
 import type { Graduation } from "./graduate";
+import type { Lane } from "./lane";
 import type { Grant } from "./grants";
 import type { Judgment } from "./judge";
 
@@ -12,6 +13,8 @@ export const KIND_LABEL: Record<Kind, string> = { auth: "認証コード", secur
 export interface Mailbox {
   id: string;
   email: string;
+  /** メール会社の見分け（gmail、または providers.ts の id） */
+  provider: string;
   scanned: number;
   /** 調べている途中（サーバーが進めている。画面を閉じても続く） */
   scanning: boolean;
@@ -39,6 +42,10 @@ export interface Service {
   signal_last: Partial<Record<Kind, string>>;
   /** このアドレスにどれくらい頼っているかの判定 */
   judgment: Judgment;
+  /** おすすめの扱い（移す・配信を止める・使っていない・そのままでよい） */
+  lane: Lane;
+  /** 配信停止を試した結果（まだなら null）。done＝こちらで止めた／manual＝自分で止める（url があれば、そのページを開く） */
+  unsub: { at: string; state: "done" | "manual"; url: string } | null;
   subjects: string[];
   first_at: string | null;
   last_at: string | null;
@@ -60,4 +67,6 @@ export interface AppState {
   services: Service[];
   /** AI 秘書（MCP）とつなぐ鍵（鍵そのものは入らない） */
   grants: Grant[];
+  /** AI 秘書に教える MCP サーバーの URL（決まった住所。分からなければ null） */
+  mcpUrl: string | null;
 }

@@ -5,10 +5,13 @@ import { currentUser, deleteAccount, destroySession, sessionCookie, type User } 
 import { UserError, uuid } from "@/lib/migrate/db";
 import { disconnect, googleConfigured, tokenKeyConfigured } from "@/lib/migrate/gmail";
 import { createGrant, listGrants, revokeGrant } from "@/lib/migrate/grants";
+import { connectImapAccount } from "@/lib/migrate/imapAccount";
 import { loadLedger, setRetiring, updateService } from "@/lib/migrate/ledger";
+import { authorizationInfo, decideAuthorization, resourceUrl } from "@/lib/migrate/oauth";
 import { hasLlm } from "@/lib/migrate/llm";
 import { kick, requestScan, resetScan, runScan, selfOrigin, stopScan } from "@/lib/migrate/scan";
 import type { AppState } from "@/lib/migrate/types";
+import { skipUnused, stopAds } from "@/lib/migrate/unsubscribe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,6 +57,11 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
     return { ok: true };
   },
 
+  /** Gmail 以外のメール（Yahoo!メール・OCN など）を、アドレスとパスワードでつなぐ */
+  async imapConnect(user, b) {
+    return connectImapAccount(user.id, { email: b.email, password: b.password, host: b.host, login: b.login });
+  },
+
   /** 「このアドレスをやめたい」の印を付ける・外す */
   async retire(user, b) {
     await setRetiring(user.id, b.mailboxId, b.retiring);
@@ -69,6 +77,28 @@ const ACTIONS: Record<string, (user: User, b: Body, request: Request) => Promise
   async grantRevoke(user, b) {
     await revokeGrant(user.id, b.id);
     return { ok: true };
+  },
+
+  /** AI 秘書をつなぐ許可の画面に出す、申し込みの中身 */
+  async authorizeInfo(_user, b) {
+    return authorizationInfo(b.req);
+  },
+
+  /** AI 秘書をつなぐ許可の答え（許可する・しない）。返すのは、AI 秘書の戻り先の URL */
+  async authorizeDecide(user, b, request) {
+    const origin = selfOrigin(request);
+    if (!origin) throw new UserError("サーバーの設定が済んでいません");
+    return { redirect: await decideAuthorization(user.id, b.req, b.approve, b.mailboxIds, origin) };
+  },
+
+  /** 広告だけのサービスの配信を、まとめて止める */
+  async stopAds(user, b) {
+    return stopAds(user.id, b.except);
+  },
+
+  /** 使っていないサービスを、まとめて「移さない」にする */
+  async skipUnused(user, b) {
+    return skipUnused(user.id, b.except);
   },
 
   /** 仕分け・開くページ・メモを変える */
@@ -116,14 +146,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ act
       user = await currentUser(request);
     } catch (e) {
       // データベースの設定がまだのときも画面は開けるようにして、何が足りないかを見せる
-      if (action === "state" && e instanceof UserError) return json({ setup: { ...setup, db: false }, user: null, mailboxes: [], services: [], grants: [] } satisfies AppState);
+      if (action === "state" && e instanceof UserError) return json({ setup: { ...setup, db: false }, user: null, mailboxes: [], services: [], grants: [], mcpUrl: null } satisfies AppState);
       throw e;
     }
 
     /** 画面に出すもの一式（ログインしていなければ、空で返す） */
     if (action === "state") {
-      if (!user) return json({ setup, user: null, mailboxes: [], services: [], grants: [] } satisfies AppState);
-      return json({ setup: { ...setup, tokenKey: tokenKeyConfigured(), llm: hasLlm() }, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)), grants: await listGrants(user.id) } satisfies AppState);
+      if (!user) return json({ setup, user: null, mailboxes: [], services: [], grants: [], mcpUrl: null } satisfies AppState);
+      return json({ setup: { ...setup, tokenKey: tokenKeyConfigured(), llm: hasLlm() }, user: { email: user.email, name: user.name }, ...(await loadLedger(user.id)), grants: await listGrants(user.id), mcpUrl: ((o) => (o ? resourceUrl(o) : null))(selfOrigin(request)) } satisfies AppState);
     }
 
     if (action === "logout") {

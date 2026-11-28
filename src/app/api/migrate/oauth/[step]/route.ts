@@ -3,10 +3,12 @@ import { guardApi, safeEqual } from "@/lib/access/locks";
 import { createSession, currentUser, finishLogin, loginUrl, sessionCookie } from "@/lib/migrate/auth";
 import { UserError } from "@/lib/migrate/db";
 import { authUrl, finishConnect, googleConfigured } from "@/lib/migrate/gmail";
+import { REQUEST_ID } from "@/lib/migrate/oauth";
 
 /**
  * Google とのやり取りの入口。
- * - /api/migrate/oauth/login    … 「Google でログイン」。受け取るのは「誰か」だけ
+ * - /api/migrate/oauth/login    … 「Google でログイン」。受け取るのは「誰か」だけ。
+ *                                  AI 秘書をつなぐ許可の画面から来たとき（?req=申し込みの番号）は、ログインのあと、その画面へ戻す
  * - /api/migrate/oauth/connect  … メールボックスをつなぐ（ログイン済みの利用者だけ）。Gmail を読む許可を受け取る
  * - /api/migrate/oauth/callback … どちらも、Google からここへ戻ってくる（戻り先の登録が 1 つで済む）
  * 始めた手続きの種類・合言葉・（つなぐときは）始めた利用者を、短い間だけ Cookie に入れておき、戻ってきたときに照らし合わせる。
@@ -26,8 +28,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ step
   const denied = await guardApi(request, `/api/migrate/oauth/${step}`);
   if (denied) return denied;
   const url = new URL(request.url);
-  const back = (result: string, cookies: string[] = []) => {
-    const headers = new Headers({ location: `${url.origin}/migrate?${new URLSearchParams({ result })}`, "cache-control": "no-store" });
+  // 戻す先は、このサイトの決まった 2 つの画面だけ（req は形を確かめた番号。自由な URL は受け取らない）
+  const back = (result: string, cookies: string[] = [], req = "") => {
+    const to = REQUEST_ID.test(req) ? `/migrate/authorize?${new URLSearchParams({ req, result })}` : `/migrate?${new URLSearchParams({ result })}`;
+    const headers = new Headers({ location: `${url.origin}${to}`, "cache-control": "no-store" });
     for (const c of [flowCookie("", 0), ...cookies]) headers.append("set-cookie", c);
     return new Response(null, { status: 303, headers });
   };
@@ -41,7 +45,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ step
     if (step === "login") {
       const state = random();
       const nonce = random();
-      return start(loginUrl(url.origin, state, nonce), `login.${state}.${nonce}`);
+      const req = url.searchParams.get("req") ?? "";
+      return start(loginUrl(url.origin, state, nonce), `login.${state}.${nonce}${REQUEST_ID.test(req) ? `.${req}` : ""}`);
     }
 
     if (step === "connect") {
@@ -52,16 +57,17 @@ export async function GET(request: Request, { params }: { params: Promise<{ step
     }
 
     // callback
-    const [kind, saved, extra] = (new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.get("cookie") ?? "")?.[1] ?? "").split(".");
+    const [kind, saved, extra, req = ""] = (new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.get("cookie") ?? "")?.[1] ?? "").split(".");
     const state = url.searchParams.get("state") ?? "";
     if (!state || !saved || !safeEqual(state, saved)) return back("bad-state");
-    if (url.searchParams.get("error")) return back("denied");
+    const authReq = kind === "login" ? req : "";
+    if (url.searchParams.get("error")) return back("denied", [], authReq);
     const code = url.searchParams.get("code");
-    if (!code) return back("denied");
+    if (!code) return back("denied", [], authReq);
 
     if (kind === "login" && extra) {
       const user = await finishLogin(code, url.origin, extra);
-      return back("login", [sessionCookie(await createSession(user.id))]);
+      return back("login", [sessionCookie(await createSession(user.id))], authReq);
     }
     if (kind === "gmail" && extra) {
       // つなぐ先は、手続きを始めた利用者。途中でログインが切れたり、別の人に替わっていたら、つながない

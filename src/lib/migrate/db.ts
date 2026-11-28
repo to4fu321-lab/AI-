@@ -2,6 +2,7 @@ import "server-only";
 import { Pool, type PoolClient } from "pg";
 import type { Kind } from "./classify";
 import { judge } from "./judge";
+import { laneOf } from "./lane";
 import type { Mailbox, Service, Status } from "./types";
 
 /**
@@ -160,6 +161,76 @@ const MIGRATIONS: string[] = [
       );
       create index if not exists migrate_grant_calls_grant_at on migrate_grant_calls (grant_id, at desc);
   `,
+  // 6：OAuth（AI 秘書の側で「ログインして許可する」つなぎ方）。つながり 1 本が migrate_grants の 1 行になる
+  `
+      alter table migrate_grants alter column token_hash drop not null;                        -- OAuth のつながりには、固定の鍵がない
+      alter table migrate_grants add column if not exists kind text not null default 'key';    -- key＝画面で作った鍵／oauth＝OAuth でつないだ
+      alter table migrate_grants add column if not exists client_id text;                      -- つないだ AI 秘書（OAuth のクライアント）
+      alter table migrate_grants add column if not exists resource text;                       -- 合言葉の宛先（この MCP サーバーの URL）
+      -- つなぎに来る AI 秘書の登録（dcr＝相手が自分で登録した／cimd＝相手の公開している文書を読んだ控え）
+      create table if not exists migrate_oauth_clients (
+        client_id text primary key,
+        kind text not null,
+        name text not null default '',
+        redirect_uris text[] not null,
+        created_at timestamptz not null default now(),
+        fetched_at timestamptz not null default now(),
+        last_used_at timestamptz
+      );
+      -- 許可の画面を出すまでの間だけ覚えておく、つなぎたいという申し込み（番号はハッシュで置く）
+      create table if not exists migrate_oauth_requests (
+        id_hash text primary key,
+        client_id text not null,
+        redirect_uri text not null,
+        state text,
+        code_challenge text not null,
+        resource text not null,
+        expires_at timestamptz not null
+      );
+      -- 許可のあと、合言葉と引き換える 1 回かぎりの引換券（ハッシュで置く）
+      create table if not exists migrate_oauth_codes (
+        code_hash text primary key,
+        user_id uuid not null references migrate_users(id) on delete cascade,
+        client_id text not null,
+        client_name text not null default '',
+        redirect_uri text not null,
+        code_challenge text not null,
+        resource text not null,
+        mailbox_ids uuid[],
+        expires_at timestamptz not null,
+        used_at timestamptz,
+        grant_id uuid references migrate_grants(id) on delete set null
+      );
+      -- 合言葉（access＝呼び出しに使う・短い期限／refresh＝新しい合言葉をもらうためのもの・使うたびに取り替える）。ハッシュだけ置く
+      create table if not exists migrate_oauth_tokens (
+        token_hash text primary key,
+        grant_id uuid not null references migrate_grants(id) on delete cascade,
+        kind text not null,
+        expires_at timestamptz not null,
+        used_at timestamptz,                    -- refresh を取り替えた時刻（取り替えたあとにもう一度使われたら、盗まれた印）
+        created_at timestamptz not null default now()
+      );
+      create index if not exists migrate_oauth_tokens_grant on migrate_oauth_tokens (grant_id);
+      -- ログインなしで呼べる入口の、回数の記録（登録や申し込みを大量に送られないように）
+      create table if not exists migrate_rate (
+        id bigint generated always as identity primary key,
+        bucket text not null,
+        at timestamptz not null default now()
+      );
+      create index if not exists migrate_rate_bucket_at on migrate_rate (bucket, at desc);
+  `,
+  // 7：Gmail 以外のメール（Yahoo!メール・OCN など）を IMAP でつなぐ。パスワードは token_enc に、Gmail の合言葉と同じ方式で暗号化して置く
+  `
+      alter table migrate_mailboxes add column if not exists imap_host text;                      -- つなぐ先のサーバー名
+      alter table migrate_mailboxes add column if not exists imap_user text;                      -- ログインに使う名前（アドレスそのもの、または @ より前）
+      alter table migrate_mailboxes add column if not exists provider text not null default '';   -- メール会社の見分け（providers.ts の id。Gmail は空）
+  `,
+  // 8：広告の配信停止の記録
+  `
+      alter table migrate_services add column if not exists unsub_at timestamptz;                 -- 配信停止を試した時刻
+      alter table migrate_services add column if not exists unsub_state text not null default ''; -- done＝こちらで止めた／manual＝利用者が自分で止める
+      alter table migrate_services add column if not exists unsub_url text not null default '';   -- 自分で止めるときに開くページ（メールに書かれていたもの）
+  `,
 ];
 
 async function migrate(pool: Pool): Promise<void> {
@@ -210,6 +281,11 @@ export interface MailboxRow {
   email: string;
   token_enc: string;
   source: string;
+  /** IMAP でつなぐ先と、ログインに使う名前（Gmail では null） */
+  imap_host: string | null;
+  imap_user: string | null;
+  /** メール会社の見分け（providers.ts の id。Gmail は空） */
+  provider: string;
   /** 続きの場所（中身は読み方ごとに違う） */
   scan: Record<string, unknown>;
   scanned: number;
@@ -239,6 +315,9 @@ export interface ServiceRow {
   login_url: string;
   note: string;
   status_at: Date | null;
+  unsub_at: Date | null;
+  unsub_state: string;
+  unsub_url: string;
 }
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
@@ -252,11 +331,14 @@ export function uuid(value: unknown): string {
 
 /** ブラウザに返す形（合言葉は入れない） */
 export function toMailbox(row: MailboxRow, kinds: Partial<Record<Kind, number>> = {}): Mailbox {
-  return { id: row.id, email: row.email, scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds, retiring: row.retiring, graduation: null };
+  return { id: row.id, email: row.email, provider: row.source === "gmail-api" ? "gmail" : row.provider || "other", scanned: row.scanned, scanning: row.requested, remaining: row.remaining, last_scan: iso(row.last_scan), error: row.error, kinds, retiring: row.retiring, graduation: null };
 }
 
 export function toService(row: ServiceRow, stillArriving: Service["stillArriving"] = null): Service {
+  const judgment = judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {}, count: row.count, firstAt: iso(row.first_at), lastAt: iso(row.last_at) });
   return {
+    lane: laneOf(judgment, row.signals ?? {}),
+    unsub: row.unsub_at ? { at: row.unsub_at.toISOString(), state: row.unsub_state === "done" ? "done" : "manual", url: row.unsub_url } : null,
     status_at: iso(row.status_at),
     stillArriving,
     id: row.id,
@@ -267,7 +349,7 @@ export function toService(row: ServiceRow, stillArriving: Service["stillArriving
     signals: row.signals ?? {},
     signal_last: row.signal_last ?? {},
     subjects: (row.subjects ?? []).map((x) => (typeof x === "string" ? x : x.s)),
-    judgment: judge({ signals: row.signals ?? {}, signalLast: row.signal_last ?? {}, count: row.count, firstAt: iso(row.first_at), lastAt: iso(row.last_at) }),
+    judgment,
     first_at: iso(row.first_at),
     last_at: iso(row.last_at),
     status: row.status,

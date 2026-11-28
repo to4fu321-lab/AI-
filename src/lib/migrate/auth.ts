@@ -148,7 +148,7 @@ export async function destroySession(request: Request): Promise<void> {
  */
 export async function deleteAccount(userId: string): Promise<void> {
   const pool = await db();
-  const boxes = await pool.query<Pick<MailboxRow, "token_enc" | "user_id" | "email">>("select token_enc, user_id, email from migrate_mailboxes where user_id = $1", [userId]);
+  const boxes = await pool.query<Pick<MailboxRow, "token_enc" | "user_id" | "email" | "source">>("select token_enc, user_id, email, source from migrate_mailboxes where user_id = $1", [userId]);
   await Promise.all(boxes.rows.map((b) => revoke(b)));
   await pool.query("delete from migrate_users where id = $1", [userId]);
 }

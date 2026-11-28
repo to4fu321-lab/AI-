@@ -41,6 +41,15 @@ async function call(token: string, path: string): Promise<unknown> {
   }
 }
 
+/** メール 1 通の、指定したヘッダだけを読む（同じ名前のヘッダが複数あれば、上から順に全部） */
+export async function messageHeaders(token: string, id: string, names: string[]): Promise<Record<string, string[]>> {
+  const q = names.map((n) => `metadataHeaders=${encodeURIComponent(n)}`).join("&");
+  const m = (await call(token, `/messages/${encodeURIComponent(id)}?format=metadata&${q}&fields=payload/headers`)) as { payload?: { headers?: { name: string; value: string }[] } };
+  const out: Record<string, string[]> = {};
+  for (const h of m.payload?.headers ?? []) (out[h.name.toLowerCase()] ??= []).push(h.value);
+  return out;
+}
+
 async function readHeader(token: string, id: string): Promise<Header | null> {
   const m = (await call(token, `/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Delivered-To&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence&fields=internalDate,labelIds,payload/headers`).catch((e) => {
     if (e instanceof UserError || e instanceof RetryLater) throw e;

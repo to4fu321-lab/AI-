@@ -6,6 +6,7 @@ import { KINDS, type Kind } from "@/lib/migrate/classify";
 import { QUIET_DAYS, type Graduation } from "@/lib/migrate/graduate";
 import { LEVEL_LABEL, type Level } from "@/lib/migrate/judge";
 import type { Grant } from "@/lib/migrate/grants";
+import { providerFor } from "@/lib/migrate/providers";
 import { KIND_LABEL, STATUS_LABEL, type AppState, type Mailbox, type Service, type Status } from "@/lib/migrate/types";
 
 /** アカウント引っ越しの API を呼ぶ（失敗したら、画面に出せる日本語の理由つきで投げる） */
@@ -59,6 +60,8 @@ export function MigrateApp() {
   const [box, setBox] = useState("");
   const [level, setLevel] = useState<Level | "">("");
   const [origin, setOrigin] = useState("");
+  // 細かい一覧は、最初はしまっておく（見たい人だけ開く）
+  const [showList, setShowList] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -200,6 +203,15 @@ export function MigrateApp() {
               <p className="mt-1 text-xs text-neutral-500">
                 読むだけの許可でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。認証コードやログイン通知のメールは、件名を保存しません。それ以外の件名も、番号や URL は伏せてから記録します。
               </p>
+              {ready && state.setup.tokenKey && (
+                <ImapConnect
+                  onDone={async (email) => {
+                    setError("");
+                    setNotice(`${email} をつなぎました。「調べる」を押すと、登録済みのサービスを洗い出します。`);
+                    await reload();
+                  }}
+                />
+              )}
               {!state.setup.llm && (
                 <p className="mt-2 text-xs text-neutral-500">
                   AI による仕上げの分類は、まだ使えません（Vercel の環境変数 <code>ANTHROPIC_API_KEY</code> が未設定）。決まりで分類できなかったメールは「そのほかのお知らせ」のままになります。
@@ -267,7 +279,30 @@ export function MigrateApp() {
             </section>
 
             {state.services.length > 0 && (
-              <section className="space-y-3">
+              <TodoPanel
+                services={state.services}
+                reload={reload}
+                setError={setError}
+                setNotice={setNotice}
+                onShowMove={() => {
+                  setTab("new");
+                  setLevel("depends");
+                  setShowList(true);
+                  // 一覧が出てから、そこまで動かす
+                  setTimeout(() => document.getElementById("mg-list")?.scrollIntoView({ behavior: "smooth" }), 50);
+                }}
+              />
+            )}
+
+            {state.services.length > 0 && !showList && (
+              <button type="button" className={`${ghost} w-full`} onClick={() => setShowList(true)}>
+                すべてのサービスを 1 件ずつ見る（{state.services.filter((s) => s.count > 0 || s.status !== "new").length} 件）
+              </button>
+            )}
+
+            {state.services.length > 0 && showList && (
+              <section id="mg-list" className="space-y-3">
+                <h2 className="pt-2 text-base font-black">1 件ずつ見る</h2>
                 <nav className="flex gap-1 rounded-full bg-neutral-200/70 p-1 text-xs font-bold dark:bg-neutral-800">
                   {STATUSES.map((k) => (
                     <button key={k} type="button" onClick={() => setTab(k)} className={`flex-1 rounded-full px-2 py-2 ${tab === k ? "bg-white shadow dark:bg-neutral-950" : "text-neutral-500"}`}>
@@ -384,6 +419,234 @@ function ServiceCard({ s, email, onStatus, onEditUrl }: { s: Service; email?: st
 }
 
 /**
+ * 「やること」。サービスを先に 4 つに仕分けておき、利用者は大きなボタンを 1 つずつ押すだけで進められるようにする。
+ * 細かく見たい人だけ、「中身を見る」や、下の「1 件ずつ見る」を使う
+ */
+function TodoPanel({ services, reload, setError, setNotice, onShowMove }: { services: Service[]; reload: () => Promise<void>; setError: (m: string) => void; setNotice: (m: string) => void; onShowMove: () => void }) {
+  const [busy, setBusy] = useState("");
+  const [except, setExcept] = useState<Set<string>>(new Set());
+  const live = services.filter((s) => s.count > 0);
+  const fresh = live.filter((s) => s.status === "new");
+  const ads = fresh.filter((s) => s.lane === "stop" && !s.unsub);
+  const manual = live.filter((s) => s.unsub?.state === "manual" && s.status === "new");
+  const stopped = live.filter((s) => s.unsub?.state === "done").length;
+  const unused = fresh.filter((s) => s.lane === "quit");
+  const move = live.filter((s) => s.lane === "move" && (s.status === "new" || s.status === "move"));
+  const picked = (list: Service[]) => list.filter((s) => !except.has(s.id)).length;
+  const toggle = (id: string) =>
+    setExcept((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  const run = async (action: "stopAds" | "skipUnused", list: Service[]) => {
+    setBusy(action);
+    setError("");
+    try {
+      const r = await api<{ stopped?: number; manual?: number; remaining?: number; skipped?: number }>(action, { except: list.filter((s) => except.has(s.id)).map((s) => s.id) });
+      if (action === "stopAds") {
+        setNotice(
+          `${r.stopped ?? 0} 件の配信を止めました。` +
+            (r.manual ? `${r.manual} 件は、こちらからは止められませんでした（下の「自分で止める」に出ています）。` : "") +
+            (r.remaining ? `あと ${r.remaining} 件あります。もう一度押してください。` : "") +
+            "止まるまで、数日かかることがあります。",
+        );
+      } else setNotice(`${r.skipped ?? 0} 件を「移さない」にしました。`);
+    } catch (e) {
+      setError(message(e));
+    }
+    setBusy("");
+    await reload();
+  };
+
+  const rows = (list: Service[]) => (
+    <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto text-xs">
+      {list.map((s) => (
+        <li key={s.id}>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={!except.has(s.id)} onChange={() => toggle(s.id)} />
+            <span className="min-w-0 break-all">
+              <b>{s.domain}</b>
+              <span className="ml-1 text-neutral-500">{s.count} 通 ／ {s.judgment.reasons[0]}</span>
+            </span>
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
+
+  if (!ads.length && !manual.length && !unused.length && !move.length && !stopped) return null;
+  return (
+    <section className="space-y-3">
+      <h2 className="text-base font-black">やること</h2>
+
+      {ads.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">① 広告メールを止める（{ads.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">広告だけを送ってくる差出人です。ボタンを押すと、こちらから配信停止を申し込みます。必要なメール（ログインや請求）が届いている所は、ここには入っていません。</p>
+          <button type="button" className={`${primary} mt-3`} disabled={!!busy || picked(ads) === 0} onClick={() => void run("stopAds", ads)}>
+            {busy === "stopAds" ? "止めています…" : `まとめて止める（${picked(ads)} 件）`}
+          </button>
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer font-semibold text-neutral-600 dark:text-neutral-300">中身を見る（残したいものは、チェックを外す）</summary>
+            {rows(ads)}
+          </details>
+        </div>
+      )}
+
+      {manual.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">自分で止める（{manual.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">こちらからは止められなかった差出人です。ページを開いて止めるか、届いたメールのいちばん下にある「配信停止」から止めてください。</p>
+          <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto text-xs">
+            {manual.map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center justify-between gap-2">
+                <b className="break-all">{s.domain}</b>
+                {s.unsub?.url ? (
+                  <a className="underline" href={s.unsub.url} target="_blank" rel="noreferrer noopener">
+                    配信停止のページを開く
+                  </a>
+                ) : (
+                  <span className="text-neutral-500">メールの下の「配信停止」から</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {unused.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">② 使っていないサービスを外す（{unused.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">登録した跡はありますが、最近は使った様子がありません。「移さない」にすると、新しいアドレスへ移す対象から外れます（退会はしません。あとで戻せます）。</p>
+          <button type="button" className={`${primary} mt-3`} disabled={!!busy || picked(unused) === 0} onClick={() => void run("skipUnused", unused)}>
+            {busy === "skipUnused" ? "外しています…" : `まとめて「移さない」にする（${picked(unused)} 件）`}
+          </button>
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer font-semibold text-neutral-600 dark:text-neutral-300">中身を見る（まだ使っているものは、チェックを外す）</summary>
+            {rows(unused)}
+          </details>
+        </div>
+      )}
+
+      {move.length > 0 && (
+        <div className={card}>
+          <p className="text-sm font-black">③ 新しいアドレスに移す（{move.length} 件）</p>
+          <p className="mt-1 text-xs text-neutral-500">今も使っていて、このアドレスに頼っているサービスです。1 件ずつ、登録のメールアドレスを新しいものに変えていきます。</p>
+          <button type="button" className={`${primary} mt-3`} onClick={onShowMove}>
+            1 件ずつ進める
+          </button>
+        </div>
+      )}
+
+      {stopped > 0 && <p className="text-xs text-neutral-500">これまでに {stopped} 件の配信を止めました。</p>}
+    </section>
+  );
+}
+
+/**
+ * Gmail 以外のメール（Yahoo!メール・OCN など）を、アドレスとパスワードでつなぐ入力欄。
+ * パスワードは、つなぐときにサーバーへ 1 回送るだけ（画面には残さない。サーバーでは暗号化して置く）
+ */
+function ImapConnect({ onDone }: { onDone: (email: string) => Promise<void> }) {
+  const [shown, setShown] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [host, setHost] = useState("");
+  const [login, setLogin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const provider = useMemo(() => providerFor(email), [email]);
+  const hasDomain = /@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const isGmail = /@(gmail|googlemail)\.com$/i.test(email.trim());
+
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await api<{ email: string }>("imapConnect", { email, password, host, login });
+      setPassword("");
+      setEmail("");
+      setHost("");
+      setLogin("");
+      setShown(false);
+      await onDone(r.email);
+    } catch (e) {
+      setPassword("");
+      setError(message(e));
+    }
+    setBusy(false);
+  };
+
+  if (!shown) {
+    return (
+      <button type="button" className={`${ghost} mt-3`} onClick={() => setShown(true)}>
+        ＋ ほかのメールをつなぐ（Yahoo!メール・プロバイダのメールなど）
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 space-y-2 rounded-xl bg-neutral-100 p-3 text-xs dark:bg-neutral-800/60">
+      <p className="font-black">ほかのメールをつなぐ</p>
+      <p className="text-neutral-500">
+        メールソフトと同じ方法（IMAP）で、読むだけの開き方でつなぎます。読むのは差出人・件名・日付などのヘッダだけで、本文は読みません。パスワードは暗号化して預かり、「つながりを切る」で消えます。
+      </p>
+      <label className="block font-semibold">
+        メールアドレス
+        <input className={`${input} mt-1`} type="email" autoComplete="off" value={email} maxLength={200} onChange={(e) => setEmail(e.target.value)} />
+      </label>
+      {isGmail && <p className="font-semibold text-amber-700 dark:text-amber-300">Gmail は、上の「＋ Gmail をつなぐ」からつないでください（パスワードを預からずに済みます）。</p>}
+      {provider?.blocked && <p className="font-semibold text-amber-700 dark:text-amber-300">{provider.blocked}</p>}
+      {provider && !provider.blocked && (
+        <div className="rounded-lg bg-white/70 p-2 dark:bg-black/30">
+          <p className="font-semibold">{provider.name} をつなぐ前に</p>
+          {provider.steps && (
+            <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+              {provider.steps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+          )}
+          {provider.helpUrl && (
+            <a className="mt-1 inline-block underline" href={provider.helpUrl} target="_blank" rel="noreferrer noopener">
+              {provider.name} の公式の案内
+            </a>
+          )}
+          {provider.caution && <p className="mt-2 rounded-lg bg-amber-100 p-2 text-amber-900 dark:bg-amber-950 dark:text-amber-100">{provider.caution}</p>}
+        </div>
+      )}
+      {hasDomain && !isGmail && !provider?.blocked && !provider?.host && (
+        <label className="block font-semibold">
+          IMAP サーバー（受信メールサーバー）の名前
+          <input className={`${input} mt-1`} autoComplete="off" placeholder="例：imap.example.jp" value={host} maxLength={253} onChange={(e) => setHost(e.target.value)} />
+          <span className="mt-1 block font-normal text-neutral-500">メール会社の「メールソフトの設定」の案内に書いてあります。暗号化された接続（ポート 993）だけに対応しています。</span>
+        </label>
+      )}
+      {provider?.user === "ask" && (
+        <label className="block font-semibold">
+          {provider.userLabel ?? "ログインに使う ID"}
+          <input className={`${input} mt-1`} autoComplete="off" value={login} maxLength={200} onChange={(e) => setLogin(e.target.value)} />
+        </label>
+      )}
+      <label className="block font-semibold">
+        {provider?.passwordLabel ?? "パスワード（メール用のパスワードがある会社では、そちら）"}
+        <input className={`${input} mt-1`} type="password" autoComplete="off" value={password} maxLength={256} onChange={(e) => setPassword(e.target.value)} />
+      </label>
+      {error && <p className="font-semibold text-rose-700 dark:text-rose-300">{error}</p>}
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={primary} disabled={busy || !hasDomain || !password || isGmail || !!provider?.blocked} onClick={() => void submit()}>
+          {busy ? "確かめています…" : "つなぐ"}
+        </button>
+        <button type="button" className={ghost} disabled={busy} onClick={() => setShown(false)}>
+          やめる
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * AI 秘書（Claude Desktop・Claude Code など）とつなぐ鍵。
  * 作った鍵は、その場で 1 回だけ見せる（閉じたら二度と見られない。なくしたら取り消して作り直す）
  */
@@ -392,7 +655,8 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
   const [scope, setScope] = useState<string[] | null>(null);
   const [issued, setIssued] = useState<{ token: string; grant: Grant } | null>(null);
   const [busy, setBusy] = useState(false);
-  const url = `${origin}/api/mcp/migrate`;
+  // AI 秘書に教える URL は、サーバーが決めた住所を使う（許可の手続きは、この住所と 1 文字も違わないときだけ通る）
+  const url = state.mcpUrl ?? `${origin}/api/mcp/migrate`;
 
   const create = async () => {
     setBusy(true);
@@ -406,7 +670,7 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
     setBusy(false);
   };
   const revoke = async (g: Grant) => {
-    if (!confirm(`「${g.name}」の鍵を取り消します。この鍵を使っている AI 秘書は、すぐに使えなくなります。`)) return;
+    if (!confirm(g.kind === "oauth" ? `「${g.name}」とのつながりを取り消します。この AI 秘書は、すぐに読めなくなります。` : `「${g.name}」の鍵を取り消します。この鍵を使っている AI 秘書は、すぐに使えなくなります。`)) return;
     try {
       await api("grantRevoke", { id: g.id });
       if (issued?.grant.id === g.id) setIssued(null);
@@ -425,8 +689,19 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
     <section className={card}>
       <h2 className="text-base font-black">AI 秘書とつなぐ（MCP）</h2>
       <p className="mt-1 text-xs text-neutral-500">
-        Claude Desktop や Claude Code などの AI 秘書から、つないだアドレスの台帳と、メールの記録（ヘッダだけ）を読めるようにします。鍵ごとに、見せるアドレスを選べます。鍵はいつでも取り消せます。
+        Claude などの AI 秘書から、つないだアドレスの台帳と、メールの記録（ヘッダだけ）を読めるようにします。つながりごとに、見せるアドレスを選べます。いつでも取り消せます。
       </p>
+
+      <div className="mt-3 rounded-xl bg-emerald-50 p-3 text-xs dark:bg-emerald-950/40">
+        <p className="font-black">かんたんなつなぎ方（Claude のアプリ・claude.ai）</p>
+        <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+          <li>Claude の設定の「コネクタ」で「カスタムコネクタを追加」を選ぶ</li>
+          <li>下の URL を貼って追加し、「接続」を押す</li>
+          <li>この画面と同じログインで、見せるアドレスを選んで「許可する」</li>
+        </ol>
+        <code className="mt-2 block break-all rounded bg-white/70 p-2 dark:bg-black/30">{url}</code>
+        <p className="mt-2 text-neutral-500">鍵を貼る必要はありません。Claude Code では <code>claude mcp add --transport http account-migrate {url}</code> のあと、<code>/mcp</code> から許可します。</p>
+      </div>
 
       {issued && (
         <div className="mt-3 rounded-xl bg-amber-100 p-3 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
@@ -451,7 +726,10 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
           {state.grants.map((g) => (
             <li key={g.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-neutral-100 p-3 text-xs dark:bg-neutral-800/60">
               <div className="min-w-0">
-                <p className="font-bold">{g.name}<span className="ml-2 font-normal text-neutral-500">{g.hint}…</span></p>
+                <p className="font-bold break-all">
+                  {g.name}
+                  <span className="ml-2 font-normal text-neutral-500">{g.kind === "oauth" ? `ログインして許可${g.verifiedHost ? `（${g.verifiedHost}）` : "（身元は未確認）"}` : `${g.hint}…`}</span>
+                </p>
                 <p className="mt-0.5 text-neutral-500">
                   見せるアドレス：{g.mailboxes ? g.mailboxes.join("、") || "（なし）" : "すべて"} ／ 最後に使った日：{g.last_used_at ? day(g.last_used_at) : "まだ"} ／ 直近 24 時間 {g.calls24h} 回
                 </p>
@@ -463,6 +741,7 @@ function AgentsPanel({ state, origin, reload, setError }: { state: AppState; ori
       )}
 
       <div className="mt-3 space-y-2 text-xs">
+        <p className="font-black">鍵でつなぐ（許可の画面を出せない AI 秘書や、自分で設定を書くとき）</p>
         <label className="block font-semibold">
           鍵の名前（どの AI 秘書に渡すか）
           <input className={`${input} mt-1`} value={name} maxLength={40} onChange={(e) => setName(e.target.value)} />
